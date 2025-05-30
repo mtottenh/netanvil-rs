@@ -1,10 +1,10 @@
 # 2. Core Trait Definitions
 
-## 2.2 Request Scheduler with Metrics Integration
+## 2.2 Request Scheduler with Bernoulli Sampling
 
-Request scheduling is a critical component for statistically valid load testing. The scheduler determines exactly when requests should be issued to maintain specified arrival patterns and prevent coordinated omission, while also providing robust metrics for monitoring and analysis.
+The scheduler component determines when requests should be issued to maintain specified arrival patterns and prevent coordinated omission. Additionally, it now makes unbiased sampling decisions using Bernoulli sampling (uniform random sampling) before request execution, ensuring statistical validity regardless of system performance.
 
-### 2.2.1 Scheduler Metrics and Registration
+### 2.2.1 Scheduler Metrics with Sampling Statistics
 
 ```rust
 /// Lock-free metrics collection for scheduler
@@ -26,6 +26,12 @@ pub struct SchedulerMetrics {
     
     /// Maximum observed scheduling delay (ns)
     max_delay_ns: AtomicU64,
+    
+    /// Number of requests marked for sampling
+    sampled_count: AtomicU64,
+    
+    /// Current sampling rate (0.0-1.0 stored as percentage * 1000)
+    sampling_rate: AtomicU32,
     
     /// Histogram for inter-arrival times (μs)
     /// Protected by RwLock but updated selectively to reduce contention
@@ -55,6 +61,8 @@ impl SchedulerMetrics {
             delayed_count: AtomicU64::new(0),
             delay_sum_ns: AtomicU64::new(0),
             max_delay_ns: AtomicU64::new(0),
+            sampled_count: AtomicU64::new(0),
+            sampling_rate: AtomicU32::new(0), // Default 0%
             inter_arrival_histogram: Arc::new(RwLock::new(Histogram::<u64>::new(3).unwrap())),
             delay_histogram: Arc::new(RwLock::new(Histogram::<u64>::new(3).unwrap())),
             timer_jitter_count: AtomicU64::new(0),
@@ -66,14 +74,31 @@ impl SchedulerMetrics {
     }
     
     /// Record a scheduled request
-    pub fn record_request(&self, is_warmup: bool) {
+    pub fn record_request(&self, is_warmup: bool, is_sampled: bool) {
         self.scheduled_count.fetch_add(1, Ordering::Relaxed);
         
         if is_warmup {
             self.warmup_count.fetch_add(1, Ordering::Relaxed);
         }
         
+        if is_sampled {
+            self.sampled_count.fetch_add(1, Ordering::Relaxed);
+        }
+        
         self.update_timestamp();
+    }
+    
+    /// Set the sampling rate
+    pub fn set_sampling_rate(&self, rate: f64) {
+        // Store as integer percentage * 1000 for atomic storage (0-100000)
+        let rate_int = (rate * 100000.0) as u32;
+        self.sampling_rate.store(rate_int, Ordering::Relaxed);
+    }
+    
+    /// Get the current sampling rate
+    pub fn get_sampling_rate(&self) -> f64 {
+        let rate_int = self.sampling_rate.load(Ordering::Relaxed);
+        rate_int as f64 / 100000.0
     }
     
     /// Record an inter-arrival interval
@@ -166,6 +191,20 @@ impl SchedulerMetrics {
         metrics.insert("delayed_count".to_string(),
                       MetricValue::Counter(self.delayed_count.load(Ordering::Relaxed)));
         
+        // Sampling metrics
+        metrics.insert("sampled_count".to_string(),
+                      MetricValue::Counter(self.sampled_count.load(Ordering::Relaxed)));
+                      
+        metrics.insert("sampling_rate".to_string(),
+                      MetricValue::Float(self.get_sampling_rate()));
+                      
+        let total = self.scheduled_count.load(Ordering::Relaxed);
+        let sampled = self.sampled_count.load(Ordering::Relaxed);
+        let actual_rate = if total > 0 { sampled as f64 / total as f64 } else { 0.0 };
+        
+        metrics.insert("actual_sampling_rate".to_string(),
+                      MetricValue::Float(actual_rate));
+        
         // Calculate derived metrics
         let delayed = self.delayed_count.load(Ordering::Relaxed);
         metrics.insert("avg_delay_ns".to_string(),
@@ -218,7 +257,7 @@ impl SchedulerMetrics {
 }
 ```
 
-### 2.2.2 Request Scheduler Interface
+### 2.2.2 Request Scheduler Interface with Sampling
 
 ```rust
 /// Interface for scheduling requests
@@ -232,6 +271,12 @@ pub trait RequestScheduler: MetricsProvider + Send + Sync {
         profiler: Option<Arc<dyn TransactionProfiler>>,
     );
     
+    /// Set the sampling rate (0.0-1.0)
+    fn set_sampling_rate(&self, rate: f64);
+    
+    /// Get the current sampling rate
+    fn get_sampling_rate(&self) -> f64;
+    
     /// Signal the scheduler to terminate early
     fn terminate(&self);
     
@@ -239,7 +284,7 @@ pub trait RequestScheduler: MetricsProvider + Send + Sync {
     fn get_scheduler_type(&self) -> SchedulerType;
 }
 
-/// A ticket representing a scheduled request time
+/// A ticket representing a scheduled request time with sampling decision
 #[derive(Debug, Clone)]
 pub struct SchedulerTicket {
     /// Unique identifier for this request
@@ -248,6 +293,9 @@ pub struct SchedulerTicket {
     pub scheduled_time: Instant,
     /// Whether this is a warmup request (not counted in stats)
     pub is_warmup: bool,
+    /// Whether this request should be sampled for detailed analysis
+    /// Decision made at scheduling time for unbiased sampling
+    pub should_sample: bool,
 }
 
 /// Types of request schedulers
@@ -259,6 +307,21 @@ pub enum SchedulerType {
     Poisson,
     /// Custom scheduler type
     Custom(u32),
+}
+
+/// Sampling configuration
+#[derive(Debug, Clone)]
+pub struct SamplingConfig {
+    /// Target sampling rate (0.0-1.0)
+    pub target_rate: f64,
+}
+
+impl Default for SamplingConfig {
+    fn default() -> Self {
+        Self {
+            target_rate: 0.01, // 1% default sampling rate
+        }
+    }
 }
 ```
 
@@ -348,7 +411,7 @@ impl PrecisionTimer {
 }
 ```
 
-### 2.2.4 Poisson Process Scheduler With Metrics Integration
+### 2.2.4 Poisson Process Scheduler With Bernoulli Sampling
 
 ```rust
 /// Scheduler that generates requests following a Poisson process
@@ -359,8 +422,11 @@ pub struct PoissonScheduler {
     /// Scheduler state
     state: Arc<RwLock<SchedulerState>>,
     
-    /// RNG for exponential distribution
+    /// RNG for exponential distribution and sampling decisions
     rng: Arc<Mutex<SmallRng>>,
+    
+    /// Sampling configuration
+    sampling_config: Arc<RwLock<SamplingConfig>>,
     
     /// Precision timer for accurate scheduling
     timer: Arc<PrecisionTimer>,
@@ -391,9 +457,11 @@ impl PoissonScheduler {
     pub fn new(
         id: String,
         tick_resolution_us: u64, 
-        jitter_threshold_ns: u64
+        jitter_threshold_ns: u64,
+        sampling_config: SamplingConfig,
     ) -> Self {
         let metrics = Arc::new(SchedulerMetrics::new(id.clone()));
+        metrics.set_sampling_rate(sampling_config.target_rate);
         
         Self {
             id,
@@ -403,6 +471,7 @@ impl PoissonScheduler {
                 last_request_time: Instant::now(),
             })),
             rng: Arc::new(Mutex::new(SmallRng::from_entropy())),
+            sampling_config: Arc::new(RwLock::new(sampling_config)),
             timer: Arc::new(PrecisionTimer::new(
                 Duration::from_micros(tick_resolution_us),
                 Duration::from_nanos(jitter_threshold_ns),
@@ -419,6 +488,16 @@ impl PoissonScheduler {
         let mut rng = self.rng.lock().unwrap();
         let u: f64 = rng.gen();
         -f64::ln(1.0 - u) / rate_per_ns
+    }
+    
+    /// Make an unbiased Bernoulli sampling decision
+    /// This implements uniform random sampling with a fixed probability
+    fn make_sampling_decision(&self) -> bool {
+        let sampling_config = self.sampling_config.read().unwrap();
+        let mut rng = self.rng.lock().unwrap();
+        
+        // Simple Bernoulli trial with probability equal to the target sampling rate
+        rng.gen::<f64>() < sampling_config.target_rate
     }
     
     /// Register with metrics registry
@@ -484,13 +563,22 @@ impl RequestScheduler for PoissonScheduler {
             // Sleep precisely until next request time
             self.timer.sleep_until(scheduled_time).await;
             
-            // Generate scheduler ticket
-            let (id, is_warmup) = {
+            // Generate scheduler ticket with sampling decision
+            let (id, is_warmup, should_sample) = {
                 let mut state = self.state.write().unwrap();
                 let id = state.next_id;
                 state.next_id += 1;
                 state.last_request_time = scheduled_time;
-                (id, !state.warmup_complete)
+                
+                // Make sampling decision before request execution
+                // This ensures unbiased sampling regardless of system performance
+                let should_sample = if !state.warmup_complete {
+                    false  // Don't sample during warmup
+                } else {
+                    self.make_sampling_decision()
+                };
+                
+                (id, !state.warmup_complete, should_sample)
             };
             
             // Create scheduler ticket
@@ -498,10 +586,11 @@ impl RequestScheduler for PoissonScheduler {
                 id,
                 scheduled_time,
                 is_warmup,
+                should_sample,
             };
 
             // Record metrics
-            self.metrics.record_request(is_warmup);
+            self.metrics.record_request(is_warmup, should_sample);
             self.metrics.record_interval(next_interval_ns as u64);
             
             // Send ticket to downstream components
@@ -517,6 +606,17 @@ impl RequestScheduler for PoissonScheduler {
                 self.metrics.record_delay(delay);
             }
         }
+    }
+    
+    fn set_sampling_rate(&self, rate: f64) {
+        let mut sampling_config = self.sampling_config.write().unwrap();
+        sampling_config.target_rate = rate;
+        self.metrics.set_sampling_rate(rate);
+    }
+    
+    fn get_sampling_rate(&self) -> f64 {
+        let sampling_config = self.sampling_config.read().unwrap();
+        sampling_config.target_rate
     }
     
     fn get_scheduler_type(&self) -> SchedulerType {
@@ -538,7 +638,8 @@ impl MetricsProvider for PoissonScheduler {
                 .unwrap_or_default()
                 .as_secs(),
             metrics: self.metrics.get_snapshot(),
-            status: Some(format!("Poisson Scheduler ({})", self.id)),
+            status: Some(format!("Poisson Scheduler ({}) - Sampling Rate: {:.4}", 
+                                self.id, self.get_sampling_rate())),
         }
     }
     
@@ -552,7 +653,7 @@ impl MetricsProvider for PoissonScheduler {
 }
 ```
 
-### 2.2.5 Constant Rate Scheduler with Metrics Integration
+### 2.2.5 Constant Rate Scheduler with Bernoulli Sampling
 
 ```rust
 /// Scheduler that generates requests at constant intervals
@@ -562,6 +663,12 @@ pub struct ConstantRateScheduler {
     
     /// Scheduler state
     state: Arc<RwLock<SchedulerState>>,
+    
+    /// RNG for sampling decisions
+    rng: Arc<Mutex<SmallRng>>,
+    
+    /// Sampling configuration
+    sampling_config: Arc<RwLock<SamplingConfig>>,
     
     /// Precision timer for accurate scheduling
     timer: Arc<PrecisionTimer>,
@@ -581,9 +688,11 @@ impl ConstantRateScheduler {
     pub fn new(
         id: String,
         tick_resolution_us: u64, 
-        jitter_threshold_ns: u64
+        jitter_threshold_ns: u64,
+        sampling_config: SamplingConfig,
     ) -> Self {
         let metrics = Arc::new(SchedulerMetrics::new(id.clone()));
+        metrics.set_sampling_rate(sampling_config.target_rate);
         
         Self {
             id,
@@ -592,6 +701,8 @@ impl ConstantRateScheduler {
                 warmup_complete: false,
                 last_request_time: Instant::now(),
             })),
+            rng: Arc::new(Mutex::new(SmallRng::from_entropy())),
+            sampling_config: Arc::new(RwLock::new(sampling_config)),
             timer: Arc::new(PrecisionTimer::new(
                 Duration::from_micros(tick_resolution_us),
                 Duration::from_nanos(jitter_threshold_ns),
@@ -601,6 +712,16 @@ impl ConstantRateScheduler {
             active: Arc::new(AtomicBool::new(false)),
             registry_handle: Mutex::new(None),
         }
+    }
+    
+    /// Make an unbiased Bernoulli sampling decision
+    /// This implements uniform random sampling with a fixed probability
+    fn make_sampling_decision(&self) -> bool {
+        let sampling_config = self.sampling_config.read().unwrap();
+        let mut rng = self.rng.lock().unwrap();
+        
+        // Simple Bernoulli trial with probability equal to the target sampling rate
+        rng.gen::<f64>() < sampling_config.target_rate
     }
     
     /// Register with metrics registry
@@ -676,13 +797,22 @@ impl RequestScheduler for ConstantRateScheduler {
                 // Sleep precisely until next request time
                 self.timer.sleep_until(scheduled_time).await;
                 
-                // Generate scheduler ticket
-                let (id, is_warmup) = {
+                // Generate scheduler ticket with sampling decision
+                let (id, is_warmup, should_sample) = {
                     let mut state = self.state.write().unwrap();
                     let id = state.next_id;
                     state.next_id += 1;
                     state.last_request_time = scheduled_time;
-                    (id, !state.warmup_complete)
+                    
+                    // Make sampling decision before request execution
+                    // This ensures unbiased sampling regardless of system performance
+                    let should_sample = if !state.warmup_complete {
+                        false  // Don't sample during warmup
+                    } else {
+                        self.make_sampling_decision()
+                    };
+                    
+                    (id, !state.warmup_complete, should_sample)
                 };
                 
                 // Create scheduler ticket
@@ -690,10 +820,11 @@ impl RequestScheduler for ConstantRateScheduler {
                     id,
                     scheduled_time,
                     is_warmup,
+                    should_sample,
                 };
 
                 // Record metrics
-                self.metrics.record_request(is_warmup);
+                self.metrics.record_request(is_warmup, should_sample);
                 self.metrics.record_interval(interval_ns);
                 
                 // Send ticket to downstream components
@@ -718,6 +849,17 @@ impl RequestScheduler for ConstantRateScheduler {
         }
     }
     
+    fn set_sampling_rate(&self, rate: f64) {
+        let mut sampling_config = self.sampling_config.write().unwrap();
+        sampling_config.target_rate = rate;
+        self.metrics.set_sampling_rate(rate);
+    }
+    
+    fn get_sampling_rate(&self) -> f64 {
+        let sampling_config = self.sampling_config.read().unwrap();
+        sampling_config.target_rate
+    }
+    
     fn get_scheduler_type(&self) -> SchedulerType {
         SchedulerType::ConstantRate
     }
@@ -737,7 +879,8 @@ impl MetricsProvider for ConstantRateScheduler {
                 .unwrap_or_default()
                 .as_secs(),
             metrics: self.metrics.get_snapshot(),
-            status: Some(format!("ConstantRate Scheduler ({})", self.id)),
+            status: Some(format!("ConstantRate Scheduler ({}) - Sampling Rate: {:.4}", 
+                               self.id, self.get_sampling_rate())),
         }
     }
     
@@ -753,40 +896,16 @@ impl MetricsProvider for ConstantRateScheduler {
 
 ### 2.2.6 Coordinated Omission Prevention
 
-A key feature of the scheduler design is preventing coordinated omission by maintaining the schedule integrity:
+The critical aspects of the scheduler design for preventing coordinated omission are:
+
+1. **Schedule Integrity**: The scheduler maintains the schedule based on intended times rather than actual execution times:
 
 ```rust
-// In PoissonScheduler and ConstantRateScheduler:
-
-// The critical part is that we always base new schedules on the *intended* schedule time,
-// not the *actual* time a request was sent or received a response. This way, if the system
-// under test experiences slowdown, we don't artificially reduce the load.
-
 // Schedule time for next request based on previous scheduled time plus interval
 let scheduled_time = last_time + next_interval;
 
 // Sleep until scheduled time
 self.timer.sleep_until(scheduled_time).await;
-
-// Create ticket with the scheduled time (for latency measurement)
-let ticket = SchedulerTicket {
-    id,
-    scheduled_time, // The intended time, preserved for latency calculation
-    is_warmup,
-};
-
-// Send ticket
-if let Err(_) = ticket_tx.send(ticket).await {
-    // Handle error
-}
-
-// Check if we experienced backpressure
-let now = Instant::now();
-if now > scheduled_time {
-    // Record scheduling delay for metrics, but KEEP the original schedule!
-    let delay = now.duration_since(scheduled_time).as_nanos() as u64;
-    self.metrics.record_delay(delay);
-}
 
 // CRITICAL: Update the last schedule time to the INTENDED time, not actual send time
 {
@@ -795,9 +914,85 @@ if now > scheduled_time {
 }
 ```
 
-This approach ensures proper measurement of service degradation, as the scheduler maintains its original cadence regardless of backpressure from downstream components or system-under-test slowdowns.
+2. **Unbiased Sampling**: Sampling decisions are made at scheduling time, before request execution:
 
-### 2.2.7 Running on a Dedicated Core
+```rust
+// Make sampling decision BEFORE request execution using Bernoulli sampling
+let should_sample = self.make_sampling_decision();
+
+// Create ticket with the scheduled time and sampling decision
+let ticket = SchedulerTicket {
+    id,
+    scheduled_time, // The intended time, preserved for latency calculation
+    is_warmup,
+    should_sample, // Sampling decision preserved in the ticket
+};
+```
+
+This approach ensures proper measurement of service degradation and statistical validity, as both the scheduler cadence and sampling decisions are independent of system performance.
+
+### 2.2.7 Builder Pattern for Scheduler and Sampling Configuration
+
+The framework's builder pattern supports configuring scheduler properties with sampling integration:
+
+```rust
+impl LoadTestBuilder {
+    /// Use a constant rate scheduler
+    pub fn with_constant_rate_scheduler(mut self) -> Self {
+        self.scheduler_type = SchedulerType::ConstantRate;
+        self
+    }
+    
+    /// Use a Poisson process scheduler
+    pub fn with_poisson_scheduler(mut self) -> Self {
+        self.scheduler_type = SchedulerType::Poisson;
+        self
+    }
+    
+    /// Set scheduler timing precision
+    pub fn with_scheduler_timing_precision(
+        mut self,
+        tick_resolution_us: u64,
+        jitter_threshold_ns: u64,
+    ) -> Self {
+        self.scheduler_tick_resolution_us = tick_resolution_us;
+        self.scheduler_jitter_threshold_ns = jitter_threshold_ns;
+        self
+    }
+    
+    /// Set sampling rate
+    pub fn with_sampling_rate(mut self, rate: f64) -> Self {
+        self.sampling_config.target_rate = rate;
+        self
+    }
+    
+    /// Pin scheduler to a specific core
+    pub fn with_scheduler_core_pinning(mut self, core_id: usize) -> Self {
+        self.scheduler_core_id = Some(core_id);
+        self
+    }
+    
+    /// Build the scheduler component
+    fn build_scheduler(&self) -> Arc<dyn RequestScheduler> {
+        // Generate a unique ID for this scheduler
+        let id = format!("scheduler-{}", Uuid::new_v4());
+        
+        // Create scheduler based on type
+        let scheduler = SchedulerFactory::create_scheduler(
+            self.scheduler_type,
+            id,
+            self.scheduler_tick_resolution_us,
+            self.scheduler_jitter_threshold_ns,
+            self.sampling_config.clone(),
+            self.metrics_registry.clone(),
+        );
+        
+        scheduler
+    }
+}
+```
+
+### 2.2.8 Running on a Dedicated Core
 
 For maximum timing precision, the scheduler can be run on a dedicated CPU core:
 
@@ -855,133 +1050,23 @@ pub fn run_scheduler_on_dedicated_core(
 }
 ```
 
-### 2.2.8 Scheduler Factory with Registry Integration
+### 2.2.9 Statistical Validity of Bernoulli Sampling
 
-The framework provides a factory for creating different types of schedulers with metrics registry integration:
+Bernoulli sampling (uniform random sampling with fixed probability) has several statistical advantages:
 
-```rust
-/// Factory for creating schedulers
-pub struct SchedulerFactory;
+1. **Unbiased Representation**: Each request has an equal probability of being selected, regardless of when it occurs.
 
-impl SchedulerFactory {
-    /// Create a scheduler of the specified type
-    pub fn create_scheduler(
-        scheduler_type: SchedulerType,
-        id: String,
-        tick_resolution_us: u64,
-        jitter_threshold_ns: u64,
-        metrics_registry: Option<Arc<dyn MetricsRegistry>>,
-    ) -> Arc<dyn RequestScheduler> {
-        let scheduler: Arc<dyn RequestScheduler> = match scheduler_type {
-            SchedulerType::ConstantRate => {
-                let scheduler = Arc::new(ConstantRateScheduler::new(
-                    id,
-                    tick_resolution_us,
-                    jitter_threshold_ns,
-                ));
-                
-                // Register with metrics registry if provided
-                if let Some(registry) = metrics_registry {
-                    scheduler.register_with_registry(registry);
-                }
-                
-                scheduler
-            },
-            SchedulerType::Poisson => {
-                let scheduler = Arc::new(PoissonScheduler::new(
-                    id,
-                    tick_resolution_us,
-                    jitter_threshold_ns,
-                ));
-                
-                // Register with metrics registry if provided
-                if let Some(registry) = metrics_registry {
-                    scheduler.register_with_registry(registry);
-                }
-                
-                scheduler
-            },
-            SchedulerType::Custom(_) => {
-                panic!("Custom scheduler must be provided directly")
-            },
-        };
-        
-        scheduler
-    }
-    
-    /// Create a scheduler from configuration
-    pub fn from_config(
-        config: &LoadTestConfig,
-        metrics_registry: Option<Arc<dyn MetricsRegistry>>,
-    ) -> Arc<dyn RequestScheduler> {
-        Self::create_scheduler(
-            config.scheduler_type,
-            format!("scheduler-{}", Uuid::new_v4()),
-            config.scheduler_tick_resolution_us,
-            config.scheduler_jitter_threshold_ns,
-            metrics_registry,
-        )
-    }
-}
-```
+2. **Statistical Independence**: The sampling decision for each request is independent of all other decisions.
 
-### 2.2.9 Builder Pattern for Scheduler Configuration
+3. **Simplicity**: The implementation is straightforward and efficient.
 
-The framework's builder pattern supports configuring scheduler properties with metrics integration:
+4. **Well-Understood Properties**: Bernoulli sampling has well-established statistical properties, making it easier to analyze the results.
 
-```rust
-impl LoadTestBuilder {
-    /// Use a constant rate scheduler
-    pub fn with_constant_rate_scheduler(mut self) -> Self {
-        self.scheduler_type = SchedulerType::ConstantRate;
-        self
-    }
-    
-    /// Use a Poisson process scheduler
-    pub fn with_poisson_scheduler(mut self) -> Self {
-        self.scheduler_type = SchedulerType::Poisson;
-        self
-    }
-    
-    /// Set scheduler timing precision
-    pub fn with_scheduler_timing_precision(
-        mut self,
-        tick_resolution_us: u64,
-        jitter_threshold_ns: u64,
-    ) -> Self {
-        self.scheduler_tick_resolution_us = tick_resolution_us;
-        self.scheduler_jitter_threshold_ns = jitter_threshold_ns;
-        self
-    }
-    
-    /// Pin scheduler to a specific core
-    pub fn with_scheduler_core_pinning(mut self, core_id: usize) -> Self {
-        self.scheduler_core_id = Some(core_id);
-        self
-    }
-    
-    /// Build the scheduler component
-    fn build_scheduler(&self) -> Arc<dyn RequestScheduler> {
-        // Generate a unique ID for this scheduler
-        let id = format!("scheduler-{}", Uuid::new_v4());
-        
-        // Create scheduler based on type
-        let scheduler = SchedulerFactory::create_scheduler(
-            self.scheduler_type,
-            id,
-            self.scheduler_tick_resolution_us,
-            self.scheduler_jitter_threshold_ns,
-            self.metrics_registry.clone(),
-        );
-        
-        scheduler
-    }
-}
-```
+By making these sampling decisions at the scheduler level - before request execution - we ensure that the sampling process is not influenced by system behavior or performance, maintaining statistical validity even under heavy load or when the system under test experiences degradation.
 
-### 2.2.10 Accessing Scheduler Metrics 
+### 2.2.10 Monitoring Sampling Behavior 
 
-Scheduler metrics can be accessed through the metrics registry:
+The metrics system allows for comprehensive monitoring of sampling behavior:
 
 ```rust
 /// Access scheduler metrics via registry
@@ -989,35 +1074,64 @@ pub fn get_scheduler_metrics(registry: &Arc<dyn MetricsRegistry>) -> Vec<Compone
     registry.collect_by_type("RequestScheduler")
 }
 
-/// Extract specific scheduler metric
-pub fn get_scheduler_metric(
-    metrics: &HashMap<String, MetricValue>, 
-    key: &str
-) -> Option<&MetricValue> {
-    metrics.get(key)
+/// Get specific sampling metrics
+pub fn get_sampling_metrics(registry: &Arc<dyn MetricsRegistry>) -> HashMap<String, f64> {
+    let mut result = HashMap::new();
+    
+    for metrics in registry.collect_by_type("RequestScheduler") {
+        if let Some(MetricValue::Float(rate)) = 
+            metrics.metrics.get("sampling_rate") {
+            result.insert(format!("{}_target", metrics.component_id), *rate);
+        }
+        
+        if let Some(MetricValue::Float(actual)) = 
+            metrics.metrics.get("actual_sampling_rate") {
+            result.insert(format!("{}_actual", metrics.component_id), *actual);
+        }
+        
+        if let Some(MetricValue::Counter(count)) = 
+            metrics.metrics.get("sampled_count") {
+            result.insert(format!("{}_count", metrics.component_id), *count as f64);
+        }
+    }
+    
+    result
 }
 
-/// Example usage
-pub async fn monitor_scheduler_delays(registry: Arc<dyn MetricsRegistry>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
+/// Monitor sampling rates and verify statistical validity
+pub async fn monitor_sampling_rates(registry: Arc<dyn MetricsRegistry>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(10));
     
     loop {
         interval.tick().await;
         
-        // Get all scheduler metrics
-        let scheduler_metrics = registry.collect_by_type("RequestScheduler");
+        let sampling_metrics = get_sampling_metrics(&registry);
         
-        for metrics in scheduler_metrics {
-            // Extract maximum delay
-            if let Some(MetricValue::Duration(max_delay)) = 
-                get_scheduler_metric(&metrics.metrics, "max_delay_ns") {
+        for (key, value) in sampling_metrics {
+            if key.ends_with("_actual") {
+                let scheduler_id = key.replace("_actual", "");
+                let target = sampling_metrics.get(&format!("{}_target", scheduler_id))
+                    .cloned().unwrap_or(0.0);
+                let count = sampling_metrics.get(&format!("{}_count", scheduler_id))
+                    .cloned().unwrap_or(0.0);
                 
-                println!("Scheduler {}: Max delay = {} ns", 
-                         metrics.component_id, max_delay);
+                println!("Scheduler {}: Target sampling rate: {:.4}, Actual rate: {:.4}, Samples: {}", 
+                         scheduler_id, target, value, count as u64);
                 
-                // Check if delay exceeds threshold
-                if *max_delay > 1_000_000 { // 1ms
-                    println!("Warning: High scheduling delay detected!");
+                // Statistical validity check - actual rate should approach target rate
+                // as sample size increases (Law of Large Numbers)
+                if count > 1000.0 {
+                    // With large sample count, actual rate should be close to target
+                    // Expected standard deviation for Bernoulli distribution:
+                    // sqrt(p*(1-p)/n) where p is probability and n is sample count
+                    let expected_std_dev = (target * (1.0 - target) / count).sqrt();
+                    let deviation = (value - target).abs();
+                    
+                    if deviation > 3.0 * expected_std_dev && target > 0.0 {
+                        // More than 3 standard deviations suggests potential bias
+                        println!("Warning: Actual sampling rate deviates significantly from target");
+                        println!("Deviation: {:.4}, Expected std dev: {:.4}", deviation, expected_std_dev);
+                    }
                 }
             }
         }
@@ -1025,4 +1139,4 @@ pub async fn monitor_scheduler_delays(registry: Arc<dyn MetricsRegistry>) {
 }
 ```
 
-This unified approach to metrics enables comprehensive monitoring of scheduler performance while maintaining the component's primary focus on accurate request scheduling.
+This approach ensures that both the core scheduling logic and the sampling decisions are unbiased and statistically valid, and provides metrics to verify this during testing.

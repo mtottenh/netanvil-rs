@@ -1,0 +1,22 @@
+[package]
+name = "netanvil-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Load test engine: worker, coordinator, schedulers, rate controllers"
+
+[dependencies]
+netanvil-types = { workspace = true }
+netanvil-metrics = { workspace = true }
+compio = { workspace = true }
+flume = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }
+
+[dev-dependencies]
+compio = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+netanvil-http = { workspace = true }

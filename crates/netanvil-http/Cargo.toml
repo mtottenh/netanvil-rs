@@ -1,0 +1,19 @@
+[package]
+name = "netanvil-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "HTTP executor for load testing using compio and cyper"
+
+[dependencies]
+netanvil-types = { workspace = true }
+compio = { workspace = true }
+cyper = { workspace = true }
+http = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+compio = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }

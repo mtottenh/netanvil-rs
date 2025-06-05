@@ -1,0 +1,11 @@
+[package]
+name = "netanvil-metrics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "HDR histogram metrics collection and aggregation"
+
+[dependencies]
+netanvil-types = { workspace = true }
+hdrhistogram = { workspace = true }

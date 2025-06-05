@@ -1,0 +1,21 @@
+[package]
+name = "netanvil-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Command-line interface for netanvil-rs load testing"
+
+[[bin]]
+name = "netanvil-cli"
+path = "src/main.rs"
+
+[dependencies]
+netanvil-types = { workspace = true }
+netanvil-core = { workspace = true }
+netanvil-http = { workspace = true }
+netanvil-metrics = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

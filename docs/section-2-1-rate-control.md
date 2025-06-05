@@ -1,44 +1,83 @@
-# Rate Control System with Metrics Integration and Distributed Load Control
+# Rate Control System with Client Session Integration and Distributed Coordination
 
 ## 1. Introduction
 
-The Rate Control system is a core component of the load testing framework, determining how many requests per second should be generated during test execution. This design combines comprehensive metrics integration for observability with sophisticated distributed load control capabilities, enabling both precise monitoring and coordinated multi-node testing.
+The Rate Control system is a core component of the load testing framework, determining the overall workload level during test execution. This design combines comprehensive metrics integration with sophisticated distributed load control capabilities, enabling precise monitoring, feedback-based control, and multi-node test coordination.
 
 Key features include:
 
 - **Unified Metrics Integration**: Lock-free metrics collection with registry integration
+- **Client Session Management**: Translation of RPS targets to realistic client session behaviors
 - **Advanced Control Algorithms**: PID controllers, step functions, and external signal-based control
-- **Rate Smoothing**: Prevent abrupt changes that could skew results
-- **Saturation Awareness**: Detect and adapt to client-side bottlenecks
+- **Rate Smoothing**: Prevent abrupt changes that could skew results or cause unrealistic traffic patterns
+- **Saturation Awareness**: Detect and adapt to client-side bottlenecks using Transaction Profiler data
 - **Distributed Load Control**: Coordinate rate across multiple nodes with centralized control
 - **Composable Design**: Mix and match controllers, smoothers, and adapters for different scenarios
 
 ## 2. Core Interfaces and Types
 
-### 2.1 Rate Controller with Metrics Integration
+### 2.1 Generic Rate Controller with Static Dispatch
+
+Following the system architecture's preference for static dispatch, we implement rate controllers using generic types rather than trait objects for performance-critical paths.
 
 ```rust
-/// Interface for controllers that determine request rates during the test
-pub trait RateController: MetricsProvider + Send + Sync {
+/// Generic rate controller interface with static dispatch
+pub trait RateController<M, S, C> 
+where 
+    M: MetricsProvider,
+    S: Signal,
+    C: SessionControl,
+{
     /// Get the current target RPS
     fn get_current_rps(&self) -> u64;
 
-    /// Update controller state based on metrics
+    /// Update controller state based on metrics from Results Collector
     fn update(&self, metrics: &RequestMetrics);
-
-    /// Process external control signals if supported
-    fn process_control_signals(&self, signals: &ControlSignalSet) {
-        // Default implementation does nothing
-    }
+    
+    /// Get session control signals for Client Session Manager
+    fn get_session_control_signals(&self) -> C::SessionSignals;
 
     /// Called at the end of the test to get rate history
     fn get_rate_history(&self) -> Vec<(u64, u64)>;
 
     /// Get rate adjustments with reasons
     fn get_rate_adjustments(&self) -> Vec<(u64, RateAdjustment)>;
+    
+    /// Get metrics provider for monitoring
+    fn metrics(&self) -> &M;
+    
+    /// Get signal source for this controller
+    fn signal(&self) -> &S;
 }
 
-/// Metric values captured during the test execution
+/// Signal source for controllers - provides metric values to control algorithm
+pub trait Signal {
+    /// Get the current signal value
+    fn get_value(&self) -> f64;
+    
+    /// Get signal type (for display/metrics)
+    fn get_type(&self) -> &'static str;
+    
+    /// Update signal based on metrics
+    fn update(&mut self, metrics: &RequestMetrics);
+    
+    /// Process any external data if applicable
+    fn process_external_data(&mut self, data: &[u8]) -> Result<(), Box<dyn std::error::Error>>;
+}
+
+/// Session control interface
+pub trait SessionControl {
+    /// Session signals type
+    type SessionSignals;
+    
+    /// Create session signals from RPS target
+    fn create_signals(&self, target_rps: u64, last_rps: u64) -> Self::SessionSignals;
+    
+    /// Update session control based on metrics
+    fn update(&mut self, metrics: &RequestMetrics);
+}
+
+/// Metric values captured during the test execution (from Results Collector)
 #[derive(Debug, Clone)]
 pub struct RequestMetrics {
     /// Timestamp when metrics were collected (ms since test start)
@@ -93,25 +132,557 @@ pub enum AdjustmentReason {
     RateSmoothing,
     /// Distributed coordination adjustment
     DistributedControl,
+    /// Session behavior adjustment
+    SessionBehavior,
     /// Other reason
     Other,
 }
+
+/// Default session control signals from rate controller to session manager
+#[derive(Debug, Clone)]
+pub struct SessionControlSignals {
+    /// Target RPS for the entire system
+    pub target_rps: u64,
+    
+    /// Target session creation rate (new sessions per second)
+    pub session_creation_rate: Option<f64>,
+    
+    /// Target active session count
+    pub target_active_sessions: Option<u64>,
+    
+    /// Session type distribution adjustments (if any)
+    pub session_type_adjustments: Option<HashMap<ClientType, f64>>,
+    
+    /// Whether to prioritize request rate or session fidelity
+    pub prioritize_request_rate: bool,
+    
+    /// Rate change notification for session behavior adjustment
+    pub rate_change_event: Option<RateChangeEvent>,
+}
+
+/// Rate change notification system
+#[derive(Debug, Clone)]
+pub struct RateChangeEvent {
+    /// New target RPS
+    pub new_rps: u64,
+    
+    /// Previous target RPS
+    pub old_rps: u64,
+    
+    /// Reason for the change
+    pub reason: AdjustmentReason,
+    
+    /// Session impact assessment
+    pub session_impact: SessionImpact,
+}
+
+/// Impact of rate changes on session behavior
+#[derive(Debug, Clone)]
+pub enum SessionImpact {
+    /// Add more sessions to increase load
+    AddSessions {
+        /// How many sessions to add
+        count: u64,
+        /// What types of sessions to prioritize
+        priority_types: Vec<ClientType>,
+    },
+    
+    /// Remove sessions to decrease load
+    RemoveSessions {
+        /// How many sessions to remove
+        count: u64,
+        /// Selection strategy for removal
+        strategy: SessionRemovalStrategy,
+    },
+    
+    /// Modify activity in existing sessions
+    ModifyActivityLevel {
+        /// Activity level multiplier (1.0 = no change)
+        multiplier: f64,
+    },
+    
+    /// Gradual change (ramp up/down)
+    GradualChange {
+        /// Duration of transition in milliseconds
+        duration_ms: u64,
+        /// Easing function for transition
+        easing: EasingFunction,
+    },
+}
+
+/// Strategy for removing sessions when decreasing load
+#[derive(Debug, Clone)]
+pub enum SessionRemovalStrategy {
+    /// Remove oldest sessions first
+    OldestFirst,
+    /// Remove newest sessions first
+    NewestFirst,
+    /// Remove randomly
+    Random,
+    /// Remove least active sessions first
+    LeastActiveFirst,
+}
+
+/// Easing function for gradual rate changes
+#[derive(Debug, Clone)]
+pub enum EasingFunction {
+    /// Linear transition
+    Linear,
+    /// Exponential acceleration
+    EaseIn,
+    /// Exponential deceleration
+    EaseOut,
+    /// Smooth sigmoid curve (slow start, fast middle, slow end)
+    EaseInOut,
+}
 ```
 
-### 2.2 Rate Control Modes
+### 2.2 Signal Implementations
 
 ```rust
-/// Modes for controlling request rate
+/// Latency signal providing P99 latency measurements
+pub struct LatencyP99Signal {
+    /// Current value
+    current_value: AtomicF64,
+    /// Historical values
+    history: Arc<RwLock<VecDeque<(u64, f64)>>>,
+    /// Metrics for this signal
+    metrics: Arc<SignalMetrics>,
+}
+
+impl Signal for LatencyP99Signal {
+    fn get_value(&self) -> f64 {
+        self.current_value.load(Ordering::Relaxed)
+    }
+    
+    fn get_type(&self) -> &'static str {
+        "latency_p99"
+    }
+    
+    fn update(&mut self, metrics: &RequestMetrics) {
+        let value = metrics.p99_latency_us as f64;
+        self.current_value.store(value, Ordering::Relaxed);
+        
+        // Update history
+        if let Ok(mut history) = self.history.write() {
+            history.push_back((metrics.timestamp, value));
+            
+            // Keep bounded size
+            while history.len() > 100 {
+                history.pop_front();
+            }
+        }
+        
+        self.metrics.update_value(value);
+    }
+    
+    fn process_external_data(&mut self, _data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        // No external data needed for latency signal
+        Ok(())
+    }
+}
+
+/// Error rate signal 
+pub struct ErrorRateSignal {
+    /// Current value
+    current_value: AtomicF64,
+    /// Historical values
+    history: Arc<RwLock<VecDeque<(u64, f64)>>>,
+    /// Metrics for this signal
+    metrics: Arc<SignalMetrics>,
+}
+
+impl Signal for ErrorRateSignal {
+    fn get_value(&self) -> f64 {
+        self.current_value.load(Ordering::Relaxed)
+    }
+    
+    fn get_type(&self) -> &'static str {
+        "error_rate"
+    }
+    
+    fn update(&mut self, metrics: &RequestMetrics) {
+        let value = metrics.error_rate;
+        self.current_value.store(value, Ordering::Relaxed);
+        
+        // Update history
+        if let Ok(mut history) = self.history.write() {
+            history.push_back((metrics.timestamp, value));
+            
+            // Keep bounded size
+            while history.len() > 100 {
+                history.pop_front();
+            }
+        }
+        
+        self.metrics.update_value(value);
+    }
+    
+    fn process_external_data(&mut self, _data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        // No external data needed for error rate signal
+        Ok(())
+    }
+}
+
+/// Saturation signal that connects to Transaction Profiler
+pub struct SaturationSignal<P: TransactionProfiler> {
+    /// Current value
+    current_value: AtomicF64,
+    /// Historical values
+    history: Arc<RwLock<VecDeque<(u64, f64)>>>,
+    /// Metrics for this signal
+    metrics: Arc<SignalMetrics>,
+    /// Transaction profiler
+    profiler: P,
+}
+
+impl<P: TransactionProfiler> Signal for SaturationSignal<P> {
+    fn get_value(&self) -> f64 {
+        self.current_value.load(Ordering::Relaxed)
+    }
+    
+    fn get_type(&self) -> &'static str {
+        "saturation"
+    }
+    
+    fn update(&mut self, _metrics: &RequestMetrics) {
+        // Get saturation metrics from profiler
+        let saturation = self.profiler.get_saturation_metrics();
+        
+        // Map saturation level to a numerical value
+        let value = match saturation.level {
+            SaturationLevel::None => 0.0,
+            SaturationLevel::Mild => 0.33,
+            SaturationLevel::Moderate => 0.66,
+            SaturationLevel::Severe => 1.0,
+        };
+        
+        self.current_value.store(value, Ordering::Relaxed);
+        
+        // Update history
+        if let Ok(mut history) = self.history.write() {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+                
+            history.push_back((now, value));
+            
+            // Keep bounded size
+            while history.len() > 100 {
+                history.pop_front();
+            }
+        }
+        
+        self.metrics.update_value(value);
+    }
+    
+    fn process_external_data(&mut self, _data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        // No external data needed - profiler provides data
+        Ok(())
+    }
+}
+
+/// External signal that can be connected to any data source
+pub struct ExternalSignal {
+    /// Current value
+    current_value: AtomicF64,
+    /// Historical values
+    history: Arc<RwLock<VecDeque<(u64, f64)>>>,
+    /// Metrics for this signal
+    metrics: Arc<SignalMetrics>,
+    /// Signal name
+    name: String,
+}
+
+impl Signal for ExternalSignal {
+    fn get_value(&self) -> f64 {
+        self.current_value.load(Ordering::Relaxed)
+    }
+    
+    fn get_type(&self) -> &'static str {
+        "external"
+    }
+    
+    fn update(&mut self, _metrics: &RequestMetrics) {
+        // External signals update through process_external_data
+    }
+    
+    fn process_external_data(&mut self, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        // Parse external data as JSON value
+        let value: f64 = serde_json::from_slice(data)?;
+        
+        self.current_value.store(value, Ordering::Relaxed);
+        
+        // Update history
+        if let Ok(mut history) = self.history.write() {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+                
+            history.push_back((now, value));
+            
+            // Keep bounded size
+            while history.len() > 100 {
+                history.pop_front();
+            }
+        }
+        
+        self.metrics.update_value(value);
+        
+        Ok(())
+    }
+}
+```
+
+### 2.3 Generic PID Controller
+
+```rust
+/// Generic PID controller that can work with any signal type
+pub struct PidController<M, S, C>
+where
+    M: MetricsProvider,
+    S: Signal,
+    C: SessionControl,
+{
+    /// Controller ID
+    id: String,
+    
+    /// PID parameters
+    kp: f64,
+    ki: f64,
+    kd: f64,
+    
+    /// Target value (setpoint)
+    target: f64,
+    
+    /// Signal source for measured value
+    signal: S,
+    
+    /// Session control
+    session_control: C,
+    
+    /// Metrics provider
+    metrics: M,
+    
+    /// Minimum RPS
+    min_rps: u64,
+    
+    /// Maximum RPS
+    max_rps: u64,
+    
+    /// Current RPS
+    current_rps: AtomicU64,
+    
+    /// Integral term (accumulated error)
+    integral: Mutex<f64>,
+    
+    /// Last error value for derivative calculation
+    last_error: Mutex<f64>,
+    
+    /// Last update timestamp
+    last_update: AtomicU64,
+    
+    /// Rate adjustment history
+    adjustments: Mutex<Vec<(u64, RateAdjustment)>>,
+    
+    /// Update interval
+    update_interval_ms: u64,
+}
+
+impl<M, S, C> PidController<M, S, C>
+where
+    M: MetricsProvider,
+    S: Signal,
+    C: SessionControl,
+{
+    /// Create a new PID controller
+    pub fn new(
+        id: String,
+        target: f64,
+        kp: f64,
+        ki: f64,
+        kd: f64,
+        signal: S,
+        session_control: C,
+        metrics: M,
+        initial_rps: u64,
+        min_rps: u64,
+        max_rps: u64,
+        update_interval_ms: u64,
+    ) -> Self {
+        Self {
+            id,
+            kp,
+            ki,
+            kd,
+            target,
+            signal,
+            session_control,
+            metrics,
+            min_rps,
+            max_rps,
+            current_rps: AtomicU64::new(initial_rps),
+            integral: Mutex::new(0.0),
+            last_error: Mutex::new(0.0),
+            last_update: AtomicU64::new(0),
+            adjustments: Mutex::new(vec![]),
+            update_interval_ms,
+        }
+    }
+}
+
+impl<M, S, C> RateController<M, S, C> for PidController<M, S, C>
+where
+    M: MetricsProvider,
+    S: Signal,
+    C: SessionControl,
+{
+    fn get_current_rps(&self) -> u64 {
+        self.current_rps.load(Ordering::Relaxed)
+    }
+    
+    fn update(&self, metrics: &RequestMetrics) {
+        // Only update at appropriate intervals
+        let now = metrics.timestamp;
+        let last = self.last_update.load(Ordering::Relaxed);
+        
+        if now - last < self.update_interval_ms {
+            return;
+        }
+        
+        // Update signal with latest metrics
+        let mut signal = self.signal.clone();
+        signal.update(metrics);
+        
+        // Get current value from signal
+        let current_value = signal.get_value();
+        
+        // Calculate error (for most signals, target - current makes sense)
+        // For some signals like error rate, we might need to invert this
+        let error = if signal.get_type() == "error_rate" {
+            // For error rate, lower is better, so invert
+            current_value - self.target
+        } else {
+            // For latency and others, target - current
+            self.target - current_value
+        };
+        
+        // Update integral term
+        let mut integral = self.integral.lock().unwrap();
+        *integral += error * ((now - last) as f64 / 1000.0); // Scale based on time elapsed
+        
+        // Apply anti-windup by clamping integral term
+        let max_integral = (self.max_rps - self.min_rps) as f64 / self.ki;
+        *integral = integral.clamp(-max_integral, max_integral);
+        
+        // Calculate derivative term
+        let derivative = {
+            let mut last_error = self.last_error.lock().unwrap();
+            let dt = (now - last) as f64 / 1000.0;
+            let derivative = if dt > 0.0 {
+                (error - *last_error) / dt
+            } else {
+                0.0
+            };
+            *last_error = error;
+            derivative
+        };
+        
+        // Calculate PID output
+        let p_term = self.kp * error;
+        let i_term = self.ki * *integral;
+        let d_term = self.kd * derivative;
+        let output = p_term + i_term + d_term;
+        
+        // Get current RPS
+        let current_rps = self.current_rps.load(Ordering::Relaxed);
+        
+        // Calculate new RPS
+        let new_rps = (current_rps as f64 + output).round() as u64;
+        let new_rps = new_rps.clamp(self.min_rps, self.max_rps);
+        
+        // Skip update if minimal change
+        if (new_rps as i64 - current_rps as i64).abs() < 2 {
+            return;
+        }
+        
+        // Create context string
+        let context = format!(
+            "Target: {:.2}, Current: {:.2}, Error: {:.2}, P: {:.2}, I: {:.2}, D: {:.2}",
+            self.target, current_value, error, p_term, i_term, d_term
+        );
+        
+        // Store new RPS
+        self.current_rps.store(new_rps, Ordering::Relaxed);
+        
+        // Update timestamp
+        self.last_update.store(now, Ordering::Relaxed);
+        
+        // Record adjustment
+        let adjustment = RateAdjustment {
+            new_rps,
+            old_rps: current_rps,
+            reason: AdjustmentReason::PidControl,
+            context,
+        };
+        
+        let mut adjustments = self.adjustments.lock().unwrap();
+        adjustments.push((now, adjustment));
+        
+        // Update session control
+        let mut session_control = self.session_control.clone();
+        session_control.update(metrics);
+    }
+    
+    fn get_session_control_signals(&self) -> C::SessionSignals {
+        let current_rps = self.current_rps.load(Ordering::Relaxed);
+        let last_rps = if let Some(adj) = self.adjustments.lock().unwrap().last() {
+            adj.1.old_rps
+        } else {
+            current_rps
+        };
+        
+        self.session_control.create_signals(current_rps, last_rps)
+    }
+    
+    fn get_rate_history(&self) -> Vec<(u64, u64)> {
+        let adjustments = self.adjustments.lock().unwrap();
+        adjustments.iter()
+            .map(|(time, adj)| (*time, adj.new_rps))
+            .collect()
+    }
+    
+    fn get_rate_adjustments(&self) -> Vec<(u64, RateAdjustment)> {
+        let adjustments = self.adjustments.lock().unwrap();
+        adjustments.clone()
+    }
+    
+    fn metrics(&self) -> &M {
+        &self.metrics
+    }
+    
+    fn signal(&self) -> &S {
+        &self.signal
+    }
+}
+```
+
+### 2.4 Control Configuration
+
+```rust
+/// Rate control configuration used by factory
 #[derive(Debug, Clone)]
 pub enum RateControlMode {
     /// Keep constant rate
     Static,
-    /// PID controller parameters
+    /// Generic PID controller 
     Pid {
         /// Target metric value (e.g. 200ms for latency)
         target_metric: f64,
-        /// Metric type to control
-        metric_type: MetricType,
+        /// Signal type for input
+        signal_type: SignalType,
         /// Proportional gain
         kp: f64,
         /// Integral gain
@@ -120,36 +691,6 @@ pub enum RateControlMode {
         kd: f64,
         /// Update interval in milliseconds
         update_interval_ms: u64,
-    },
-    /// External signal controlled PID
-    ExternalSignalPid {
-        /// Target metric value
-        target_metric: f64,
-        /// Proportional gain
-        kp: f64,
-        /// Integral gain
-        ki: f64,
-        /// Derivative gain
-        kd: f64,
-        /// Update interval in milliseconds
-        update_interval_ms: u64,
-        /// Signal name to subscribe to
-        signal_name: String,
-    },
-    /// Saturation-aware PID controller
-    SaturationAwarePid {
-        /// Target metric value
-        target_metric: f64,
-        /// Proportional gain
-        kp: f64,
-        /// Integral gain
-        ki: f64,
-        /// Derivative gain
-        kd: f64,
-        /// Update interval in milliseconds
-        update_interval_ms: u64,
-        /// Saturation threshold for adjustment
-        saturation_threshold: f64,
     },
     /// Step function (time in seconds -> RPS)
     StepFunction(Vec<(u64, u64)>),
@@ -157,9 +698,9 @@ pub enum RateControlMode {
     Custom,
 }
 
-/// Types of metrics that can be targeted by the PID controller
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum MetricType {
+/// Types of signals that can be used with PID controller
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalType {
     /// 50th percentile latency
     LatencyP50,
     /// 90th percentile latency
@@ -170,14 +711,220 @@ pub enum MetricType {
     LatencyP99,
     /// Error rate (0.0-1.0)
     ErrorRate,
-    /// Custom metric provided by an external signal
-    ExternalSignal,
+    /// Session count
+    ActiveSessions,
+    /// Saturation level
+    Saturation,
+    /// Custom external signal
+    External(String),
+}
+
+/// Session control configuration
+#[derive(Debug, Clone)]
+pub struct SessionControlConfig {
+    /// Whether to prioritize request rate over session fidelity
+    pub prioritize_request_rate: bool,
+    /// How to ramp up/down load
+    pub ramp_mode: RampMode,
+    /// Whether to apply constant think time across load levels
+    pub constant_think_time: bool,
+    /// Maximum session count
+    pub max_sessions: Option<u64>,
+}
+
+/// Load ramp behavior
+#[derive(Debug, Clone)]
+pub enum RampMode {
+    /// Add/remove sessions to change load
+    AdjustSessionCount,
+    /// Modify think time within sessions
+    AdjustThinkTime,
+    /// Change request pattern within sessions
+    AdjustRequestPattern,
+    /// Combined approach (automatic)
+    Automatic,
 }
 ```
 
-## 3. Rate Controller Metrics
+## 3. Integration with Client Session Manager
 
-### 3.1 Lock-Free Metrics Implementation
+The Rate Controller's primary responsibility is determining the overall load level, but it must translate this into directives that the Client Session Manager can interpret and implement. This section details how the Rate Controller interfaces with the Client Session Manager.
+
+### 3.1 Session Control Signal Flow
+
+```
+┌────────────────┐        ┌───────────────────┐        ┌──────────────────┐
+│ Results        │        │ Rate              │        │ Client Session    │
+│ Collector      │───────>│ Controller        │───────>│ Manager          │
+└────────────────┘metrics └───────────────────┘signals └──────────────────┘
+                                   ^                            │
+                                   │                            │
+                                   └────────────────────────────┘
+                                      session metrics feedback
+```
+
+The Rate Controller sends `SessionControlSignals` to the Client Session Manager which contains:
+- Base target RPS for the entire test
+- Session-specific targets (creation rate, active count)
+- Distribution adjustments for different client types
+- Rate change notifications with behavioral hints
+
+```rust
+impl RateController {
+    /// Get session control signals for Client Session Manager
+    fn get_session_control_signals(&self) -> SessionControlSignals {
+        let current_rps = self.get_current_rps();
+        
+        // Decide how to translate RPS to session behavior
+        let session_creation_rate = self.calculate_session_creation_rate(current_rps);
+        let active_sessions = self.calculate_target_active_sessions(current_rps);
+        
+        // Check if distribution needs adjustment
+        let distribution_adjustments = if self.needs_distribution_adjustment() {
+            Some(self.calculate_distribution_adjustments())
+        } else {
+            None
+        };
+        
+        // Determine if this is a significant rate change that needs special handling
+        let rate_change_event = if self.is_significant_rate_change() {
+            Some(self.create_rate_change_event())
+        } else {
+            None
+        };
+        
+        SessionControlSignals {
+            target_rps: current_rps,
+            session_creation_rate: Some(session_creation_rate),
+            target_active_sessions: Some(active_sessions),
+            session_type_adjustments: distribution_adjustments,
+            prioritize_request_rate: self.should_prioritize_rate(),
+            rate_change_event: rate_change_event,
+        }
+    }
+    
+    // Helper methods for calculating session parameters...
+}
+```
+
+### 3.2 Session-Based Rate Control
+
+For certain tests, it's more realistic to control the rate by manipulating virtual user (session) behavior rather than directly controlling RPS. The `SessionBased` rate control mode enables this approach:
+
+```rust
+/// Session-based rate controller implementation
+pub struct SessionBasedRateController {
+    /// Controller ID
+    id: String,
+    
+    /// Base configuration
+    config: Arc<LoadTestConfig>,
+    
+    /// Session parameters
+    session_params: SessionParameters,
+    
+    /// Current session metrics
+    current_metrics: Arc<RwLock<SessionMetrics>>,
+    
+    /// Metrics collection
+    metrics: Arc<RateControllerMetrics>,
+    
+    /// Registry handle if registered
+    registry_handle: Mutex<Option<RegistrationHandle>>,
+}
+
+impl SessionBasedRateController {
+    /// Create a new session-based rate controller
+    pub fn new(
+        id: String,
+        initial_rps: u64,
+        min_rps: u64,
+        max_rps: u64,
+        session_params: SessionParameters,
+    ) -> Self {
+        // Implementation...
+    }
+    
+    /// Calculate RPS from session metrics
+    fn calculate_rps_from_sessions(&self, metrics: &SessionMetrics) -> u64 {
+        // Implementation...
+    }
+    
+    /// Adjust session parameters based on target RPS
+    fn adjust_session_params(&self, target_rps: u64) -> SessionParameters {
+        // Implementation...
+    }
+}
+
+impl RateController for SessionBasedRateController {
+    // Implementation...
+    
+    fn get_session_control_signals(&self) -> SessionControlSignals {
+        // Translate controller state to session signals
+        // Implementation...
+    }
+}
+```
+
+### 3.3 Rate Change Propagation
+
+When the Rate Controller makes significant adjustments to the target RPS, it needs to communicate not just the new target, but also how the Client Session Manager should implement the change. The Rate Controller creates `RateChangeEvent` objects that include contextual information about the change:
+
+```rust
+impl PidRateController {
+    /// Create a rate change event when significant changes occur
+    fn create_rate_change_event(&self) -> RateChangeEvent {
+        let current_rps = self.metrics.current_rps.load(Ordering::Relaxed);
+        let new_rps = self.calculate_new_target_rps();
+        
+        // Calculate relative change
+        let relative_change = (new_rps as f64 - current_rps as f64) / current_rps as f64;
+        
+        // Determine appropriate session impact based on magnitude and direction of change
+        let session_impact = if relative_change > 0.5 {
+            // Large increase - add sessions quickly
+            SessionImpact::AddSessions {
+                count: self.calculate_sessions_to_add(new_rps, current_rps),
+                priority_types: self.determine_priority_client_types(),
+            }
+        } else if relative_change > 0.1 {
+            // Moderate increase - gradual ramp-up
+            SessionImpact::GradualChange {
+                duration_ms: 10000, // 10 seconds
+                easing: EasingFunction::EaseIn,
+            }
+        } else if relative_change < -0.5 {
+            // Large decrease - remove sessions
+            SessionImpact::RemoveSessions {
+                count: self.calculate_sessions_to_remove(current_rps, new_rps),
+                strategy: SessionRemovalStrategy::LeastActiveFirst,
+            }
+        } else if relative_change < -0.1 {
+            // Moderate decrease - gradual ramp-down
+            SessionImpact::GradualChange {
+                duration_ms: 5000, // 5 seconds
+                easing: EasingFunction::EaseOut,
+            }
+        } else {
+            // Small change - adjust activity levels
+            SessionImpact::ModifyActivityLevel {
+                multiplier: new_rps as f64 / current_rps as f64,
+            }
+        };
+        
+        RateChangeEvent {
+            new_rps,
+            old_rps: current_rps,
+            reason: self.determine_adjustment_reason(),
+            session_impact,
+        }
+    }
+}
+```
+
+## 4. Rate Controller Metrics
+
+### 4.1 Lock-Free Metrics Implementation
 
 ```rust
 /// Lock-free metrics collection for rate controllers
@@ -216,6 +963,11 @@ pub struct RateControllerMetrics {
     /// Distributed control metrics (if applicable)
     distributed_proportion_factor: AtomicF64,
     rebalance_count: AtomicU64,
+    
+    /// Session control metrics
+    session_creation_rate: AtomicF64,
+    target_active_sessions: AtomicU64,
+    rate_change_events: AtomicU64,
 }
 
 impl RateControllerMetrics {
@@ -236,6 +988,9 @@ impl RateControllerMetrics {
             max_smoothing_change: AtomicU64::new(0),
             distributed_proportion_factor: AtomicF64::new(1.0),
             rebalance_count: AtomicU64::new(0),
+            session_creation_rate: AtomicF64::new(0.0),
+            target_active_sessions: AtomicU64::new(0),
+            rate_change_events: AtomicU64::new(0),
         }
     }
     
@@ -263,6 +1018,21 @@ impl RateControllerMetrics {
             while history.len() > 100 {
                 history.pop_front();
             }
+        }
+    }
+    
+    /// Update session control metrics
+    pub fn update_session_metrics(&self, signals: &SessionControlSignals) {
+        if let Some(rate) = signals.session_creation_rate {
+            self.session_creation_rate.store(rate as f64, Ordering::Relaxed);
+        }
+        
+        if let Some(count) = signals.target_active_sessions {
+            self.target_active_sessions.store(count, Ordering::Relaxed);
+        }
+        
+        if signals.rate_change_event.is_some() {
+            self.rate_change_events.fetch_add(1, Ordering::Relaxed);
         }
     }
     
@@ -340,6 +1110,16 @@ impl RateControllerMetrics {
         metrics.insert("rebalance_count".to_string(),
                       MetricValue::Counter(self.rebalance_count.load(Ordering::Relaxed)));
         
+        // Add session control metrics
+        metrics.insert("session_creation_rate".to_string(),
+                      MetricValue::Float(self.session_creation_rate.load(Ordering::Relaxed)));
+                      
+        metrics.insert("target_active_sessions".to_string(),
+                      MetricValue::Counter(self.target_active_sessions.load(Ordering::Relaxed)));
+                      
+        metrics.insert("rate_change_events".to_string(),
+                      MetricValue::Counter(self.rate_change_events.load(Ordering::Relaxed)));
+        
         // Add recent history as a text metric
         if let Ok(history) = self.rate_history.read() {
             // Convert the last 5 adjustments to a compact string
@@ -367,9 +1147,9 @@ fn current_timestamp() -> u64 {
 }
 ```
 
-## 4. Control Signal System with Metrics
+## 5. Control Signal System with Metrics
 
-### 4.1 Control Signal Interface
+### 5.1 Control Signal Interface
 
 ```rust
 /// External control signal interface
@@ -416,7 +1196,7 @@ impl ControlSignalSet {
 }
 ```
 
-### 4.2 Signal Metrics Implementation
+### 5.2 Signal Metrics Implementation
 
 ```rust
 /// Metrics for control signals
@@ -446,472 +1226,16 @@ pub struct ControlSignalMetrics {
     /// Protected with RwLock but updated selectively
     value_history: Arc<RwLock<VecDeque<(u64, f64)>>>,
 }
-
-impl ControlSignalMetrics {
-    /// Create new control signal metrics
-    pub fn new(id: String, initial_value: f64) -> Self {
-        Self {
-            id,
-            current_value: AtomicF64::new(initial_value),
-            update_count: AtomicU64::new(0),
-            last_update: AtomicU64::new(current_timestamp()),
-            min_value: AtomicF64::new(initial_value),
-            max_value: AtomicF64::new(initial_value),
-            callback_count: AtomicU64::new(0),
-            value_history: Arc::new(RwLock::new(VecDeque::with_capacity(100))),
-        }
-    }
-    
-    /// Update signal value
-    pub fn update_value(&self, new_value: f64) {
-        // Update current value
-        self.current_value.store(new_value, Ordering::Relaxed);
-        
-        // Increment update count
-        self.update_count.fetch_add(1, Ordering::Relaxed);
-        
-        // Update timestamp
-        let now = current_timestamp();
-        self.last_update.store(now, Ordering::Relaxed);
-        
-        // Update min/max values
-        let current_min = self.min_value.load(Ordering::Relaxed);
-        if new_value < current_min {
-            self.min_value.store(new_value, Ordering::Relaxed);
-        }
-        
-        let current_max = self.max_value.load(Ordering::Relaxed);
-        if new_value > current_max {
-            self.max_value.store(new_value, Ordering::Relaxed);
-        }
-        
-        // Record in history (with bounded size)
-        // Only sample some updates to reduce contention
-        if self.update_count.load(Ordering::Relaxed) % 10 == 0 {
-            if let Ok(mut history) = self.value_history.write() {
-                history.push_back((now, new_value));
-                
-                // Keep bounded size
-                while history.len() > 100 {
-                    history.pop_front();
-                }
-            }
-        }
-    }
-    
-    /// Record callback execution
-    pub fn record_callback(&self) {
-        self.callback_count.fetch_add(1, Ordering::Relaxed);
-    }
-    
-    /// Get a snapshot of metrics for registry
-    pub fn get_snapshot(&self) -> HashMap<String, MetricValue> {
-        let mut metrics = HashMap::new();
-        
-        // Add atomic values
-        metrics.insert("current_value".to_string(), 
-                      MetricValue::Float(self.current_value.load(Ordering::Relaxed)));
-                      
-        metrics.insert("update_count".to_string(),
-                      MetricValue::Counter(self.update_count.load(Ordering::Relaxed)));
-                      
-        metrics.insert("last_update".to_string(),
-                      MetricValue::Counter(self.last_update.load(Ordering::Relaxed)));
-                      
-        metrics.insert("min_value".to_string(),
-                      MetricValue::Float(self.min_value.load(Ordering::Relaxed)));
-                      
-        metrics.insert("max_value".to_string(),
-                      MetricValue::Float(self.max_value.load(Ordering::Relaxed)));
-                      
-        metrics.insert("callback_count".to_string(),
-                      MetricValue::Counter(self.callback_count.load(Ordering::Relaxed)));
-        
-        // Add recent history as a text metric
-        if let Ok(history) = self.value_history.read() {
-            // Calculate average of recent values (last 10)
-            let recent_avg = if !history.is_empty() {
-                let recent = history.iter().rev().take(10);
-                let (sum, count) = recent.fold((0.0, 0), |(sum, count), (_, value)| {
-                    (sum + value, count + 1)
-                });
-                
-                if count > 0 {
-                    sum / count as f64
-                } else {
-                    0.0
-                }
-            } else {
-                0.0
-            };
-            
-            metrics.insert("recent_avg".to_string(),
-                          MetricValue::Float(recent_avg));
-        }
-        
-        metrics
-    }
-}
 ```
 
-## 5. Rate Smoothing with Metrics Integration
+## 6. Saturation Awareness with Transaction Profiler Integration
 
-### 5.1 Rate Smoothing Configuration
-
-```rust
-/// Rate smoothing configuration
-#[derive(Debug, Clone)]
-pub struct RateSmoothingConfig {
-    /// Whether smoothing is enabled
-    pub enabled: bool,
-    /// Maximum relative change per second (0.0-1.0)
-    /// e.g., 0.1 means max 10% change per second
-    pub max_relative_change_per_second: f64,
-    /// Maximum absolute change per second (RPS)
-    pub max_absolute_change_per_second: u64,
-    /// Minimum time between adjustments (ms)
-    pub min_adjustment_interval_ms: u64,
-    /// Whether to apply aggressive limiting to decreases
-    /// (Some systems are more sensitive to sudden load drops)
-    pub limit_decreases: bool,
-}
-
-impl Default for RateSmoothingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_relative_change_per_second: 0.1, // 10% per second
-            max_absolute_change_per_second: 100, // 100 RPS per second
-            min_adjustment_interval_ms: 100,     // 100ms
-            limit_decreases: true,
-        }
-    }
-}
-```
-
-### 5.2 Rate Smoother with Metrics
-
-```rust
-/// Rate smoother to prevent abrupt rate changes
-pub struct RateSmoother {
-    /// Component ID
-    id: String,
-    
-    /// Metrics collection
-    metrics: Arc<RateControllerMetrics>,
-    
-    /// Smoothing configuration
-    config: RateSmoothingConfig,
-    
-    /// Last adjustment time
-    last_adjustment: Mutex<Instant>,
-    
-    /// Rate adjustment history
-    adjustments: Mutex<Vec<(u64, RateAdjustment)>>,
-    
-    /// Start time
-    start_time: Instant,
-    
-    /// Registry handle if registered
-    registry_handle: Mutex<Option<RegistrationHandle>>,
-}
-
-impl RateSmoother {
-    /// Create a new rate smoother
-    pub fn new(
-        id: String,
-        initial_rps: u64,
-        min_rps: u64,
-        max_rps: u64,
-        config: RateSmoothingConfig
-    ) -> Self {
-        // Create metrics
-        let metrics = Arc::new(RateControllerMetrics::new(
-            id.clone(), initial_rps, min_rps, max_rps
-        ));
-        
-        Self {
-            id,
-            metrics,
-            config,
-            last_adjustment: Mutex::new(Instant::now()),
-            adjustments: Mutex::new(Vec::new()),
-            start_time: Instant::now(),
-            registry_handle: Mutex::new(None),
-        }
-    }
-    
-    /// Apply smoothing to a target RPS value
-    pub fn smooth_rate(&self, target_rps: u64) -> u64 {
-        if !self.config.enabled {
-            return target_rps;
-        }
-        
-        let current_rps = self.metrics.current_rps.load(Ordering::Relaxed);
-        
-        // If minimal change, return directly
-        if (target_rps as i64 - current_rps as i64).abs() <= 1 {
-            return target_rps;
-        }
-        
-        // Check if enough time has passed since last adjustment
-        let mut last_adjustment = self.last_adjustment.lock().unwrap();
-        let elapsed_ms = last_adjustment.elapsed().as_millis() as u64;
-        
-        if elapsed_ms < self.config.min_adjustment_interval_ms {
-            // Too soon, return current RPS
-            return current_rps;
-        }
-        
-        // Calculate maximum allowed change based on time elapsed
-        let elapsed_seconds = elapsed_ms as f64 / 1000.0;
-        
-        // Relative limit
-        let max_rel_change = self.config.max_relative_change_per_second * elapsed_seconds;
-        let rel_limit = (current_rps as f64 * max_rel_change).round() as u64;
-        
-        // Absolute limit
-        let abs_limit = (self.config.max_absolute_change_per_second as f64 * elapsed_seconds).round() as u64;
-        
-        // Apply the more restrictive limit
-        let max_change = rel_limit.min(abs_limit).max(1); // Ensure at least 1 RPS change
-        
-        // Calculate direction and magnitude of change
-        let is_increase = target_rps > current_rps;
-        let raw_change = if is_increase {
-            target_rps - current_rps
-        } else {
-            current_rps - target_rps
-        };
-        
-        // Apply potentially different limits for increases vs decreases
-        let limited_change = if !is_increase && !self.config.limit_decreases {
-            // Don't limit decreases if configured that way
-            raw_change
-        } else {
-            // Apply limit
-            raw_change.min(max_change)
-        };
-        
-        // Calculate new RPS
-        let new_rps = if is_increase {
-            current_rps + limited_change
-        } else {
-            current_rps - limited_change
-        };
-        
-        // Update metrics for smoothing
-        self.metrics.record_smoothing(target_rps, new_rps);
-        
-        // Update last adjustment time
-        *last_adjustment = Instant::now();
-        
-        // Record adjustment if significant
-        if new_rps != current_rps {
-            let context = format!(
-                "Target: {}, Limited change: {}/{} RPS ({}%)",
-                target_rps, limited_change, raw_change,
-                (limited_change as f64 / current_rps as f64 * 100.0).round()
-            );
-            
-            // Update metrics with new RPS
-            self.metrics.update_rps(new_rps, &context);
-            
-            // Record adjustment
-            let now = self.start_time.elapsed().as_millis() as u64;
-            let adjustment = RateAdjustment {
-                new_rps,
-                old_rps: current_rps,
-                reason: AdjustmentReason::RateSmoothing,
-                context,
-            };
-            
-            let mut adjustments = self.adjustments.lock().unwrap();
-            adjustments.push((now, adjustment));
-        }
-        
-        new_rps
-    }
-    
-    /// Register with metrics registry
-    pub fn register_with_registry(&self, registry: Arc<dyn MetricsRegistry>) -> RegistrationHandle {
-        let provider = Arc::new(self.clone()) as Arc<dyn MetricsProvider>;
-        let handle = registry.register_provider(provider);
-        
-        let mut registry_handle = self.registry_handle.lock().unwrap();
-        *registry_handle = Some(handle.clone());
-        
-        handle
-    }
-}
-
-impl MetricsProvider for RateSmoother {
-    fn get_metrics(&self) -> ComponentMetrics {
-        ComponentMetrics {
-            component_type: "RateSmoother".to_string(),
-            component_id: self.id.clone(),
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            metrics: self.metrics.get_snapshot(),
-            status: Some(format!("Rate Smoother: RelChange={:.1}%, AbsChange={} RPS/s",
-                      self.config.max_relative_change_per_second * 100.0,
-                      self.config.max_absolute_change_per_second)),
-        }
-    }
-    
-    fn get_component_type(&self) -> &str {
-        "RateSmoother"
-    }
-    
-    fn get_component_id(&self) -> &str {
-        &self.id
-    }
-}
-```
-
-### 5.3 Smoothed Rate Controller with Metrics
-
-```rust
-/// Rate controller that applies smoothing to another controller
-pub struct SmoothedRateController {
-    /// Controller ID
-    id: String,
-    
-    /// Underlying controller
-    controller: Arc<dyn RateController>,
-    
-    /// Rate smoother
-    smoother: Arc<RateSmoother>,
-    
-    /// Registry handle if registered
-    registry_handle: Mutex<Option<RegistrationHandle>>,
-}
-
-impl SmoothedRateController {
-    /// Create a new smoothed rate controller
-    pub fn new(
-        id: String,
-        controller: Arc<dyn RateController>,
-        initial_rps: u64,
-        min_rps: u64,
-        max_rps: u64,
-        smoothing_config: RateSmoothingConfig,
-    ) -> Self {
-        Self {
-            id,
-            controller,
-            smoother: Arc::new(RateSmoother::new(
-                format!("{}-smoother", id),
-                initial_rps,
-                min_rps,
-                max_rps,
-                smoothing_config,
-            )),
-            registry_handle: Mutex::new(None),
-        }
-    }
-    
-    /// Register with metrics registry
-    pub fn register_with_registry(&self, registry: Arc<dyn MetricsRegistry>) -> RegistrationHandle {
-        // Register the smoother first
-        self.smoother.register_with_registry(registry.clone());
-        
-        // Register this controller
-        let provider = Arc::new(self.clone()) as Arc<dyn MetricsProvider>;
-        let handle = registry.register_provider(provider);
-        
-        let mut registry_handle = self.registry_handle.lock().unwrap();
-        *registry_handle = Some(handle.clone());
-        
-        handle
-    }
-}
-
-impl RateController for SmoothedRateController {
-    fn get_current_rps(&self) -> u64 {
-        // Get target RPS from underlying controller
-        let target_rps = self.controller.get_current_rps();
-        
-        // Apply smoothing
-        self.smoother.smooth_rate(target_rps)
-    }
-
-    fn update(&self, metrics: &RequestMetrics) {
-        // Forward to underlying controller
-        self.controller.update(metrics);
-    }
-
-    fn process_control_signals(&self, signals: &ControlSignalSet) {
-        // Forward to underlying controller
-        self.controller.process_control_signals(signals);
-    }
-
-    fn get_rate_history(&self) -> Vec<(u64, u64)> {
-        // Combine underlying controller history with our smoothed adjustments
-        let mut history = self.controller.get_rate_history();
-        
-        // Add smoothed adjustments where they don't already exist
-        for (time, adjustment) in self.smoother.adjustments.lock().unwrap().iter() {
-            // Check if this timestamp already exists
-            let exists = history.iter().any(|(t, _)| *t == *time);
-            
-            if !exists {
-                history.push((*time, adjustment.new_rps));
-            }
-        }
-        
-        // Sort by timestamp
-        history.sort_by_key(|(t, _)| *t);
-        
-        history
-    }
-
-    fn get_rate_adjustments(&self) -> Vec<(u64, RateAdjustment)> {
-        // Combine underlying controller adjustments with our smoothed adjustments
-        let mut adjustments = self.controller.get_rate_adjustments();
-        
-        // Add smoother adjustments
-        adjustments.extend(self.smoother.adjustments.lock().unwrap().clone());
-        
-        // Sort by timestamp
-        adjustments.sort_by_key(|(t, _)| *t);
-        
-        adjustments
-    }
-}
-
-impl MetricsProvider for SmoothedRateController {
-    fn get_metrics(&self) -> ComponentMetrics {
-        ComponentMetrics {
-            component_type: "RateController".to_string(),
-            component_id: self.id.clone(),
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            metrics: HashMap::new(), // This controller delegates metrics to its components
-            status: Some(format!("Smoothed Rate Controller ({})", self.id)),
-        }
-    }
-    
-    fn get_component_type(&self) -> &str {
-        "RateController"
-    }
-    
-    fn get_component_id(&self) -> &str {
-        &self.id
-    }
-}
-```
-
-## 6. Saturation Awareness with Metrics
+The Rate Controller can adapt based on client-side saturation metrics provided by the Transaction Profiler. This section details the integration between these components.
 
 ### 6.1 Saturation Metrics
 
 ```rust
-/// Client saturation metrics
+/// Client saturation metrics from Transaction Profiler
 #[derive(Debug, Clone)]
 pub struct SaturationMetrics {
     /// Average overhead percentage across recent transactions
@@ -944,44 +1268,12 @@ pub enum SaturationLevel {
     /// Severe saturation (>50% overhead)
     Severe,
 }
-
-/// Client resource utilization metrics
-#[derive(Debug, Clone)]
-pub struct ResourceUtilization {
-    /// CPU utilization (0.0-1.0)
-    pub cpu_utilization: f64,
-    /// Memory utilization (0.0-1.0)
-    pub memory_utilization: f64,
-    /// Connection pool utilization (0.0-1.0)
-    pub connection_pool_utilization: f64,
-    /// Tokio runtime task queue depth
-    pub task_queue_depth: u64,
-    /// Network transmission queue depth
-    pub network_queue_depth: u64,
-    /// Average backpressure wait time (ms)
-    pub backpressure_wait_ms: f64,
-}
-
-/// Recommended actions based on saturation
-#[derive(Debug, Clone)]
-pub enum SaturationAction {
-    /// No action needed
-    None,
-    /// Warning about mild saturation
-    WarnOnly,
-    /// Reduce rate to specified target
-    ReduceRate(u64),
-    /// Stop increasing rate
-    StopRateIncrease,
-    /// Distribute load across more clients
-    DistributeLoad(u32),
-}
 ```
 
-### 6.2 Saturation Signal Provider with Metrics
+### 6.2 Integration with Transaction Profiler
 
 ```rust
-/// Saturation signal provider
+/// Saturation signal provider that integrates with Transaction Profiler
 pub struct SaturationSignalProvider {
     /// Signal ID
     id: String,
@@ -1015,7 +1307,7 @@ pub struct SaturationSignalProvider {
 }
 
 impl SaturationSignalProvider {
-    /// Create a new saturation signal provider
+    /// Create a new saturation signal provider that integrates with Transaction Profiler
     pub fn new(
         id: String,
         profiler: Arc<dyn TransactionProfiler>,
@@ -1038,6 +1330,20 @@ impl SaturationSignalProvider {
             metrics,
             registry_handle: Mutex::new(None),
         }
+    }
+    
+    /// Integrate saturation signal with Transaction Profiler
+    pub fn integrate_with_profiler(
+        &self, 
+        profiler: Arc<dyn TransactionProfiler>
+    ) -> Arc<dyn ControlSignal> {
+        let provider = SaturationSignalProvider::new(
+            format!("{}-saturation", self.id),
+            profiler,
+            Duration::from_millis(500),
+        );
+        
+        Arc::new(provider)
     }
     
     /// Start background task to update saturation metrics
@@ -1092,125 +1398,10 @@ impl SaturationSignalProvider {
             }
         })
     }
-    
-    /// Register with metrics registry
-    pub fn register_with_registry(&self, registry: Arc<dyn MetricsRegistry>) -> RegistrationHandle {
-        let provider = Arc::new(self.clone()) as Arc<dyn MetricsProvider>;
-        let handle = registry.register_provider(provider);
-        
-        let mut registry_handle = self.registry_handle.lock().unwrap();
-        *registry_handle = Some(handle.clone());
-        
-        handle
-    }
-}
-
-impl ControlSignal for SaturationSignalProvider {
-    fn get_current_value(&self) -> f64 {
-        // Map saturation level to a numerical value between 0.0 and 1.0
-        let metrics = self.current_metrics.read().unwrap();
-        match metrics.level {
-            SaturationLevel::None => 0.0,
-            SaturationLevel::Mild => 0.33,
-            SaturationLevel::Moderate => 0.66,
-            SaturationLevel::Severe => 1.0,
-        }
-    }
-
-    fn register_update_callback(&mut self, callback: Box<dyn Fn(f64) + Send + Sync>) {
-        let mut callbacks = self.callbacks.lock().unwrap();
-        callbacks.push(callback);
-    }
-
-    fn get_history(&self) -> Vec<(u64, f64)> {
-        let history = self.history.lock().unwrap();
-        history
-            .iter()
-            .map(|(ts, level)| {
-                let value = match level {
-                    SaturationLevel::None => 0.0,
-                    SaturationLevel::Mild => 0.33,
-                    SaturationLevel::Moderate => 0.66,
-                    SaturationLevel::Severe => 1.0,
-                };
-                (*ts, value)
-            })
-            .collect()
-    }
-}
-
-impl MetricsProvider for SaturationSignalProvider {
-    fn get_metrics(&self) -> ComponentMetrics {
-        // Create combined metrics from signal metrics and saturation details
-        let mut metrics = self.metrics.get_snapshot();
-        
-        // Add saturation-specific metrics
-        let saturation = self.current_metrics.read().unwrap();
-        
-        metrics.insert("saturation_level".to_string(),
-                      MetricValue::Float(match saturation.level {
-                          SaturationLevel::None => 0.0,
-                          SaturationLevel::Mild => 0.33,
-                          SaturationLevel::Moderate => 0.66,
-                          SaturationLevel::Severe => 1.0,
-                      }));
-                      
-        metrics.insert("overhead_percentage_avg".to_string(),
-                      MetricValue::Float(saturation.avg_overhead_percentage));
-                      
-        metrics.insert("overhead_percentage_p95".to_string(),
-                      MetricValue::Float(saturation.p95_overhead_percentage));
-                      
-        metrics.insert("read_delay_us_avg".to_string(),
-                      MetricValue::Float(saturation.avg_read_delay_us));
-                      
-        metrics.insert("read_delay_us_p95".to_string(),
-                      MetricValue::Duration(saturation.p95_read_delay_us));
-        
-        // Resource utilization metrics
-        let resources = &saturation.resource_utilization;
-        
-        metrics.insert("cpu_utilization".to_string(),
-                      MetricValue::Float(resources.cpu_utilization));
-                      
-        metrics.insert("memory_utilization".to_string(),
-                      MetricValue::Float(resources.memory_utilization));
-                      
-        metrics.insert("connection_pool_utilization".to_string(),
-                      MetricValue::Float(resources.connection_pool_utilization));
-                      
-        metrics.insert("task_queue_depth".to_string(),
-                      MetricValue::Counter(resources.task_queue_depth));
-                      
-        metrics.insert("network_queue_depth".to_string(),
-                      MetricValue::Counter(resources.network_queue_depth));
-                      
-        metrics.insert("backpressure_wait_ms".to_string(),
-                      MetricValue::Float(resources.backpressure_wait_ms));
-        
-        ComponentMetrics {
-            component_type: "ControlSignal".to_string(),
-            component_id: self.id.clone(),
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            metrics,
-            status: Some(format!("Saturation Signal: Level={:?}", saturation.level)),
-        }
-    }
-    
-    fn get_component_type(&self) -> &str {
-        "ControlSignal"
-    }
-    
-    fn get_component_id(&self) -> &str {
-        &self.id
-    }
 }
 ```
 
-### 6.3 Saturation-Aware Controller with Metrics
+### 6.3 Saturation-Aware Controller
 
 ```rust
 /// Adapter that adjusts a rate controller based on saturation
@@ -1242,506 +1433,243 @@ pub struct SaturationRateAdapter {
     /// Registry handle if registered
     registry_handle: Mutex<Option<RegistrationHandle>>,
 }
-
-impl SaturationRateAdapter {
-    /// Create a new saturation rate adapter
-    pub fn new(
-        id: String,
-        controller: Arc<dyn RateController>,
-        saturation_signal: Arc<dyn ControlSignal>,
-        initial_rps: u64,
-        min_rps: u64,
-        max_rps: u64,
-        moderate_threshold: f64,
-        severe_threshold: f64,
-    ) -> Self {
-        // Create metrics
-        let metrics = Arc::new(RateControllerMetrics::new(
-            id.clone(), initial_rps, min_rps, max_rps
-        ));
-        
-        Self {
-            id,
-            controller,
-            saturation_signal,
-            moderate_threshold,
-            severe_threshold,
-            adjustments: Arc::new(Mutex::new(Vec::new())),
-            start_time: Instant::now(),
-            metrics,
-            registry_handle: Mutex::new(None),
-        }
-    }
-
-    fn record_adjustment(&self, new_rps: u64, old_rps: u64, context: String) {
-        // Record adjustment
-        let now = self.start_time.elapsed().as_millis() as u64;
-        let adjustment = RateAdjustment {
-            new_rps,
-            old_rps,
-            reason: AdjustmentReason::Saturation,
-            context,
-        };
-        
-        // Update metrics
-        self.metrics.update_rps(new_rps, &context);
-        
-        let mut adjustments = self.adjustments.lock().unwrap();
-        adjustments.push((now, adjustment));
-    }
-    
-    /// Register with metrics registry
-    pub fn register_with_registry(&self, registry: Arc<dyn MetricsRegistry>) -> RegistrationHandle {
-        let provider = Arc::new(self.clone()) as Arc<dyn MetricsProvider>;
-        let handle = registry.register_provider(provider);
-        
-        let mut registry_handle = self.registry_handle.lock().unwrap();
-        *registry_handle = Some(handle.clone());
-        
-        handle
-    }
-}
-
-impl RateController for SaturationRateAdapter {
-    fn get_current_rps(&self) -> u64 {
-        // Base RPS from underlying controller
-        let base_rps = self.controller.get_current_rps();
-        
-        // Check saturation and adjust if needed
-        let saturation = self.saturation_signal.get_current_value();
-        
-        if saturation > self.severe_threshold {
-            // Severe saturation - reduce by 30%
-            let new_rps = (base_rps as f64 * 0.7) as u64;
-            
-            // Only record if different from current
-            if new_rps != base_rps {
-                self.record_adjustment(new_rps, base_rps, 
-                    format!("Severe saturation detected ({})", saturation));
-            }
-            
-            return new_rps;
-        } else if saturation > self.moderate_threshold {
-            // Moderate saturation - reduce by 10%
-            let new_rps = (base_rps as f64 * 0.9) as u64;
-            
-            // Only record if different from current
-            if new_rps != base_rps {
-                self.record_adjustment(new_rps, base_rps,
-                    format!("Moderate saturation detected ({})", saturation));
-            }
-            
-            return new_rps;
-        }
-        
-        // No saturation adjustment needed
-        base_rps
-    }
-    
-    fn update(&self, metrics: &RequestMetrics) {
-        // Forward to underlying controller
-        self.controller.update(metrics);
-    }
-    
-    fn process_control_signals(&self, signals: &ControlSignalSet) {
-        // Forward to underlying controller
-        self.controller.process_control_signals(signals);
-    }
-    
-    fn get_rate_history(&self) -> Vec<(u64, u64)> {
-        // Combine underlying controller history with our saturation adjustments
-        let mut history = self.controller.get_rate_history();
-        
-        // Add saturation adjustments where they don't already exist
-        for (time, adjustment) in self.adjustments.lock().unwrap().iter() {
-            // Check if this timestamp already exists
-            let exists = history.iter().any(|(t, _)| *t == *time);
-            
-            if !exists {
-                history.push((*time, adjustment.new_rps));
-            }
-        }
-        
-        // Sort by timestamp
-        history.sort_by_key(|(t, _)| *t);
-        
-        history
-    }
-    
-    fn get_rate_adjustments(&self) -> Vec<(u64, RateAdjustment)> {
-        // Combine underlying controller adjustments with our saturation adjustments
-        let mut result = self.controller.get_rate_adjustments();
-        let saturation_adjustments = self.adjustments.lock().unwrap().clone();
-        result.extend(saturation_adjustments.into_iter());
-        
-        // Sort by timestamp
-        result.sort_by_key(|(t, _)| *t);
-        
-        result
-    }
-}
-
-impl MetricsProvider for SaturationRateAdapter {
-    fn get_metrics(&self) -> ComponentMetrics {
-        ComponentMetrics {
-            component_type: "RateController".to_string(),
-            component_id: self.id.clone(),
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            metrics: self.metrics.get_snapshot(),
-            status: Some(format!("Saturation-Aware Controller ({}): Moderate={:.2}, Severe={:.2}",
-                       self.id, self.moderate_threshold, self.severe_threshold)),
-        }
-    }
-    
-    fn get_component_type(&self) -> &str {
-        "RateController"
-    }
-    
-    fn get_component_id(&self) -> &str {
-        &self.id
-    }
-}
 ```
 
-## 7. PID Controller Implementation with Metrics
+## 7. Rate Smoothing for Client Session Consistency
+
+### 7.1 Rate Smoother with Session Awareness
 
 ```rust
-/// PID controller for rate adjustment
-pub struct PidRateController {
-    /// Controller ID
+/// Rate smoother to prevent abrupt rate changes that would create unrealistic session patterns
+pub struct RateSmoother {
+    /// Component ID
     id: String,
-    
-    /// Config parameters
-    config: Arc<LoadTestConfig>,
     
     /// Metrics collection
     metrics: Arc<RateControllerMetrics>,
     
-    /// PID parameters
-    kp: f64,
-    ki: f64,
-    kd: f64,
+    /// Smoothing configuration
+    config: RateSmoothingConfig,
     
-    /// Target metric value
-    target_metric: f64,
+    /// Last adjustment time
+    last_adjustment: Mutex<Instant>,
     
-    /// Metric type
-    metric_type: MetricType,
-    
-    /// Update interval
-    update_interval_ms: u64,
-    
-    /// Integral term
-    integral: Mutex<f64>,
-    
-    /// Last error
-    last_error: Mutex<f64>,
-    
-    /// Rate adjustments
+    /// Rate adjustment history
     adjustments: Mutex<Vec<(u64, RateAdjustment)>>,
     
     /// Start time
     start_time: Instant,
     
+    /// Session impact analysis
+    session_impact: Arc<RwLock<Option<SessionImpact>>>,
+    
     /// Registry handle if registered
     registry_handle: Mutex<Option<RegistrationHandle>>,
 }
 
-impl PidRateController {
-    /// Create a new PID controller
-    pub fn new(
-        id: String,
-        initial_rps: u64,
-        min_rps: u64,
-        max_rps: u64,
-        rate_control_mode: RateControlMode,
-    ) -> Self {
-        // Extract PID parameters from rate control mode
-        let (target_metric, metric_type, kp, ki, kd, update_interval_ms) = match &rate_control_mode {
-            RateControlMode::Pid { 
-                target_metric, metric_type, kp, ki, kd, update_interval_ms
-            } => (
-                *target_metric, *metric_type, *kp, *ki, *kd, *update_interval_ms
-            ),
-            // Default values for other modes
-            _ => (100.0, MetricType::LatencyP99, 0.1, 0.01, 0.001, 500),
-        };
-        
-        // Create metrics
-        let metrics = Arc::new(RateControllerMetrics::new(
-            id.clone(), initial_rps, min_rps, max_rps
-        ));
-        
-        // Initialize controller
-        let controller = Self {
-            id,
-            config: Arc::new(LoadTestConfig {
-                initial_rps,
-                min_rps,
-                max_rps,
-                rate_control_mode,
-                // Other config fields...
-                ..Default::default()
-            }),
-            metrics,
-            kp,
-            ki,
-            kd,
-            target_metric,
-            metric_type,
-            update_interval_ms,
-            integral: Mutex::new(0.0),
-            last_error: Mutex::new(0.0),
-            adjustments: Mutex::new(Vec::new()),
-            start_time: Instant::now(),
-            registry_handle: Mutex::new(None),
-        };
-        
-        // Log initial adjustment
-        let initial_adjustment = RateAdjustment {
-            new_rps: initial_rps,
-            old_rps: initial_rps,
-            reason: AdjustmentReason::Initial,
-            context: "Initial PID controller setup".to_string(),
-        };
-        
-        let mut adjustments = controller.adjustments.lock().unwrap();
-        adjustments.push((0, initial_adjustment));
-        
-        // Update metrics
-        controller.metrics.update_rps(initial_rps, "Initial setup");
-        
-        controller
-    }
-    
-    /// Register with metrics registry
-    pub fn register_with_registry(&self, registry: Arc<dyn MetricsRegistry>) -> RegistrationHandle {
-        let provider = Arc::new(self.clone()) as Arc<dyn MetricsProvider>;
-        let handle = registry.register_provider(provider);
-        
-        let mut registry_handle = self.registry_handle.lock().unwrap();
-        *registry_handle = Some(handle.clone());
-        
-        handle
-    }
-}
-
-impl RateController for PidRateController {
-    fn get_current_rps(&self) -> u64 {
-        self.metrics.current_rps.load(Ordering::Relaxed)
-    }
-
-    fn update(&self, metrics: &RequestMetrics) {
-        if metrics.window_size_ms < self.update_interval_ms {
-            // Wait for enough data
-            return;
+impl RateSmoother {
+    /// Apply smoothing to a target RPS value
+    pub fn smooth_rate(&self, target_rps: u64) -> (u64, Option<SessionImpact>) {
+        if !self.config.enabled {
+            return (target_rps, None);
         }
         
-        // Get current metric value
-        let current_value = match self.metric_type {
-            MetricType::LatencyP50 => metrics.p50_latency_us as f64,
-            MetricType::LatencyP90 => metrics.p90_latency_us as f64,
-            MetricType::LatencyP99 => metrics.p99_latency_us as f64,
-            MetricType::ErrorRate => metrics.error_rate,
-            MetricType::ExternalSignal => {
-                // External signal is handled in process_control_signals
-                return;
-            }
-            _ => metrics.p99_latency_us as f64,
-        };
-        
-        // Calculate PID terms
-        let error = self.target_metric - current_value;
-        
-        // Update integral term
-        let mut integral = self.integral.lock().unwrap();
-        *integral += error * (metrics.window_size_ms as f64 / 1000.0);
-        
-        // Apply anti-windup by clamping integral term
-        let max_integral = (self.config.max_rps - self.config.min_rps) as f64 / self.ki;
-        *integral = integral.clamp(-max_integral, max_integral);
-        
-        // Calculate derivative term
-        let derivative = {
-            let mut last_error = self.last_error.lock().unwrap();
-            let derivative = (error - *last_error) / (metrics.window_size_ms as f64 / 1000.0);
-            *last_error = error;
-            derivative
-        };
-        
-        // Calculate PID output
-        let p_term = self.kp * error;
-        let i_term = self.ki * *integral;
-        let d_term = self.kd * derivative;
-        let mut output = p_term + i_term + d_term;
-        
-        // Update metrics for PID terms
-        self.metrics.update_pid_metrics(error, *integral, derivative);
-        
-        // Handle error rate specially (inverse relationship)
-        if self.metric_type == MetricType::ErrorRate {
-            output = -output;  // Invert - higher error rate means lower RPS
-        }
-        
-        // Get current RPS
         let current_rps = self.metrics.current_rps.load(Ordering::Relaxed);
         
-        // Calculate new RPS
-        let new_rps = (current_rps as f64 + output).round() as u64;
-        let new_rps = new_rps.clamp(self.config.min_rps, self.config.max_rps);
-        
-        // Skip update if minimal change
-        if (new_rps as i64 - current_rps as i64).abs() < 2 {
-            return;
+        // If minimal change, return directly
+        if (target_rps as i64 - current_rps as i64).abs() <= 1 {
+            return (target_rps, None);
         }
         
-        // Create context string
-        let context = format!(
-            "Target: {:.2}, Current: {:.2}, Error: {:.2}, P: {:.2}, I: {:.2}, D: {:.2}",
-            self.target_metric, current_value, error, p_term, i_term, d_term
-        );
+        // Check if enough time has passed since last adjustment
+        let mut last_adjustment = self.last_adjustment.lock().unwrap();
+        let elapsed_ms = last_adjustment.elapsed().as_millis() as u64;
         
-        // Update metrics with new RPS
-        self.metrics.update_rps(new_rps, &context);
+        if elapsed_ms < self.config.min_adjustment_interval_ms {
+            // Too soon, return current RPS
+            return (current_rps, None);
+        }
         
-        // Record adjustment
-        let now = self.start_time.elapsed().as_millis() as u64;
-        let adjustment = RateAdjustment {
-            new_rps,
-            old_rps: current_rps,
-            reason: AdjustmentReason::PidControl,
-            context,
+        // Calculate maximum allowed change based on time elapsed
+        let elapsed_seconds = elapsed_ms as f64 / 1000.0;
+        
+        // Relative limit
+        let max_rel_change = self.config.max_relative_change_per_second * elapsed_seconds;
+        let rel_limit = (current_rps as f64 * max_rel_change).round() as u64;
+        
+        // Absolute limit
+        let abs_limit = (self.config.max_absolute_change_per_second as f64 * elapsed_seconds).round() as u64;
+        
+        // Apply the more restrictive limit
+        let max_change = rel_limit.min(abs_limit).max(1); // Ensure at least 1 RPS change
+        
+        // Calculate direction and magnitude of change
+        let is_increase = target_rps > current_rps;
+        let raw_change = if is_increase {
+            target_rps - current_rps
+        } else {
+            current_rps - target_rps
         };
         
-        // Record adjustment
-        let mut adjustments = self.adjustments.lock().unwrap();
-        adjustments.push((now, adjustment));
-    }
-
-    fn process_control_signals(&self, signals: &ControlSignalSet) {
-        // Only process if we're using external signal
-        if self.metric_type != MetricType::ExternalSignal {
-            return;
-        }
+        // Apply potentially different limits for increases vs decreases
+        let limited_change = if !is_increase && !self.config.limit_decreases {
+            // Don't limit decreases if configured that way
+            raw_change
+        } else {
+            // Apply limit
+            raw_change.min(max_change)
+        };
         
-        // Get relevant signal from original PID config
-        if let RateControlMode::ExternalSignalPid { signal_name, .. } = &self.config.rate_control_mode {
-            if let Some(signal) = signals.get_signal(signal_name) {
-                let current_value = signal.get_current_value();
-                
-                // Calculate PID terms
-                let error = self.target_metric - current_value;
-                
-                // Update integral term
-                let mut integral = self.integral.lock().unwrap();
-                *integral += error * 0.1; // Simplified time factor
-                
-                // Apply anti-windup by clamping integral term
-                let max_integral = (self.config.max_rps - self.config.min_rps) as f64 / self.ki;
-                *integral = integral.clamp(-max_integral, max_integral);
-                
-                // Calculate derivative term
-                let derivative = {
-                    let mut last_error = self.last_error.lock().unwrap();
-                    let derivative = (error - *last_error) / 0.1; // Simplified time factor
-                    *last_error = error;
-                    derivative
-                };
-                
-                // Calculate PID output
-                let p_term = self.kp * error;
-                let i_term = self.ki * *integral;
-                let d_term = self.kd * derivative;
-                let output = p_term + i_term + d_term;
-                
-                // Update metrics for PID terms
-                self.metrics.update_pid_metrics(error, *integral, derivative);
-                
-                // Get current RPS
-                let current_rps = self.metrics.current_rps.load(Ordering::Relaxed);
-                
-                // Calculate new RPS
-                let new_rps = (current_rps as f64 + output).round() as u64;
-                let new_rps = new_rps.clamp(self.config.min_rps, self.config.max_rps);
-                
-                // Create context string
-                let context = format!(
-                    "Signal: {}, Value: {:.2}, Target: {:.2}, Error: {:.2}",
-                    signal_name, current_value, self.target_metric, error
-                );
-                
-                // Update metrics with new RPS
-                self.metrics.update_rps(new_rps, &context);
-                
-                // Record adjustment
-                let now = self.start_time.elapsed().as_millis() as u64;
-                let adjustment = RateAdjustment {
-                    new_rps,
-                    old_rps: current_rps,
-                    reason: AdjustmentReason::ExternalSignal,
-                    context,
-                };
-                
-                // Record adjustment
-                let mut adjustments = self.adjustments.lock().unwrap();
-                adjustments.push((now, adjustment));
+        // Calculate new RPS
+        let new_rps = if is_increase {
+            current_rps + limited_change
+        } else {
+            current_rps - limited_change
+        };
+        
+        // Create appropriate session impact information
+        let session_impact = if limited_change > 0 {
+            // Create session impact information based on magnitude of change
+            let relative_change = limited_change as f64 / current_rps as f64;
+            
+            if relative_change > 0.2 {
+                // Significant change - suggest specific session impacts
+                Some(if is_increase {
+                    SessionImpact::GradualChange {
+                        duration_ms: (limited_change as f64 * 100.0) as u64, // Scale with change size
+                        easing: EasingFunction::EaseIn,
+                    }
+                } else {
+                    SessionImpact::GradualChange {
+                        duration_ms: (limited_change as f64 * 100.0) as u64,
+                        easing: EasingFunction::EaseOut,
+                    }
+                })
+            } else {
+                // Smaller change - simple activity adjustment
+                Some(SessionImpact::ModifyActivityLevel {
+                    multiplier: new_rps as f64 / current_rps as f64,
+                })
+            }
+        } else {
+            None
+        };
+        
+        // Update metrics for smoothing
+        self.metrics.record_smoothing(target_rps, new_rps);
+        
+        // Update last adjustment time
+        *last_adjustment = Instant::now();
+        
+        // Record adjustment if significant
+        if new_rps != current_rps {
+            let context = format!(
+                "Target: {}, Limited change: {}/{} RPS ({}%)",
+                target_rps, limited_change, raw_change,
+                (limited_change as f64 / current_rps as f64 * 100.0).round()
+            );
+            
+            // Update metrics with new RPS
+            self.metrics.update_rps(new_rps, &context);
+            
+            // Record adjustment
+            let now = self.start_time.elapsed().as_millis() as u64;
+            let adjustment = RateAdjustment {
+                new_rps,
+                old_rps: current_rps,
+                reason: AdjustmentReason::RateSmoothing,
+                context,
+            };
+            
+            let mut adjustments = self.adjustments.lock().unwrap();
+            adjustments.push((now, adjustment));
+            
+            // Store session impact
+            if let Some(impact) = &session_impact {
+                let mut impact_lock = self.session_impact.write().unwrap();
+                *impact_lock = Some(impact.clone());
             }
         }
-    }
-
-    fn get_rate_history(&self) -> Vec<(u64, u64)> {
-        // Extract from adjustments
-        let adjustments = self.adjustments.lock().unwrap();
-        adjustments.iter()
-            .map(|(time, adjustment)| (*time, adjustment.new_rps))
-            .collect()
-    }
-
-    fn get_rate_adjustments(&self) -> Vec<(u64, RateAdjustment)> {
-        let adjustments = self.adjustments.lock().unwrap();
-        adjustments.clone()
-    }
-}
-
-impl MetricsProvider for PidRateController {
-    fn get_metrics(&self) -> ComponentMetrics {
-        ComponentMetrics {
-            component_type: "RateController".to_string(),
-            component_id: self.id.clone(),
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            metrics: self.metrics.get_snapshot(),
-            status: Some(format!("PID Controller: Target={} {}", 
-                     self.target_metric, 
-                     match self.metric_type {
-                         MetricType::LatencyP50 => "p50 latency",
-                         MetricType::LatencyP90 => "p90 latency",
-                         MetricType::LatencyP99 => "p99 latency",
-                         MetricType::ErrorRate => "error rate",
-                         MetricType::ExternalSignal => "external signal",
-                         _ => "unknown metric",
-                     })),
-        }
-    }
-    
-    fn get_component_type(&self) -> &str {
-        "RateController"
-    }
-    
-    fn get_component_id(&self) -> &str {
-        &self.id
+        
+        (new_rps, session_impact)
     }
 }
 ```
 
-## 8. Distributed Load Control with Metrics
+### 7.2 Smoothed Rate Controller with Session Impact
 
-### 8.1 Distributed Coordinator Interface
+```rust
+/// Rate controller that applies smoothing to another controller with session awareness
+pub struct SmoothedRateController {
+    /// Controller ID
+    id: String,
+    
+    /// Underlying controller
+    controller: Arc<dyn RateController>,
+    
+    /// Rate smoother
+    smoother: Arc<RateSmoother>,
+    
+    /// Metrics collection
+    metrics: Arc<RateControllerMetrics>,
+    
+    /// Registry handle if registered
+    registry_handle: Mutex<Option<RegistrationHandle>>,
+}
+
+impl RateController for SmoothedRateController {
+    fn get_current_rps(&self) -> u64 {
+        // Get target RPS from underlying controller
+        let target_rps = self.controller.get_current_rps();
+        
+        // Apply smoothing
+        let (smoothed_rps, _) = self.smoother.smooth_rate(target_rps);
+        
+        smoothed_rps
+    }
+
+    fn get_session_control_signals(&self) -> SessionControlSignals {
+        // Get base signals from underlying controller
+        let mut signals = self.controller.get_session_control_signals();
+        
+        // Get target RPS from underlying controller
+        let target_rps = self.controller.get_current_rps();
+        
+        // Apply smoothing with session impact
+        let (smoothed_rps, session_impact) = self.smoother.smooth_rate(target_rps);
+        
+        // Modify signals with smoothed RPS
+        signals.target_rps = smoothed_rps;
+        
+        // Add session impact if available
+        if let Some(impact) = session_impact {
+            // Create a rate change event if one doesn't exist
+            if signals.rate_change_event.is_none() {
+                signals.rate_change_event = Some(RateChangeEvent {
+                    new_rps: smoothed_rps,
+                    old_rps: self.metrics.current_rps.load(Ordering::Relaxed),
+                    reason: AdjustmentReason::RateSmoothing,
+                    session_impact: impact,
+                });
+            } else {
+                // Update existing rate change event
+                if let Some(event) = &mut signals.rate_change_event {
+                    event.new_rps = smoothed_rps;
+                    event.session_impact = impact;
+                }
+            }
+        }
+        
+        signals
+    }
+
+    // Other methods implementation...
+}
+```
+
+## 8. Distributed Load Control with Session Coordination
+
+### 8.1 Distributed Coordination Interface
 
 ```rust
 /// Interface for coordinating distributed load testing
@@ -1792,6 +1720,19 @@ pub struct NodeAssignment {
     pub url_patterns: Vec<String>,
     /// Whether this node should collect detailed samples
     pub detailed_sampling: bool,
+    /// Session creation parameters
+    pub session_params: Option<SessionDistributionParams>,
+}
+
+/// Session distribution parameters for distributed testing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionDistributionParams {
+    /// Target session creation rate for this node
+    pub session_creation_rate: f64,
+    /// Client type distribution for this node
+    pub client_distribution: HashMap<String, f64>,
+    /// Geographic distribution (if applicable)
+    pub geo_distribution: Option<HashMap<String, f64>>,
 }
 
 /// Node status report
@@ -1805,294 +1746,23 @@ pub struct NodeStatus {
     pub success_rate: f64,
     /// Current P99 latency in milliseconds
     pub p99_latency_ms: f64,
+    /// Session statistics
+    pub session_stats: SessionStats,
 }
 
-/// Global test status
+/// Session statistics for node status reports
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GlobalTestStatus {
-    /// Total RPS across all nodes
-    pub total_rps: u64,
-    /// New target RPS for this node
-    pub new_target_rps: Option<u64>,
-    /// Control signals
-    pub control_signals: HashMap<String, f64>,
-    /// Global actions to take
-    pub actions: Vec<GlobalAction>,
-}
-
-/// Global action from coordinator
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum GlobalAction {
-    /// Update test parameters
-    UpdateParams(TestParameters),
-    /// Adjust RPS by factor
-    AdjustRps(f64),
-    /// Redistribute load (rebalance across nodes)
-    RedistributeLoad,
-    /// Terminate test
-    TerminateTest,
+pub struct SessionStats {
+    /// Number of active sessions
+    pub active_sessions: u64,
+    /// Session creation rate
+    pub session_creation_rate: f64,
+    /// Session distribution by type
+    pub type_distribution: HashMap<String, f64>,
 }
 ```
 
-### 8.2 Distributed Rate Control Signal
-
-```rust
-/// Control signal sent from coordinator to worker nodes
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DistributedControlSignal {
-    /// Load proportion factor (0.0-2.0)
-    /// - 1.0 means take your even share of the load
-    /// - <1.0 means take less than your even share
-    /// - >1.0 means take more than your even share
-    pub load_proportion_factor: f64,
-    
-    /// Target metric for the local PID controller
-    pub target_metric_value: f64,
-    
-    /// Coordinator's assessment of this client's saturation (0.0-1.0)
-    pub saturation_assessment: f64,
-    
-    /// Maximum rate of change per second (relative)
-    /// e.g., 0.1 means max 10% change per second
-    pub max_ramp_rate: f64,
-    
-    /// Absolute maximum RPS this client should not exceed
-    pub absolute_max_rps: Option<u64>,
-    
-    /// Suggested starting RPS (optional)
-    pub suggested_start_rps: Option<u64>,
-    
-    /// Timestamp from coordinator
-    pub timestamp: u64,
-}
-```
-
-### 8.3 Load Proportion Smoother with Metrics
-
-```rust
-/// Metrics for load proportion smoother
-pub struct LoadProportionMetrics {
-    /// Component ID
-    id: String,
-    
-    /// Current proportion factor
-    current_factor: AtomicF64,
-    
-    /// Target proportion factor
-    target_factor: AtomicF64,
-    
-    /// Maximum change rate (proportion per second)
-    max_ramp_rate: AtomicF64,
-    
-    /// Factor adjustment count
-    adjustment_count: AtomicU64,
-    
-    /// Last update timestamp
-    last_update: AtomicU64,
-    
-    /// History of factor changes
-    /// Protected with RwLock but updated infrequently
-    factor_history: Arc<RwLock<VecDeque<(u64, f64, String)>>>,
-}
-
-impl LoadProportionMetrics {
-    /// Create new load proportion metrics
-    pub fn new(id: String, initial_factor: f64, max_ramp_rate: f64) -> Self {
-        Self {
-            id,
-            current_factor: AtomicF64::new(initial_factor),
-            target_factor: AtomicF64::new(initial_factor),
-            max_ramp_rate: AtomicF64::new(max_ramp_rate),
-            adjustment_count: AtomicU64::new(0),
-            last_update: AtomicU64::new(current_timestamp()),
-            factor_history: Arc::new(RwLock::new(VecDeque::with_capacity(100))),
-        }
-    }
-    
-    /// Update target factor
-    pub fn update_target_factor(&self, new_target: f64, reason: &str) {
-        self.target_factor.store(new_target, Ordering::Relaxed);
-        
-        // Record in history
-        let now = current_timestamp();
-        let reason_str = reason.to_string();
-        
-        if let Ok(mut history) = self.factor_history.write() {
-            history.push_back((now, new_target, reason_str));
-            
-            // Keep bounded size
-            while history.len() > 100 {
-                history.pop_front();
-            }
-        }
-        
-        self.last_update.store(now, Ordering::Relaxed);
-    }
-    
-    /// Update current factor
-    pub fn update_current_factor(&self, new_factor: f64) {
-        self.current_factor.store(new_factor, Ordering::Relaxed);
-        self.adjustment_count.fetch_add(1, Ordering::Relaxed);
-    }
-    
-    /// Update ramp rate
-    pub fn update_ramp_rate(&self, new_rate: f64) {
-        self.max_ramp_rate.store(new_rate, Ordering::Relaxed);
-    }
-    
-    /// Get a snapshot of metrics for registry
-    pub fn get_snapshot(&self) -> HashMap<String, MetricValue> {
-        let mut metrics = HashMap::new();
-        
-        // Add atomic values
-        metrics.insert("current_factor".to_string(), 
-                      MetricValue::Float(self.current_factor.load(Ordering::Relaxed)));
-                      
-        metrics.insert("target_factor".to_string(),
-                      MetricValue::Float(self.target_factor.load(Ordering::Relaxed)));
-                      
-        metrics.insert("max_ramp_rate".to_string(),
-                      MetricValue::Float(self.max_ramp_rate.load(Ordering::Relaxed)));
-                      
-        metrics.insert("adjustment_count".to_string(),
-                      MetricValue::Counter(self.adjustment_count.load(Ordering::Relaxed)));
-                      
-        metrics.insert("last_update".to_string(),
-                      MetricValue::Counter(self.last_update.load(Ordering::Relaxed)));
-        
-        // Add recent history as a text metric
-        if let Ok(history) = self.factor_history.read() {
-            // Convert the last 3 adjustments to a compact string
-            let recent_history = history.iter()
-                .rev()
-                .take(3)
-                .map(|(ts, factor, reason)| format!("{}:{:.2}:{}", ts, factor, reason))
-                .collect::<Vec<_>>()
-                .join("; ");
-                
-            metrics.insert("recent_adjustments".to_string(),
-                          MetricValue::Text(recent_history));
-        }
-        
-        metrics
-    }
-}
-
-/// Load proportion smoother for gradual transitions
-pub struct LoadProportionSmoother {
-    /// Component ID
-    id: String,
-    
-    /// Metrics collection
-    metrics: Arc<LoadProportionMetrics>,
-    
-    /// Last update time
-    last_update: Mutex<Instant>,
-    
-    /// Start time
-    start_time: Instant,
-    
-    /// Registry handle if registered
-    registry_handle: Mutex<Option<RegistrationHandle>>,
-}
-
-impl LoadProportionSmoother {
-    /// Create a new load proportion smoother
-    pub fn new(id: String, initial_factor: f64, max_ramp_rate: f64) -> Self {
-        // Create metrics
-        let metrics = Arc::new(LoadProportionMetrics::new(
-            id.clone(), initial_factor, max_ramp_rate
-        ));
-        
-        Self {
-            id,
-            metrics,
-            last_update: Mutex::new(Instant::now()),
-            start_time: Instant::now(),
-            registry_handle: Mutex::new(None),
-        }
-    }
-    
-    /// Set a new target proportion factor
-    pub fn set_target_factor(&self, new_target: f64, new_ramp_rate: Option<f64>, reason: &str) {
-        // Update metrics
-        self.metrics.update_target_factor(new_target, reason);
-        
-        if let Some(ramp_rate) = new_ramp_rate {
-            self.metrics.update_ramp_rate(ramp_rate);
-        }
-    }
-    
-    /// Get current smoothed factor, updating it based on elapsed time
-    pub fn get_current_factor(&self) -> f64 {
-        let target = self.metrics.target_factor.load(Ordering::Relaxed);
-        let current = self.metrics.current_factor.load(Ordering::Relaxed);
-        
-        if (current - target).abs() < 0.001 {
-            // Already close enough to target
-            return current;
-        }
-        
-        // Calculate time since last update
-        let mut last_update = self.last_update.lock().unwrap();
-        let elapsed_secs = last_update.elapsed().as_secs_f64();
-        *last_update = Instant::now();
-        
-        // Calculate maximum change for this time period
-        let max_ramp_rate = self.metrics.max_ramp_rate.load(Ordering::Relaxed);
-        let max_change = max_ramp_rate * elapsed_secs;
-        
-        // Calculate new value with limited change rate
-        let change = target - current;
-        let limited_change = change.signum() * change.abs().min(max_change);
-        let new_value = current + limited_change;
-        
-        // Update current factor in metrics
-        self.metrics.update_current_factor(new_value);
-        
-        new_value
-    }
-    
-    /// Register with metrics registry
-    pub fn register_with_registry(&self, registry: Arc<dyn MetricsRegistry>) -> RegistrationHandle {
-        let provider = Arc::new(self.clone()) as Arc<dyn MetricsProvider>;
-        let handle = registry.register_provider(provider);
-        
-        let mut registry_handle = self.registry_handle.lock().unwrap();
-        *registry_handle = Some(handle.clone());
-        
-        handle
-    }
-}
-
-impl MetricsProvider for LoadProportionSmoother {
-    fn get_metrics(&self) -> ComponentMetrics {
-        ComponentMetrics {
-            component_type: "LoadProportionSmoother".to_string(),
-            component_id: self.id.clone(),
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            metrics: self.metrics.get_snapshot(),
-            status: Some(format!("Load Proportion Smoother: Current={:.2}, Target={:.2}, MaxRamp={:.2}/s",
-                      self.metrics.current_factor.load(Ordering::Relaxed),
-                      self.metrics.target_factor.load(Ordering::Relaxed),
-                      self.metrics.max_ramp_rate.load(Ordering::Relaxed))),
-        }
-    }
-    
-    fn get_component_type(&self) -> &str {
-        "LoadProportionSmoother"
-    }
-    
-    fn get_component_id(&self) -> &str {
-        &self.id
-    }
-}
-```
-
-### 8.4 Distributed Rate Adapter with Metrics
+### 8.2 Distributed Rate Adapter with Session Coordination
 
 ```rust
 /// Distributed rate controller adapter
@@ -2115,6 +1785,9 @@ pub struct DistributedRateAdapter {
     /// Node status
     node_status: Arc<RwLock<NodeStatus>>,
     
+    /// Session parameters
+    session_params: Arc<RwLock<Option<SessionDistributionParams>>>,
+    
     /// Rate adjustment history
     adjustments: Mutex<Vec<(u64, RateAdjustment)>>,
     
@@ -2126,184 +1799,6 @@ pub struct DistributedRateAdapter {
     
     /// Registry handle if registered
     registry_handle: Mutex<Option<RegistrationHandle>>,
-}
-
-impl DistributedRateAdapter {
-    /// Create a new distributed rate adapter
-    pub fn new(
-        id: String,
-        local_controller: Arc<dyn RateController>,
-        coordinator: Arc<dyn DistributedCoordinator>,
-        initial_rps: u64,
-        min_rps: u64,
-        max_rps: u64,
-        initial_proportion: f64,
-        max_ramp_rate: f64,
-    ) -> Self {
-        // Create metrics
-        let metrics = Arc::new(RateControllerMetrics::new(
-            id.clone(), initial_rps, min_rps, max_rps
-        ));
-        
-        // Record initial distributed proportion
-        metrics.update_distributed_metrics(initial_proportion);
-        
-        Self {
-            id,
-            local_controller,
-            load_smoother: Arc::new(LoadProportionSmoother::new(
-                format!("{}-proportion", id),
-                initial_proportion,
-                max_ramp_rate,
-            )),
-            target_updater: Arc::new(AtomicF64::new(100.0)), // Default target metric value
-            coordinator,
-            node_status: Arc::new(RwLock::new(NodeStatus::default())),
-            adjustments: Mutex::new(Vec::new()),
-            start_time: Instant::now(),
-            metrics,
-            registry_handle: Mutex::new(None),
-        }
-    }
-    
-    /// Start background task to update from coordinator
-    pub fn start_coordination(&self) -> JoinHandle<()> {
-        let coordinator = self.coordinator.clone();
-        let node_status = self.node_status.clone();
-        let load_smoother = self.load_smoother.clone();
-        let target_updater = self.target_updater.clone();
-        let metrics = self.metrics.clone();
-        let adjustments = self.adjustments.clone();
-        let start_time = self.start_time;
-        
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(500));
-            
-            loop {
-                interval.tick().await;
-                
-                // Get global status from coordinator
-                match coordinator.get_global_status().await {
-                    Ok(status) => {
-                        // Process control signals
-                        if let Some(new_target_rps) = status.new_target_rps {
-                            // Calculate factor based on assigned RPS
-                            let current_rps = {
-                                let status = node_status.read().unwrap();
-                                status.current_rps
-                            };
-                            
-                            if current_rps > 0 {
-                                let proportion = new_target_rps as f64 / current_rps as f64;
-                                load_smoother.set_target_factor(proportion, None, "Coordinator assigned RPS");
-                                
-                                // Record in metrics
-                                metrics.update_distributed_metrics(proportion);
-                                
-                                // Record adjustment
-                                let now = start_time.elapsed().as_millis() as u64;
-                                let mut adj = adjustments.lock().unwrap();
-                                adj.push((now, RateAdjustment {
-                                    new_rps: new_target_rps,
-                                    old_rps: current_rps,
-                                    reason: AdjustmentReason::DistributedControl,
-                                    context: format!("Coordinator assigned new target RPS: {}", new_target_rps),
-                                }));
-                            }
-                        }
-                        
-                        // Process actions
-                        for action in &status.actions {
-                            match action {
-                                GlobalAction::AdjustRps(factor) => {
-                                    load_smoother.set_target_factor(*factor, None, "Coordinator RPS adjustment");
-                                    
-                                    // Record in metrics
-                                    metrics.update_distributed_metrics(*factor);
-                                    
-                                    // Record adjustment
-                                    let now = start_time.elapsed().as_millis() as u64;
-                                    let current_rps = {
-                                        let status = node_status.read().unwrap();
-                                        status.current_rps
-                                    };
-                                    let new_rps = (current_rps as f64 * factor) as u64;
-                                    
-                                    let mut adj = adjustments.lock().unwrap();
-                                    adj.push((now, RateAdjustment {
-                                        new_rps,
-                                        old_rps: current_rps,
-                                        reason: AdjustmentReason::DistributedControl,
-                                        context: format!("Coordinator adjustment factor: {:.2}", factor),
-                                    }));
-                                },
-                                GlobalAction::RedistributeLoad => {
-                                    // This will be handled by the new_target_rps field
-                                    let mut adj = adjustments.lock().unwrap();
-                                    let now = start_time.elapsed().as_millis() as u64;
-                                    adj.push((now, RateAdjustment {
-                                        new_rps: 0, // Placeholder, actual value set by new_target_rps
-                                        old_rps: 0,
-                                        reason: AdjustmentReason::DistributedControl,
-                                        context: "Load redistribution initiated".to_string(),
-                                    }));
-                                    
-                                    // Record rebalance
-                                    metrics.rebalance_count.fetch_add(1, Ordering::Relaxed);
-                                },
-                                _ => {
-                                    // Other actions handled elsewhere
-                                }
-                            }
-                        }
-                        
-                        // Update target metric if present in control signals
-                        if let Some(target) = status.control_signals.get("target_latency_ms") {
-                            target_updater.store(*target, Ordering::Relaxed);
-                        }
-                    },
-                    Err(e) => {
-                        // Log error but continue
-                        eprintln!("Error getting global status: {}", e);
-                    }
-                }
-                
-                // Report node status back to coordinator
-                let status = node_status.read().unwrap().clone();
-                let _ = coordinator.report_node_status(status).await;
-            }
-        })
-    }
-    
-    /// Update node status
-    pub fn update_status(&self, metrics: &RequestMetrics, saturation: Option<SaturationMetrics>) {
-        let mut status = self.node_status.write().unwrap();
-        
-        // Update from metrics
-        status.current_rps = metrics.current_throughput.round() as u64;
-        status.p99_latency_ms = metrics.p99_latency_us as f64 / 1000.0;
-        status.success_rate = 1.0 - metrics.error_rate;
-        
-        // Update from saturation if provided
-        if let Some(sat) = saturation {
-            status.saturation = sat;
-        }
-    }
-    
-    /// Register with metrics registry
-    pub fn register_with_registry(&self, registry: Arc<dyn MetricsRegistry>) -> RegistrationHandle {
-        // Register the load smoother first
-        self.load_smoother.register_with_registry(registry.clone());
-        
-        // Register this controller
-        let provider = Arc::new(self.clone()) as Arc<dyn MetricsProvider>;
-        let handle = registry.register_provider(provider);
-        
-        let mut registry_handle = self.registry_handle.lock().unwrap();
-        *registry_handle = Some(handle.clone());
-        
-        handle
-    }
 }
 
 impl RateController for DistributedRateAdapter {
@@ -2326,69 +1821,532 @@ impl RateController for DistributedRateAdapter {
         adjusted_rps
     }
     
-    fn update(&self, metrics: &RequestMetrics) {
-        // Update local controller
-        self.local_controller.update(metrics);
+    fn get_session_control_signals(&self) -> SessionControlSignals {
+        // Get base signals from local controller
+        let mut signals = self.local_controller.get_session_control_signals();
         
-        // Update node status
-        self.update_status(metrics, None);
-    }
-    
-    fn process_control_signals(&self, signals: &ControlSignalSet) {
-        // Update local controller
-        self.local_controller.process_control_signals(signals);
+        // Apply distributed adjustment to target RPS
+        signals.target_rps = self.get_current_rps();
         
-        // Check for saturation signal
-        if let Some(saturation) = signals.get_signal("saturation") {
-            let saturation_value = saturation.get_current_value();
-            let node_saturation = match saturation_value {
-                v if v < 0.1 => SaturationLevel::None,
-                v if v < 0.4 => SaturationLevel::Mild,
-                v if v < 0.7 => SaturationLevel::Moderate,
-                _ => SaturationLevel::Severe,
-            };
+        // Apply session parameters from coordinator if available
+        let session_params = self.session_params.read().unwrap().clone();
+        if let Some(params) = session_params {
+            // Override session creation rate
+            signals.session_creation_rate = Some(params.session_creation_rate);
             
-            // Update node status with saturation
-            let mut status = self.node_status.write().unwrap();
-            status.saturation.level = node_saturation;
-        }
-    }
-    
-    fn get_rate_history(&self) -> Vec<(u64, u64)> {
-        // Get history from local controller
-        let mut history = self.local_controller.get_rate_history();
-        
-        // Add distributed adjustments where they don't already exist
-        for (time, adjustment) in self.adjustments.lock().unwrap().iter() {
-            // Check if this timestamp already exists
-            let exists = history.iter().any(|(t, _)| *t == *time);
+            // Apply client type distribution
+            let mut adjustments = HashMap::new();
+            for (type_str, weight) in params.client_distribution {
+                // Convert string to ClientType
+                if let Ok(client_type) = serde_json::from_str::<ClientType>(&type_str) {
+                    adjustments.insert(client_type, weight);
+                }
+            }
             
-            if !exists && adjustment.new_rps > 0 {
-                history.push((*time, adjustment.new_rps));
+            if !adjustments.is_empty() {
+                signals.session_type_adjustments = Some(adjustments);
             }
         }
         
-        // Sort by timestamp
-        history.sort_by_key(|(t, _)| *t);
-        
-        history
+        signals
     }
     
-    fn get_rate_adjustments(&self) -> Vec<(u64, RateAdjustment)> {
-        // Combine local and distributed adjustments
-        let mut result = self.local_controller.get_rate_adjustments();
-        let distributed_adjustments = self.adjustments.lock().unwrap().clone();
-        result.extend(distributed_adjustments.into_iter());
+    // Other methods implementation...
+}
+```
+
+## 9. Rate Controller Factory with Static Dispatch
+
+### 9.1 Factory Implementation with Generic Types
+
+```rust
+/// Factory for creating rate controllers with static dispatch
+pub struct RateControllerFactory;
+
+impl RateControllerFactory {
+    /// Create a rate controller based on configuration
+    pub fn create<M, C>(
+        config: &LoadTestConfig,
+        metrics: M,
+        session_control: C,
+        profiler: Option<impl TransactionProfiler>,
+    ) -> impl RateController<M, impl Signal, C>
+    where
+        M: MetricsProvider,
+        C: SessionControl,
+    {
+        // Generate a unique ID for this controller
+        let id = format!("controller-{}", Uuid::new_v4());
         
-        // Sort by timestamp
-        result.sort_by_key(|(t, _)| *t);
+        // Create base controller based on mode
+        let controller = match &config.rate_control_mode {
+            RateControlMode::Static => {
+                StaticRateController::new(
+                    id.clone(),
+                    config.initial_rps,
+                    config.min_rps,
+                    config.max_rps,
+                    metrics,
+                    session_control,
+                )
+            },
+            RateControlMode::Pid { 
+                target_metric,
+                signal_type,
+                kp, ki, kd,
+                update_interval_ms,
+            } => {
+                match signal_type {
+                    SignalType::LatencyP99 => {
+                        let signal = LatencyP99Signal::new();
+                        PidController::new(
+                            id.clone(),
+                            *target_metric,
+                            *kp, *ki, *kd,
+                            signal,
+                            session_control,
+                            metrics,
+                            config.initial_rps,
+                            config.min_rps,
+                            config.max_rps,
+                            *update_interval_ms,
+                        )
+                    },
+                    SignalType::ErrorRate => {
+                        let signal = ErrorRateSignal::new();
+                        PidController::new(
+                            id.clone(),
+                            *target_metric,
+                            *kp, *ki, *kd,
+                            signal,
+                            session_control,
+                            metrics,
+                            config.initial_rps,
+                            config.min_rps,
+                            config.max_rps,
+                            *update_interval_ms,
+                        )
+                    },
+                    SignalType::Saturation => {
+                        if let Some(prof) = profiler {
+                            let provider = SaturationMetricsProvider::new(
+                                format!("{}-saturation", id),
+                                prof,
+                                Duration::from_millis(*update_interval_ms),
+                            );
+                            
+                            // Start monitoring
+                            provider.start_monitoring();
+                            
+                            // Create signal
+                            let signal = provider.create_signal();
+                            
+                            PidController::new(
+                                id.clone(),
+                                *target_metric,
+                                *kp, *ki, *kd,
+                                signal,
+                                session_control,
+                                metrics,
+                                config.initial_rps,
+                                config.min_rps,
+                                config.max_rps,
+                                *update_interval_ms,
+                            )
+                        } else {
+                            // Fall back to latency signal if no profiler
+                            let signal = LatencyP99Signal::new();
+                            
+                            PidController::new(
+                                id.clone(),
+                                *target_metric,
+                                *kp, *ki, *kd,
+                                signal,
+                                session_control,
+                                metrics,
+                                config.initial_rps,
+                                config.min_rps,
+                                config.max_rps,
+                                *update_interval_ms,
+                            )
+                        }
+                    },
+                    SignalType::External(name) => {
+                        let signal = ExternalSignal::new(name.to_string());
+                        
+                        PidController::new(
+                            id.clone(),
+                            *target_metric,
+                            *kp, *ki, *kd,
+                            signal,
+                            session_control,
+                            metrics,
+                            config.initial_rps,
+                            config.min_rps,
+                            config.max_rps,
+                            *update_interval_ms,
+                        )
+                    },
+                    // Other signal types...
+                    _ => {
+                        // Default to latency signal
+                        let signal = LatencyP99Signal::new();
+                        
+                        PidController::new(
+                            id.clone(),
+                            *target_metric,
+                            *kp, *ki, *kd,
+                            signal,
+                            session_control,
+                            metrics,
+                            config.initial_rps,
+                            config.min_rps,
+                            config.max_rps,
+                            *update_interval_ms,
+                        )
+                    }
+                }
+            },
+            RateControlMode::StepFunction(steps) => {
+                StepFunctionController::new(
+                    id.clone(),
+                    config.initial_rps,
+                    config.min_rps,
+                    config.max_rps,
+                    steps.clone(),
+                    metrics,
+                    session_control,
+                )
+            },
+            // Custom controller or other types...
+            _ => {
+                // Default to static controller
+                StaticRateController::new(
+                    id.clone(),
+                    config.initial_rps,
+                    config.min_rps,
+                    config.max_rps,
+                    metrics,
+                    session_control,
+                )
+            }
+        };
         
-        result
+        // Apply rate smoothing if enabled
+        let controller = if config.rate_smoothing_config.enabled {
+            let smoothing_metrics = DefaultMetrics::new(format!("smoother-{}", id));
+            SmoothedRateController::new(
+                format!("smoothed-{}", id),
+                controller,
+                config.rate_smoothing_config.clone(),
+                smoothing_metrics,
+            )
+        } else {
+            controller
+        };
+        
+        // Return the controller
+        controller
+    }
+    
+    /// Create a controller for distributed testing
+    pub fn create_distributed<M, C, P>(
+        config: &LoadTestConfig,
+        metrics: M,
+        session_control: C,
+        profiler: Option<P>,
+        coordinator: impl DistributedCoordinator,
+    ) -> impl RateController<M, impl Signal, C>
+    where
+        M: MetricsProvider,
+        C: SessionControl,
+        P: TransactionProfiler,
+    {
+        // First create base controller
+        let controller = Self::create(config, metrics.clone(), session_control, profiler);
+        
+        // Apply distributed wrapper
+        let distributed_metrics = DefaultMetrics::new(format!("distributed-{}", Uuid::new_v4()));
+        DistributedRateController::new(
+            format!("distributed-{}", Uuid::new_v4()),
+            controller,
+            coordinator,
+            config.initial_rps,
+            config.min_rps,
+            config.max_rps,
+            1.0, // Initial proportion
+            0.1, // Maximum ramp rate
+            distributed_metrics,
+        )
+    }
+}
+```
+
+### 9.2 Builder Pattern with Static Dispatch
+
+```rust
+impl LoadTestBuilder {
+    /// Use a generic PID controller with specified signal
+    pub fn with_pid_controller<S: Signal>(
+        mut self,
+        target: f64,
+        kp: f64, ki: f64, kd: f64,
+        signal_type: SignalType,
+    ) -> Self {
+        self.config.rate_control_mode = RateControlMode::Pid {
+            target_metric: target,
+            signal_type,
+            kp,
+            ki,
+            kd,
+            update_interval_ms: 500,
+        };
+        self
+    }
+    
+    /// Use a saturation-aware PID controller
+    pub fn with_saturation_aware_pid(
+        mut self,
+        target_saturation: f64,
+        kp: f64, ki: f64, kd: f64,
+    ) -> Self {
+        self.config.rate_control_mode = RateControlMode::Pid {
+            target_metric: target_saturation,
+            signal_type: SignalType::Saturation,
+            kp,
+            ki,
+            kd,
+            update_interval_ms: 500,
+        };
+        self
+    }
+    
+    /// Use an external signal PID controller
+    pub fn with_external_signal_pid(
+        mut self,
+        target: f64,
+        kp: f64, ki: f64, kd: f64,
+        signal_name: &str,
+    ) -> Self {
+        self.config.rate_control_mode = RateControlMode::Pid {
+            target_metric: target,
+            signal_type: SignalType::External(signal_name.to_string()),
+            kp,
+            ki,
+            kd,
+            update_interval_ms: 500,
+        };
+        self
+    }
+    
+    /// With client session control configuration
+    pub fn with_session_control(
+        mut self,
+        config: SessionControlConfig,
+    ) -> Self {
+        self.session_control_config = Some(config);
+        self
+    }
+    
+    /// Build the rate controller with static dispatch
+    fn build_rate_controller<C: ClientSessionManager>(&self, session_manager: &C) -> impl RateController<DefaultMetrics, impl Signal, DefaultSessionControl> {
+        // Create metrics provider
+        let metrics = DefaultMetrics::new(format!("controller-{}", Uuid::new_v4()));
+        
+        // Create session control
+        let session_control = if let Some(config) = &self.session_control_config {
+            DefaultSessionControl::new(config.clone())
+        } else {
+            DefaultSessionControl::new(SessionControlConfig::default())
+        };
+        
+        // Create controller
+        RateControllerFactory::create(
+            &self.config,
+            metrics,
+            session_control,
+            self.get_profiler(),
+        )
+    }
+    
+    // Other builder methods...
+}
+
+/// Session control configuration
+#[derive(Debug, Clone)]
+pub struct SessionControlConfig {
+    /// Whether to prioritize request rate over session fidelity
+    pub prioritize_request_rate: bool,
+    /// How to ramp up/down load
+    pub ramp_mode: RampMode,
+    /// Whether to apply constant think time across load levels
+    pub constant_think_time: bool,
+    /// Maximum session count
+    pub max_sessions: Option<u64>,
+}
+
+/// Load ramp behavior
+#[derive(Debug, Clone)]
+pub enum RampMode {
+    /// Add/remove sessions to change load
+    AdjustSessionCount,
+    /// Modify think time within sessions
+    AdjustThinkTime,
+    /// Change request pattern within sessions
+    AdjustRequestPattern,
+    /// Combined approach (automatic)
+    Automatic,
+}
+
+/// Default session control implementation
+pub struct DefaultSessionControl {
+    /// Configuration
+    config: SessionControlConfig,
+}
+
+impl DefaultSessionControl {
+    /// Create a new default session control
+    pub fn new(config: SessionControlConfig) -> Self {
+        Self { config }
     }
 }
 
-impl MetricsProvider for DistributedRateAdapter {
+impl SessionControl for DefaultSessionControl {
+    type SessionSignals = SessionControlSignals;
+    
+    fn create_signals(&self, target_rps: u64, last_rps: u64) -> Self::SessionSignals {
+        // Create session signals based on configuration
+        let mut signals = SessionControlSignals {
+            target_rps,
+            session_creation_rate: None,
+            target_active_sessions: None,
+            session_type_adjustments: None,
+            prioritize_request_rate: self.config.prioritize_request_rate,
+            rate_change_event: None,
+        };
+        
+        // Calculate session creation rate if needed
+        if target_rps > 0 {
+            // Estimate reasonable session creation rate based on RPS
+            // This is a simplified example - real implementation would be more sophisticated
+            let estimated_creation_rate = (target_rps as f64 / 20.0).max(1.0);
+            signals.session_creation_rate = Some(estimated_creation_rate);
+        }
+        
+        // Create rate change event if significant change
+        if (target_rps as f64 - last_rps as f64).abs() / last_rps as f64 > 0.1 {
+            // More than 10% change
+            signals.rate_change_event = Some(self.create_rate_change_event(target_rps, last_rps));
+        }
+        
+        signals
+    }
+    
+    fn update(&mut self, _metrics: &RequestMetrics) {
+        // Update based on metrics if needed
+    }
+}
+
+impl DefaultSessionControl {
+    /// Create a rate change event
+    fn create_rate_change_event(&self, new_rps: u64, old_rps: u64) -> RateChangeEvent {
+        let relative_change = (new_rps as f64 - old_rps as f64) / old_rps as f64;
+        
+        // Determine session impact based on ramp mode
+        let session_impact = match self.config.ramp_mode {
+            RampMode::AdjustSessionCount => {
+                if relative_change > 0.0 {
+                    // Increasing load
+                    SessionImpact::AddSessions {
+                        count: ((new_rps - old_rps) as f64 / 10.0).ceil() as u64,
+                        priority_types: vec![],
+                    }
+                } else {
+                    // Decreasing load
+                    SessionImpact::RemoveSessions {
+                        count: ((old_rps - new_rps) as f64 / 10.0).ceil() as u64,
+                        strategy: SessionRemovalStrategy::LeastActiveFirst,
+                    }
+                }
+            },
+            RampMode::AdjustThinkTime => {
+                // Modify activity level
+                SessionImpact::ModifyActivityLevel {
+                    multiplier: new_rps as f64 / old_rps as f64,
+                }
+            },
+            RampMode::AdjustRequestPattern => {
+                // Gradual change
+                SessionImpact::GradualChange {
+                    duration_ms: 5000, // 5 seconds
+                    easing: EasingFunction::EaseInOut,
+                }
+            },
+            RampMode::Automatic => {
+                // Choose based on magnitude
+                if relative_change.abs() > 0.3 {
+                    // Large change - add/remove sessions
+                    if relative_change > 0.0 {
+                        SessionImpact::AddSessions {
+                            count: ((new_rps - old_rps) as f64 / 10.0).ceil() as u64,
+                            priority_types: vec![],
+                        }
+                    } else {
+                        SessionImpact::RemoveSessions {
+                            count: ((old_rps - new_rps) as f64 / 10.0).ceil() as u64,
+                            strategy: SessionRemovalStrategy::LeastActiveFirst,
+                        }
+                    }
+                } else {
+                    // Smaller change - adjust think time
+                    SessionImpact::ModifyActivityLevel {
+                        multiplier: new_rps as f64 / old_rps as f64,
+                    }
+                }
+            }
+        };
+        
+        RateChangeEvent {
+            new_rps,
+            old_rps,
+            reason: AdjustmentReason::PidControl,
+            session_impact,
+        }
+    }
+}
+
+/// Default metrics implementation
+pub struct DefaultMetrics {
+    /// Component ID
+    id: String,
+    /// Metrics data
+    data: Arc<DashMap<String, MetricValue>>,
+}
+
+impl DefaultMetrics {
+    /// Create new default metrics
+    pub fn new(id: String) -> Self {
+        Self {
+            id,
+            data: Arc::new(DashMap::new()),
+        }
+    }
+    
+    /// Set a metric value
+    pub fn set(&self, key: &str, value: MetricValue) {
+        self.data.insert(key.to_string(), value);
+    }
+}
+
+impl MetricsProvider for DefaultMetrics {
     fn get_metrics(&self) -> ComponentMetrics {
+        let mut metrics = HashMap::new();
+        
+        // Copy all metrics from dashmap
+        for entry in self.data.iter() {
+            metrics.insert(entry.key().clone(), entry.value().clone());
+        }
+        
         ComponentMetrics {
             component_type: "RateController".to_string(),
             component_id: self.id.clone(),
@@ -2396,10 +2354,8 @@ impl MetricsProvider for DistributedRateAdapter {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            metrics: self.metrics.get_snapshot(),
-            status: Some(format!("Distributed Rate Controller ({}): Factor={:.2}",
-                       self.id,
-                       self.metrics.distributed_proportion_factor.load(Ordering::Relaxed))),
+            metrics,
+            status: None,
         }
     }
     
@@ -2413,571 +2369,360 @@ impl MetricsProvider for DistributedRateAdapter {
 }
 ```
 
-## 9. Rate Controller Factory and Builder Pattern
+## 10. Usage Examples with Static Dispatch
 
-### 9.1 Rate Controller Factory with Registry Integration
+### 10.1 Basic Controller with Generic Types
 
 ```rust
-/// Factory for creating rate controllers
-pub struct RateControllerFactory;
+// Example 1: Create a PID controller with static dispatch and client session integration
+fn create_test_controller() -> impl RateController<DefaultMetrics, LatencyP99Signal, DefaultSessionControl> {
+    // Create session control
+    let session_control = DefaultSessionControl::new(SessionControlConfig {
+        prioritize_request_rate: false,
+        ramp_mode: RampMode::Automatic,
+        constant_think_time: false,
+        max_sessions: Some(10000),
+    });
+    
+    // Create metrics provider
+    let metrics = DefaultMetrics::new("controller-1".to_string());
+    
+    // Create latency signal
+    let signal = LatencyP99Signal::new();
+    
+    // Create PID controller with static dispatch
+    PidController::new(
+        "controller-1".to_string(),
+        100.0,  // Target 100ms latency
+        0.1,    // kp
+        0.01,   // ki
+        0.001,  // kd
+        signal,
+        session_control,
+        metrics,
+        100,    // initial RPS
+        10,     // min RPS
+        1000,   // max RPS
+        500,    // update interval ms
+    )
+}
 
-impl RateControllerFactory {
-    /// Create a rate controller based on configuration
-    pub fn create_controller(
-        config: &LoadTestConfig,
-        metrics_registry: Option<Arc<dyn MetricsRegistry>>,
-        profiler: Option<Arc<dyn TransactionProfiler>>,
-    ) -> Arc<dyn RateController> {
-        // Generate a unique ID for this controller
-        let id = format!("controller-{}", Uuid::new_v4());
-        
-        // Create base controller
-        let raw_controller: Arc<dyn RateController> = match &config.rate_control_mode {
-            RateControlMode::Static => {
-                let controller = Arc::new(StaticRateController::new(
-                    id.clone(),
-                    config.initial_rps,
-                    config.min_rps,
-                    config.max_rps,
-                ));
-                
-                if let Some(registry) = &metrics_registry {
-                    controller.register_with_registry(registry.clone());
-                }
-                
-                controller
+// Use the controller with client session manager
+fn run_test_with_controller() {
+    let controller = create_test_controller();
+    
+    // Create client session manager
+    let session_manager = ClientSessionManagerImpl::new(
+        "session-manager-1".to_string(),
+        ClientSessionConfig {
+            session_creation_rate: 10.0,  // 10 new sessions per second
+            avg_session_duration_secs: 300.0,  // 5 minute average session
+            distribution: {
+                let mut dist = HashMap::new();
+                dist.insert(
+                    ClientType::Browser {
+                        browser_type: BrowserType::Chrome,
+                        http2_enabled: true,
+                        connection_limit: 6,
+                    },
+                    0.7,  // 70% Chrome browsers
+                );
+                dist.insert(
+                    ClientType::Mobile {
+                        platform: MobilePlatform::iOS,
+                        network_type: NetworkType::WiFi,
+                        http2_enabled: true,
+                    },
+                    0.3,  // 30% iOS mobile clients
+                );
+                dist
             },
-            RateControlMode::Pid { .. } => {
-                let controller = Arc::new(PidRateController::new(
-                    id.clone(),
-                    config.initial_rps,
-                    config.min_rps,
-                    config.max_rps,
-                    config.rate_control_mode.clone(),
-                ));
-                
-                if let Some(registry) = &metrics_registry {
-                    controller.register_with_registry(registry.clone());
-                }
-                
-                controller
-            },
-            RateControlMode::ExternalSignalPid { .. } => {
-                let controller = Arc::new(PidRateController::new(
-                    id.clone(),
-                    config.initial_rps,
-                    config.min_rps,
-                    config.max_rps,
-                    config.rate_control_mode.clone(),
-                ));
-                
-                if let Some(registry) = &metrics_registry {
-                    controller.register_with_registry(registry.clone());
-                }
-                
-                controller
-            },
-            RateControlMode::SaturationAwarePid { .. } => {
-                // Need profiler for saturation awareness
-                if let Some(prof) = &profiler {
-                    // Create signal set
-                    let signal_set = Arc::new(ControlSignalSet::new());
-                    
-                    // Create saturation signal
-                    let saturation_signal = Arc::new(SaturationSignalProvider::new(
-                        format!("{}-saturation", id),
-                        prof.clone(),
-                        Duration::from_millis(500),
-                    ));
-                    
-                    // Register with registry if provided
-                    if let Some(registry) = &metrics_registry {
-                        saturation_signal.register_with_registry(registry.clone());
-                    }
-                    
-                    // Start monitoring
-                    saturation_signal.start_monitoring();
-                    
-                    // Register signal
-                    signal_set.register_signal("saturation", saturation_signal.clone());
-                    
-                    // Create base PID controller
-                    let pid_controller = Arc::new(PidRateController::new(
-                        format!("{}-pid", id),
-                        config.initial_rps,
-                        config.min_rps,
-                        config.max_rps,
-                        config.rate_control_mode.clone(),
-                    ));
-                    
-                    if let Some(registry) = &metrics_registry {
-                        pid_controller.register_with_registry(registry.clone());
-                    }
-                    
-                    // Extract saturation threshold
-                    let saturation_threshold = if let RateControlMode::SaturationAwarePid { saturation_threshold, .. } = config.rate_control_mode {
-                        saturation_threshold
-                    } else {
-                        0.5 // Default
-                    };
-                    
-                    // Create saturation adapter
-                    let adapter = Arc::new(SaturationRateAdapter::new(
-                        id.clone(),
-                        pid_controller,
-                        saturation_signal,
-                        config.initial_rps,
-                        config.min_rps,
-                        config.max_rps,
-                        0.2, // Moderate threshold
-                        saturation_threshold, // Severe threshold
-                    ));
-                    
-                    if let Some(registry) = &metrics_registry {
-                        adapter.register_with_registry(registry.clone());
-                    }
-                    
-                    adapter
-                } else {
-                    // Fall back to regular PID if no profiler
-                    let controller = Arc::new(PidRateController::new(
-                        id.clone(),
-                        config.initial_rps,
-                        config.min_rps,
-                        config.max_rps,
-                        config.rate_control_mode.clone(),
-                    ));
-                    
-                    if let Some(registry) = &metrics_registry {
-                        controller.register_with_registry(registry.clone());
-                    }
-                    
-                    controller
-                }
-            },
-            RateControlMode::StepFunction(steps) => {
-                let controller = Arc::new(StepFunctionController::new(
-                    id.clone(),
-                    config.initial_rps,
-                    config.min_rps,
-                    config.max_rps,
-                    steps.clone(),
-                ));
-                
-                if let Some(registry) = &metrics_registry {
-                    controller.register_with_registry(registry.clone());
-                }
-                
-                controller
-            },
-            RateControlMode::Custom => {
-                panic!("Custom controller must be provided directly")
-            },
-        };
-        
-        // Apply rate smoothing if enabled
-        let smoothed_controller = if config.rate_smoothing_config.enabled {
-            let smoothed_id = format!("smoothed-{}", id);
-            let controller = Arc::new(SmoothedRateController::new(
-                smoothed_id,
-                raw_controller,
-                config.initial_rps,
-                config.min_rps,
-                config.max_rps,
-                config.rate_smoothing_config.clone(),
-            ));
-            
-            if let Some(registry) = &metrics_registry {
-                controller.register_with_registry(registry.clone());
-            }
-            
-            controller
-        } else {
-            raw_controller
-        };
-        
-        // Apply distributed adapter if enabled
-        if let Some(dist_config) = &config.distributed_config {
-            if let Some(coordinator) = &dist_config.coordinator {
-                let dist_id = format!("distributed-{}", id);
-                let controller = Arc::new(DistributedRateAdapter::new(
-                    dist_id,
-                    smoothed_controller,
-                    coordinator.clone(),
-                    config.initial_rps,
-                    config.min_rps,
-                    config.max_rps,
-                    1.0, // Initial proportion
-                    0.1, // Maximum ramp rate
-                ));
-                
-                if let Some(registry) = &metrics_registry {
-                    controller.register_with_registry(registry.clone());
-                }
-                
-                // Start coordination
-                controller.start_coordination();
-                
-                return controller;
-            }
-        }
-        
-        // Return smoothed controller if no distributed config
-        smoothed_controller
-    }
+        },
+        controller,
+    );
+    
+    // Create request scheduler
+    let scheduler = PoissonScheduler::new(
+        "scheduler-1".to_string(),
+        SchedulerConfig {
+            sampling_rate: 0.01,
+            tick_resolution_us: 100,
+            jitter_threshold_ns: 1000,
+        },
+    );
+    
+    // Create test pipeline
+    let pipeline = LoadTestImpl::new(
+        session_manager,
+        scheduler,
+        // Other components...
+    );
+    
+    // Run the test
+    pipeline.run();
 }
 ```
 
-### 9.2 Builder Pattern with Combined Features
+### 10.2 Using Factory with Type Parameters
 
 ```rust
-impl LoadTestBuilder {
-    /// Use a PID controller
-    pub fn with_pid_controller(
-        mut self,
-        target_metric: f64,
-        kp: f64,
-        ki: f64,
-        kd: f64,
-    ) -> Self {
-        self.config.rate_control_mode = RateControlMode::Pid {
-            target_metric,
-            metric_type: MetricType::LatencyP99,
-            kp,
-            ki,
-            kd,
+// Example 2: Using rate controller factory with type parameters
+fn create_test() {
+    // Create load test configuration
+    let config = LoadTestConfig {
+        initial_rps: 100,
+        min_rps: 10,
+        max_rps: 1000,
+        rate_control_mode: RateControlMode::Pid {
+            target_metric: 100.0,
+            signal_type: SignalType::LatencyP99,
+            kp: 0.1,
+            ki: 0.01,
+            kd: 0.001,
             update_interval_ms: 500,
-        };
-        self
-    }
+        },
+        rate_smoothing_config: RateSmoothingConfig {
+            enabled: true,
+            max_relative_change_per_second: 0.1,
+            max_absolute_change_per_second: 50,
+            min_adjustment_interval_ms: 100,
+            limit_decreases: true,
+        },
+        // Other configuration...
+    };
     
-    /// Use a PID controller with specific metric type
-    pub fn with_pid_metric_type(
-        mut self,
-        metric_type: MetricType,
-    ) -> Self {
-        if let RateControlMode::Pid { 
-            target_metric, kp, ki, kd, update_interval_ms, ..
-        } = self.config.rate_control_mode {
-            self.config.rate_control_mode = RateControlMode::Pid {
-                target_metric,
-                metric_type,
-                kp,
-                ki,
-                kd,
-                update_interval_ms,
-            };
-        }
-        self
-    }
+    // Create metrics
+    let metrics = DefaultMetrics::new("controller-metrics".to_string());
     
-    /// Use external signal for PID control
-    pub fn with_external_signal_pid(
-        mut self,
-        target_metric: f64,
-        kp: f64,
-        ki: f64,
-        kd: f64,
-        signal_name: &str,
-    ) -> Self {
-        self.config.rate_control_mode = RateControlMode::ExternalSignalPid {
-            target_metric,
-            kp,
-            ki,
-            kd,
-            update_interval_ms: 500,
-            signal_name: signal_name.to_string(),
-        };
-        self
-    }
+    // Create session control
+    let session_control = DefaultSessionControl::new(SessionControlConfig {
+        prioritize_request_rate: false,
+        ramp_mode: RampMode::Automatic,
+        constant_think_time: false,
+        max_sessions: Some(10000),
+    });
     
-    /// Use a saturation-aware PID controller
-    pub fn with_saturation_aware_pid(
-        mut self,
-        target_metric: f64,
-        kp: f64,
-        ki: f64,
-        kd: f64,
-        saturation_threshold: f64,
-    ) -> Self {
-        self.config.rate_control_mode = RateControlMode::SaturationAwarePid {
-            target_metric,
-            kp,
-            ki,
-            kd,
-            update_interval_ms: 500,
-            saturation_threshold,
-        };
-        self
-    }
+    // Create transaction profiler
+    let profiler = StandardTransactionProfiler::new(
+        "profiler-1".to_string(),
+        ProfilingConfig {
+            mode: ProfilingMode::RuntimeOnly,
+            sample_rate: 0.01,
+        },
+    );
     
-    /// Use a step function controller
-    pub fn with_step_function(mut self, steps: Vec<(u64, u64)>) -> Self {
-        self.config.rate_control_mode = RateControlMode::StepFunction(steps);
-        self
-    }
+    // Create rate controller with factory (static dispatch)
+    let controller = RateControllerFactory::create(
+        &config,
+        metrics,
+        session_control,
+        Some(profiler),
+    );
     
-    /// Use a smoothed rate control
-    pub fn with_smoothed_rate_control(mut self, config: RateSmoothingConfig) -> Self {
-        self.config.rate_smoothing_config = config;
-        self
-    }
+    // Create client session manager with the controller
+    let session_manager = ClientSessionManagerImpl::new(
+        "session-manager-1".to_string(),
+        ClientSessionConfig {
+            session_creation_rate: 10.0,
+            avg_session_duration_secs: 300.0,
+            distribution: client_distribution,
+        },
+        controller,
+    );
     
-    /// With default smoothing (10% max change per second)
-    pub fn with_default_smoothing(mut self) -> Self {
-        self.config.rate_smoothing_config = RateSmoothingConfig::default();
-        self
-    }
+    // Create and run the test
+    // ...
+}
+```
+
+### 10.3 Builder Pattern with Static Types
+
+```rust
+// Example 3: Using builder pattern with static dispatch
+fn create_load_test() -> impl LoadTest {
+    // Create load test builder
+    let builder = LoadTestBuilder::new();
     
-    /// With custom max change rate
-    pub fn with_max_change_rate(mut self, max_relative_change_per_second: f64) -> Self {
-        self.config.rate_smoothing_config.enabled = true;
-        self.config.rate_smoothing_config.max_relative_change_per_second = max_relative_change_per_second;
-        self
-    }
-    
-    /// With metrics collection
-    pub fn with_metrics_collection(mut self, collection_interval_ms: u64) -> Self {
-        let registry = Arc::new(DefaultMetricsRegistry::new());
-        self.metrics_registry = Some(registry.clone());
-        
-        // Start periodic collection if interval provided
-        if collection_interval_ms > 0 {
-            registry.start_periodic_collection(Duration::from_millis(collection_interval_ms));
-        }
-        
-        self
-    }
-    
-    /// With distributed coordinator
-    pub fn with_distributed_coordinator(
-        mut self,
-        coordinator_url: String,
-        node_id: String,
-    ) -> Self {
-        let coordinator = Arc::new(HttpDistributedCoordinator::new(
-            coordinator_url,
-            node_id,
-        ));
-        
-        self.config.distributed_config = Some(DistributedConfig {
-            coordinator: Some(coordinator),
-            role: DistributedRole::Worker,
-        });
-        
-        self
-    }
-    
-    /// Build the rate controller with all selected features
-    fn build_rate_controller(&self) -> Arc<dyn RateController> {
-        RateControllerFactory::create_controller(
-            &self.config,
-            self.metrics_registry.clone(),
-            self.profiler.clone(),
+    // Configure test
+    let builder = builder
+        .with_urls(vec!["https://example.com/api".to_string()])
+        .with_pid_controller(
+            100.0,                      // Target 100ms latency 
+            0.1, 0.01, 0.001,           // PID gains
+            SignalType::LatencyP99,     // Signal type
         )
-    }
+        .with_session_control(SessionControlConfig {
+            prioritize_request_rate: false,
+            ramp_mode: RampMode::Automatic,
+            constant_think_time: false,
+            max_sessions: Some(10000),
+        })
+        .with_client_session_config(ClientSessionConfig {
+            session_creation_rate: 10.0,
+            avg_session_duration_secs: 300.0,
+            distribution: client_distribution,
+            think_time_distribution: ThinkTimeDistribution::LogNormal {
+                mean_ms: 2000.0,
+                std_dev_ms: 500.0,
+            },
+        })
+        .with_scheduler_config(SchedulerConfig {
+            sampling_rate: 0.01,
+            tick_resolution_us: 100,
+            jitter_threshold_ns: 1000,
+        })
+        .with_transaction_profiling(ProfilingConfig {
+            mode: ProfilingMode::Full,
+            sample_rate: 0.01,
+        })
+        .with_network_condition_config(NetworkConditionConfig {
+            slow_connection_probability: 0.2,
+            consistent_per_session: true,
+            // Other network settings...
+        });
+    
+    // Build the test with concrete types
+    builder.build::<
+        PidController<DefaultMetrics, LatencyP99Signal, DefaultSessionControl>,
+        StandardClientSessionManager<PidController<DefaultMetrics, LatencyP99Signal, DefaultSessionControl>>,
+        PoissonScheduler,
+        StandardGenerator,
+        HeaderTransformer,
+        ConnectionPoolExecutor,
+        StandardTransactionProfiler,
+        StandardResultsCollector,
+        StandardNetworkSimulator
+    >()
 }
 ```
 
-## 10. Usage Examples
-
-### 10.1 Basic Controller with Metrics
+### 10.4 Saturation-Aware Controller with Static Dispatch
 
 ```rust
-// Example 1: Create a PID controller with metrics registry
-let metrics_registry = Arc::new(DefaultMetricsRegistry::new());
-let controller = PidRateController::new(
-    "controller-1".to_string(),
-    100,  // initial RPS
-    10,   // min RPS
-    1000, // max RPS
-    RateControlMode::Pid {
-        target_metric: 100.0,  // Target 100ms latency
-        metric_type: MetricType::LatencyP99,
-        kp: 0.1,
-        ki: 0.01,
-        kd: 0.001,
-        update_interval_ms: 500,
-    },
-);
-controller.register_with_registry(metrics_registry.clone());
-
-// Start metrics collection
-metrics_registry.start_periodic_collection(Duration::from_millis(1000));
-
-// Use the controller in the load test
-let load_test = LoadTest::new(controller, /* other components */);
-```
-
-### 10.2 Smoothed Controller with Builder Pattern
-
-```rust
-// Example 2: Using builder pattern with metrics registry
-let load_test = LoadTestBuilder::new()
-    .with_urls(vec!["https://example.com/api".to_string()])
-    .with_initial_rps(100)
-    .with_duration(300)
-    .with_pid_controller(100.0, 0.1, 0.01, 0.001)  // 100ms target latency
-    .with_default_smoothing()  // Add 10% max change rate smoothing
-    .with_metrics_collection(1000)  // Enable metrics collection with 1s interval
-    .build();
-```
-
-### 10.3 Saturation-Aware Controller
-
-```rust
-// Example 3: Saturation-aware controller with metrics
-let load_test = LoadTestBuilder::new()
-    .with_urls(vec!["https://example.com/api".to_string()])
-    .with_initial_rps(100)
-    .with_duration(300)
-    .with_saturation_aware_pid(
-        100.0,  // Target P99 latency of 100ms
-        0.1,    // kp
-        0.01,   // ki
-        0.001,  // kd
-        0.5     // Adjust rate if saturation > 50%
+// Example 4: Create a saturation-aware controller with static dispatch
+fn create_saturation_aware_controller() -> impl RateController<DefaultMetrics, SaturationSignal<StandardTransactionProfiler>, DefaultSessionControl> {
+    // Create profiler
+    let profiler = StandardTransactionProfiler::new(
+        "profiler-1".to_string(),
+        ProfilingConfig {
+            mode: ProfilingMode::Full,
+            sample_rate: 0.01,
+        },
+    );
+    
+    // Create saturation provider
+    let saturation_provider = SaturationMetricsProvider::new(
+        "saturation-provider-1".to_string(),
+        profiler,
+        Duration::from_millis(500),
+    );
+    
+    // Start monitoring
+    saturation_provider.start_monitoring();
+    
+    // Create signal
+    let signal = saturation_provider.create_signal();
+    
+    // Create metrics
+    let metrics = DefaultMetrics::new("saturation-controller".to_string());
+    
+    // Create session control
+    let session_control = DefaultSessionControl::new(SessionControlConfig {
+        prioritize_request_rate: false,
+        ramp_mode: RampMode::Automatic,
+        constant_think_time: false,
+        max_sessions: Some(10000),
+    });
+    
+    // Create PID controller
+    PidController::new(
+        "saturation-controller".to_string(),
+        0.3,    // Target saturation level of 0.3 (moderate)
+        0.2,    // Higher kp for saturation control
+        0.02,   // ki
+        0.002,  // kd
+        signal,
+        session_control,
+        metrics,
+        100,    // initial RPS
+        10,     // min RPS
+        1000,   // max RPS
+        500,    // update interval ms
     )
-    .with_default_smoothing()
-    .with_metrics_collection(1000)
-    .build();
+}
 ```
 
-### 10.4 Distributed Load Testing with Metrics
+### 10.5 Type-Safe Pipeline with Static Dispatch
 
 ```rust
-// Example 4: Distributed load testing as worker node
-let load_test = LoadTestBuilder::new()
-    .with_urls(vec!["https://example.com/api".to_string()])
-    .with_initial_rps(100)
-    .with_duration(300)
-    .with_pid_controller(100.0, 0.1, 0.01, 0.001)
-    .with_default_smoothing()
-    .with_metrics_collection(1000)
-    .with_distributed_coordinator(
-        "https://coordinator.example.com".to_string(),
-        "worker-node-1".to_string()
-    )
-    .build();
-```
-
-### 10.5 External Signal Integration
-
-```rust
-// Example 5: Using external control signal from system metrics
-let metrics_registry = Arc::new(DefaultMetricsRegistry::new());
-
-// Create CPU utilization signal provider
-let cpu_signal = Arc::new(CpuUtilizationSignal::new(
-    "cpu-signal".to_string(),
-    Duration::from_millis(500),
-));
-cpu_signal.register_with_registry(metrics_registry.clone());
-cpu_signal.start_monitoring();
-
-// Create signal set and register CPU signal
-let signal_set = Arc::new(ControlSignalSet::new());
-signal_set.register_signal("cpu", cpu_signal);
-
-// Create controller that targets 50% CPU utilization
-let controller = LoadTestBuilder::new()
-    .with_external_signal_pid(
-        50.0,   // Target 50% CPU utilization
-        0.1,    // kp
-        0.01,   // ki
-        0.001,  // kd
-        "cpu"   // Signal name
-    )
-    .with_default_smoothing()
-    .with_metrics_registry(metrics_registry)
-    .build();
-
-// Provide signal set to controller during updates
-controller.process_control_signals(&signal_set);
-```
-
-### 10.6 Combined Features for Advanced Scenarios
-
-```rust
-// Example 6: Combine saturation awareness, smoothing, and distributed control
-let load_test = LoadTestBuilder::new()
-    .with_urls(vec!["https://example.com/api".to_string()])
-    .with_initial_rps(100)
-    .with_duration(600)
-    .with_saturation_aware_pid(
-        100.0,  // Target P99 latency of 100ms
-        0.1,    // kp
-        0.01,   // ki
-        0.001,  // kd
-        0.5     // Adjust rate if saturation > 50%
-    )
-    .with_smoothed_rate_control(RateSmoothingConfig {
-        enabled: true,
-        max_relative_change_per_second: 0.05,  // 5% per second (gradual)
-        max_absolute_change_per_second: 50,    // Max 50 RPS per second
-        min_adjustment_interval_ms: 200,       // 200ms between adjustments
-        limit_decreases: true,                 // Limit rate decreases too
-    })
-    .with_metrics_collection(500)  // 500ms metrics collection interval
-    .with_distributed_coordinator(
-        "https://coordinator.example.com".to_string(),
-        "worker-node-1".to_string()
-    )
-    .build();
-```
-
-### 10.7 Accessing Metrics
-
-```rust
-// Example 7: Monitoring metrics from various components
-let registry = Arc::clone(&metrics_registry);
-
-// Subscribe to metrics updates
-let mut metrics_receiver = registry.subscribe();
-
-tokio::spawn(async move {
-    while let Some(metrics) = metrics_receiver.recv().await {
-        // Check rate controller metrics
-        for (id, component) in metrics.iter() {
-            if component.component_type == "RateController" {
-                if let Some(MetricValue::Gauge(current_rps)) = component.metrics.get("current_rps") {
-                    println!("Controller {}: RPS = {}", id, current_rps);
-                }
-                
-                if let Some(MetricValue::Float(error)) = component.metrics.get("error_value") {
-                    println!("Controller {}: PID Error = {:.2}", id, error);
-                }
-            }
-            
-            if component.component_type == "ControlSignal" && id.contains("saturation") {
-                if let Some(MetricValue::Float(saturation)) = component.metrics.get("current_value") {
-                    println!("Saturation level: {:.2}", saturation);
-                    
-                    if saturation > 0.7 {
-                        println!("WARNING: High client saturation detected!");
-                    }
-                }
-            }
-            
-            if component.component_type == "LoadProportionSmoother" {
-                if let Some(MetricValue::Float(factor)) = component.metrics.get("current_factor") {
-                    println!("Load proportion factor: {:.2}", factor);
-                }
-            }
-        }
-    }
-});
+// Example 5: Creating a complete pipeline with static dispatch
+fn create_pipeline() {
+    // Type aliases for clarity
+    type MetricsType = DefaultMetrics;
+    type SignalType = LatencyP99Signal;
+    type SessionControlType = DefaultSessionControl;
+    type ControllerType = PidController<MetricsType, SignalType, SessionControlType>;
+    type SessionManagerType = StandardClientSessionManager<ControllerType>;
+    type SchedulerType = PoissonScheduler;
+    
+    // Create controller
+    let controller: ControllerType = create_test_controller();
+    
+    // Create session manager
+    let session_manager = StandardClientSessionManager::new(
+        "session-manager-1".to_string(),
+        ClientSessionConfig {
+            // Configuration...
+        },
+        controller,
+    );
+    
+    // Create scheduler
+    let scheduler = PoissonScheduler::new(
+        "scheduler-1".to_string(),
+        SchedulerConfig {
+            // Configuration...
+        },
+    );
+    
+    // Other components...
+    
+    // Create the complete pipeline with static dispatch
+    let pipeline = LoadTestImpl::<
+        ControllerType,
+        SessionManagerType,
+        SchedulerType,
+        // Other component types...
+    >::new(
+        controller,
+        session_manager,
+        scheduler,
+        // Other components...
+    );
+    
+    // Run the test
+    pipeline.run();
+}
 ```
 
 ## 11. Conclusion
 
-This combined rate control system provides a comprehensive solution for load testing scenarios, integrating metrics-based observability with sophisticated distributed control capabilities. The design enables:
+This revised Rate Control system design provides a comprehensive solution for load testing scenarios, optimized for performance through static dispatch while maintaining flexibility and composability. Key advantages of this design include:
 
-1. **Comprehensive Monitoring**: Every component publishes detailed metrics through the registry
-2. **Sophisticated Control Algorithms**: PID controllers, step functions, and signal-based control
-3. **Precise Rate Management**: Rate smoothing prevents abrupt changes that would skew results
-4. **Client Saturation Awareness**: System detects and adapts to client-side bottlenecks
-5. **Distributed Load Control**: Coordinates rate across multiple nodes with centralized control
-6. **Component Composition**: Mix and match controllers, smoothers, and adapters for different scenarios
+1. **Static Dispatch Performance**: By using generic types and avoiding dynamic dispatch in the critical path, the system achieves maximum performance with full compiler optimization.
 
-The unified metrics registry integration enables thorough analysis of rate control behavior, while the distributed coordination features provide sophisticated multi-node test capabilities, all with minimal performance impact on the critical request path.
+2. **Signal-Based Control Unification**: A single generic PID controller can be specialized with different signal implementations (latency, error rate, saturation), creating a unified approach to control while allowing full customization.
+
+3. **Comprehensive Session Control**: Rate controllers translate raw RPS targets into realistic client session behavior through the Session Control interface.
+
+4. **Type-Safe Composition**: Components are designed for type-safe composition while preserving static dispatch, enabling precise compiler checking without runtime overhead.
+
+5. **Realistic Load Patterns**: Smoothing and session-aware adjustments prevent abrupt, unrealistic traffic changes.
+
+6. **Transaction Profiler Integration**: Saturation awareness is implemented as a signal type, allowing any controller to leverage profiling data through a consistent interface.
+
+7. **Distributed Session Coordination**: Distributed nodes can coordinate not just on raw RPS but on session characteristics.
+
+8. **Feedback-Driven Control**: Comprehensive metrics flow from results collection back to rate decisions.
+
+This architecture demonstrates how to maintain high performance with static dispatch while achieving flexible composition through generic programming. It also shows how to integrate multiple control sources (latency, error rates, saturation) into a unified, extensible system that can accurately model real-world client behavior patterns.

@@ -21,7 +21,7 @@ compio = { version = "0.18", features = ["time", "net", "runtime", "macros"] }
 compio-dispatcher = "0.6"
 
 # HTTP client (compio + hyper bridge)
-cyper = "0.7"
+cyper = "0.8"
 
 # Cross-thread channels
 flume = "0.11"

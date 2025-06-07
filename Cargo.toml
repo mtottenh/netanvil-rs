@@ -45,7 +45,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hdrhistogram = "7.5"
 
 # Randomness
-rand = "0.8"
+rand = { version = "0.8", features = ["small_rng"] }
 rand_distr = "0.4"
 
 # CLI

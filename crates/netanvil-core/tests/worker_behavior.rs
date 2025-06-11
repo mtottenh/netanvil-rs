@@ -61,7 +61,7 @@ fn run_worker_test(
     let generator = SimpleGenerator::get(vec!["http://mock.test/".into()]);
     let transformer = NoopTransformer;
     let executor = MockExecutor::new();
-    let collector = HdrMetricsCollector::new();
+    let collector = HdrMetricsCollector::new(0);
 
     let worker = Worker::new(
         scheduler,
@@ -129,7 +129,7 @@ fn worker_stops_on_command() {
     let scheduler = ConstantRateScheduler::new(100.0, start, Some(Duration::from_secs(60)));
     let generator = SimpleGenerator::get(vec!["http://mock.test/".into()]);
     let executor = MockExecutor::new();
-    let collector = HdrMetricsCollector::new();
+    let collector = HdrMetricsCollector::new(0);
 
     let worker = Worker::new(
         scheduler,
@@ -179,7 +179,7 @@ fn worker_responds_to_rate_update() {
     let scheduler = ConstantRateScheduler::new(100.0, start, Some(Duration::from_secs(4)));
     let generator = SimpleGenerator::get(vec!["http://mock.test/".into()]);
     let executor = MockExecutor::new();
-    let collector = HdrMetricsCollector::new();
+    let collector = HdrMetricsCollector::new(0);
 
     let worker = Worker::new(
         scheduler,
@@ -224,7 +224,7 @@ fn worker_sends_periodic_metrics_snapshots() {
     let scheduler = ConstantRateScheduler::new(100.0, start, Some(Duration::from_secs(2)));
     let generator = SimpleGenerator::get(vec!["http://mock.test/".into()]);
     let executor = MockExecutor::new();
-    let collector = HdrMetricsCollector::new();
+    let collector = HdrMetricsCollector::new(0);
 
     let worker = Worker::new(
         scheduler,

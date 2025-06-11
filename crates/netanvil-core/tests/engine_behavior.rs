@@ -83,6 +83,7 @@ fn engine_runs_constant_rate_test_with_correct_request_count() {
         metrics_interval: Duration::from_millis(200),
         control_interval: Duration::from_millis(100),
         connections: ConnectionConfig::default(),
+        ..Default::default()
     };
 
     let result = run_test(config, MockExecutor::instant).unwrap();
@@ -110,6 +111,7 @@ fn engine_records_latency_percentiles() {
         metrics_interval: Duration::from_millis(200),
         control_interval: Duration::from_millis(100),
         connections: ConnectionConfig::default(),
+        ..Default::default()
     };
 
     let result = run_test(config, || MockExecutor::with_latency(Duration::from_millis(5))).unwrap();
@@ -134,6 +136,7 @@ fn engine_tracks_errors() {
         metrics_interval: Duration::from_millis(200),
         control_interval: Duration::from_millis(100),
         connections: ConnectionConfig::default(),
+        ..Default::default()
     };
 
     let result = run_test(config, || ErrorExecutor).unwrap();
@@ -155,6 +158,7 @@ fn engine_scales_across_cores() {
             metrics_interval: Duration::from_millis(200),
             control_interval: Duration::from_millis(100),
             connections: ConnectionConfig::default(),
+            ..Default::default()
         };
 
         let result = run_test(config, MockExecutor::instant).unwrap();
@@ -186,6 +190,7 @@ fn engine_step_rate_changes_throughput() {
         metrics_interval: Duration::from_millis(200),
         control_interval: Duration::from_millis(100),
         connections: ConnectionConfig::default(),
+        ..Default::default()
     };
 
     let result = run_test(config, MockExecutor::instant).unwrap();

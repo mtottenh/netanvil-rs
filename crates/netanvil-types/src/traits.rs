@@ -58,6 +58,34 @@ pub trait MetricsCollector {
 }
 
 // ---------------------------------------------------------------------------
+// Blanket impls for boxed traits.
+// These allow the engine to construct components from config at runtime
+// while the Worker remains generic (monomorphized over Box<dyn Trait>).
+// The vtable dispatch cost (~1ns) is negligible at per-request frequency.
+// ---------------------------------------------------------------------------
+
+impl RequestScheduler for Box<dyn RequestScheduler> {
+    fn next_request_time(&mut self) -> Option<Instant> {
+        (**self).next_request_time()
+    }
+    fn update_rate(&mut self, rps: f64) {
+        (**self).update_rate(rps)
+    }
+}
+
+impl RequestGenerator for Box<dyn RequestGenerator> {
+    fn generate(&mut self, context: &RequestContext) -> RequestSpec {
+        (**self).generate(context)
+    }
+}
+
+impl RequestTransformer for Box<dyn RequestTransformer> {
+    fn transform(&self, spec: RequestSpec, context: &RequestContext) -> RequestSpec {
+        (**self).transform(spec, context)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Control-plane trait: runs in coordinator, called at ~10-100Hz.
 // ---------------------------------------------------------------------------
 

@@ -11,7 +11,9 @@ pub mod request;
 pub mod traits;
 
 pub use command::WorkerCommand;
-pub use config::{ConnectionConfig, PidTarget, RateConfig, TargetMetric, TestConfig};
+pub use config::{
+    ConnectionConfig, PidTarget, RateConfig, SchedulerConfig, TargetMetric, TestConfig,
+};
 pub use error::{NetAnvilError, Result};
 pub use metrics::{MetricsSnapshot, MetricsSummary, RateDecision};
 pub use request::{ExecutionError, ExecutionResult, RequestContext, RequestSpec, TimingBreakdown};

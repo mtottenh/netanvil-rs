@@ -1,15 +1,18 @@
 use std::time::Instant;
 
 use netanvil_metrics::HdrMetricsCollector;
-use netanvil_types::{RateConfig, RequestExecutor, TestConfig};
+use netanvil_types::{
+    RateConfig, RequestExecutor, RequestGenerator, RequestScheduler, RequestTransformer,
+    SchedulerConfig, TestConfig,
+};
 
 use crate::controller::{PidRateController, StaticRateController, StepRateController};
 use crate::coordinator::Coordinator;
 use crate::generator::SimpleGenerator;
 use crate::handle::WorkerHandle;
 use crate::result::TestResult;
-use crate::scheduler::ConstantRateScheduler;
-use crate::transformer::NoopTransformer;
+use crate::scheduler::{ConstantRateScheduler, PoissonScheduler};
+use crate::transformer::{HeaderTransformer, NoopTransformer};
 use crate::worker::Worker;
 
 /// Run a load test with the given configuration and executor factory.
@@ -18,6 +21,7 @@ use crate::worker::Worker;
 /// executor instance. This allows each core to have its own connection
 /// pool (the `!Send` shared-nothing design).
 ///
+/// Scheduler, generator, and transformer are selected from `TestConfig`.
 /// This function blocks until the test completes.
 pub fn run_test<E, F>(config: TestConfig, executor_factory: F) -> netanvil_types::Result<TestResult>
 where
@@ -50,21 +54,54 @@ where
         let thread = std::thread::Builder::new()
             .name(format!("netanvil-worker-{core_id}"))
             .spawn(move || {
-                let executor_factory =
-                    unsafe { &*(executor_factory as *const F) };
+                let executor_factory = unsafe { &*(executor_factory as *const F) };
 
                 let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
                 rt.block_on(async {
                     let initial_per_core = config.initial_rps() / num_cores as f64;
-                    let scheduler = ConstantRateScheduler::new(
-                        initial_per_core,
-                        start_time,
-                        Some(config.duration),
-                    );
-                    let generator = SimpleGenerator::get(config.targets.clone());
-                    let transformer = NoopTransformer;
+
+                    // Build scheduler from config
+                    let scheduler: Box<dyn RequestScheduler> = match &config.scheduler {
+                        SchedulerConfig::ConstantRate => Box::new(
+                            ConstantRateScheduler::new(
+                                initial_per_core,
+                                start_time,
+                                Some(config.duration),
+                            ),
+                        ),
+                        SchedulerConfig::Poisson { seed } => match seed {
+                            Some(s) => Box::new(PoissonScheduler::with_seed(
+                                initial_per_core,
+                                start_time,
+                                Some(config.duration),
+                                *s,
+                            )),
+                            None => Box::new(PoissonScheduler::new(
+                                initial_per_core,
+                                start_time,
+                                Some(config.duration),
+                            )),
+                        },
+                    };
+
+                    // Build generator from config
+                    let method: http::Method = config
+                        .method
+                        .parse()
+                        .unwrap_or(http::Method::GET);
+                    let generator: Box<dyn RequestGenerator> =
+                        Box::new(SimpleGenerator::new(config.targets.clone(), method));
+
+                    // Build transformer chain from config
+                    let transformer: Box<dyn RequestTransformer> = if config.headers.is_empty() {
+                        Box::new(NoopTransformer)
+                    } else {
+                        Box::new(HeaderTransformer::new(config.headers.clone()))
+                    };
+
                     let executor = executor_factory();
-                    let collector = HdrMetricsCollector::new();
+                    let collector =
+                        HdrMetricsCollector::new(config.error_status_threshold);
 
                     let worker = Worker::new(
                         scheduler,

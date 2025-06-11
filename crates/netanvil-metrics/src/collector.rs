@@ -17,14 +17,18 @@ pub struct HdrMetricsCollector {
     bytes_sent: Cell<u64>,
     bytes_received: Cell<u64>,
     window_start: Cell<Instant>,
+    /// HTTP status codes >= this threshold count as errors.
+    /// 0 means only transport errors count (error field set).
+    error_status_threshold: u16,
 }
 
 impl HdrMetricsCollector {
     /// Create a new collector.
     ///
-    /// The histogram tracks latencies in nanoseconds with 3 significant digits,
-    /// up to 60 seconds.
-    pub fn new() -> Self {
+    /// `error_status_threshold`: HTTP status codes >= this value are counted
+    /// as errors. Use 400 for all client/server errors, 500 for server-only,
+    /// or 0 to only count transport errors.
+    pub fn new(error_status_threshold: u16) -> Self {
         Self {
             histogram: RefCell::new(
                 Histogram::<u64>::new_with_bounds(1, 60_000_000_000, 3)
@@ -35,6 +39,7 @@ impl HdrMetricsCollector {
             bytes_sent: Cell::new(0),
             bytes_received: Cell::new(0),
             window_start: Cell::new(Instant::now()),
+            error_status_threshold,
         }
     }
 }
@@ -43,7 +48,14 @@ impl MetricsCollector for HdrMetricsCollector {
     fn record(&self, result: &ExecutionResult) {
         self.total_requests.set(self.total_requests.get() + 1);
 
-        if result.error.is_some() {
+        // Count as error if: transport error, OR HTTP status >= threshold
+        let is_error = result.error.is_some()
+            || (self.error_status_threshold > 0
+                && result
+                    .status
+                    .map_or(false, |s| s >= self.error_status_threshold));
+
+        if is_error {
             self.total_errors.set(self.total_errors.get() + 1);
         }
 
@@ -119,7 +131,7 @@ mod tests {
 
     #[test]
     fn record_and_snapshot() {
-        let collector = HdrMetricsCollector::new();
+        let collector = HdrMetricsCollector::new(0);
 
         // Record 100 requests with 10ms latency
         for _ in 0..100 {
@@ -138,7 +150,7 @@ mod tests {
 
     #[test]
     fn error_counting() {
-        let collector = HdrMetricsCollector::new();
+        let collector = HdrMetricsCollector::new(0);
 
         collector.record(&make_result(Duration::from_millis(10), None));
         collector.record(&make_result(
@@ -154,7 +166,7 @@ mod tests {
 
     #[test]
     fn coordinated_omission_correction() {
-        let collector = HdrMetricsCollector::new();
+        let collector = HdrMetricsCollector::new(0);
         let now = Instant::now();
 
         // Normal request: intended == actual

@@ -102,6 +102,7 @@ fn make_config(server: &TestServer, rps: f64, duration: Duration, cores: usize) 
         },
         metrics_interval: Duration::from_millis(200),
         control_interval: Duration::from_millis(100),
+        ..Default::default()
     }
 }
 
@@ -185,6 +186,7 @@ fn step_rate_changes_throughput() {
         },
         metrics_interval: Duration::from_millis(200),
         control_interval: Duration::from_millis(100),
+        ..Default::default()
     };
 
     let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
@@ -216,14 +218,22 @@ fn error_endpoint_tracks_errors() {
         },
         metrics_interval: Duration::from_millis(200),
         control_interval: Duration::from_millis(100),
+        ..Default::default()
     };
 
     let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
 
     assert!(result.total_requests > 100);
-    // HTTP 500 is a valid response, not a transport error — so total_errors
-    // depends on whether we treat 5xx as errors. Currently we don't (only
-    // transport errors count). Let's verify the requests went through.
+    // With default error_status_threshold=400, HTTP 500s count as errors
+    assert_eq!(
+        result.total_requests, result.total_errors,
+        "all requests to /error should be counted as errors"
+    );
+    assert!(
+        result.error_rate > 0.9,
+        "error rate should be ~100%, got {:.1}%",
+        result.error_rate * 100.0
+    );
     let server_count = server.request_count.load(Ordering::Relaxed);
     assert!(server_count > 100, "server should have received requests");
 }
@@ -243,6 +253,7 @@ fn latency_reflects_server_delay() {
         },
         metrics_interval: Duration::from_millis(200),
         control_interval: Duration::from_millis(100),
+        ..Default::default()
     };
 
     let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
@@ -275,6 +286,7 @@ fn coordinated_omission_detected_with_intermittent_delays() {
         },
         metrics_interval: Duration::from_millis(200),
         control_interval: Duration::from_millis(100),
+        ..Default::default()
     };
 
     let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();

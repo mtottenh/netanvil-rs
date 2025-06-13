@@ -28,6 +28,34 @@ where
     E: RequestExecutor + 'static,
     F: Fn() -> E + Send + 'static,
 {
+    run_test_inner(config, executor_factory, None)
+}
+
+/// Like `run_test`, but with a progress callback invoked each coordinator tick.
+pub fn run_test_with_progress<E, F, P>(
+    config: TestConfig,
+    executor_factory: F,
+    on_progress: P,
+) -> netanvil_types::Result<TestResult>
+where
+    E: RequestExecutor + 'static,
+    F: Fn() -> E + Send + 'static,
+    P: FnMut(&crate::coordinator::ProgressUpdate) + 'static,
+{
+    // Reuse run_test's worker setup by factoring it out would be ideal,
+    // but for now we duplicate minimally by calling run_test_inner.
+    run_test_inner(config, executor_factory, Some(Box::new(on_progress)))
+}
+
+fn run_test_inner<E, F>(
+    config: TestConfig,
+    executor_factory: F,
+    on_progress: Option<Box<dyn FnMut(&crate::coordinator::ProgressUpdate)>>,
+) -> netanvil_types::Result<TestResult>
+where
+    E: RequestExecutor + 'static,
+    F: Fn() -> E + Send + 'static,
+{
     let num_cores = if config.num_cores == 0 {
         std::thread::available_parallelism()
             .map(|n| n.get())
@@ -37,8 +65,6 @@ where
     };
 
     let start_time = Instant::now();
-
-    // Create worker handles (channels + threads)
     let mut handles = Vec::with_capacity(num_cores);
 
     for core_id in 0..num_cores {
@@ -48,19 +74,20 @@ where
         let config = config.clone();
         let executor_factory = &executor_factory as *const F as usize;
 
-        // SAFETY: The executor_factory reference is valid for the lifetime of
-        // this function, and we join all threads before returning. We pass it
-        // as a raw pointer to avoid requiring F: Clone.
         let thread = std::thread::Builder::new()
             .name(format!("netanvil-worker-{core_id}"))
             .spawn(move || {
+                let core = core_affinity::CoreId { id: core_id };
+                if !core_affinity::set_for_current(core) {
+                    tracing::warn!(core_id, "failed to pin worker thread to core");
+                }
+
                 let executor_factory = unsafe { &*(executor_factory as *const F) };
 
                 let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
                 rt.block_on(async {
                     let initial_per_core = config.initial_rps() / num_cores as f64;
 
-                    // Build scheduler from config
                     let scheduler: Box<dyn RequestScheduler> = match &config.scheduler {
                         SchedulerConfig::ConstantRate => Box::new(
                             ConstantRateScheduler::new(
@@ -84,7 +111,6 @@ where
                         },
                     };
 
-                    // Build generator from config
                     let method: http::Method = config
                         .method
                         .parse()
@@ -92,7 +118,6 @@ where
                     let generator: Box<dyn RequestGenerator> =
                         Box::new(SimpleGenerator::new(config.targets.clone(), method));
 
-                    // Build transformer chain from config
                     let transformer: Box<dyn RequestTransformer> = if config.headers.is_empty() {
                         Box::new(NoopTransformer)
                     } else {
@@ -100,8 +125,7 @@ where
                     };
 
                     let executor = executor_factory();
-                    let collector =
-                        HdrMetricsCollector::new(config.error_status_threshold);
+                    let collector = HdrMetricsCollector::new(config.error_status_threshold);
 
                     let worker = Worker::new(
                         scheduler,
@@ -128,7 +152,6 @@ where
         });
     }
 
-    // Build rate controller
     let rate_controller: Box<dyn netanvil_types::RateController> = match &config.rate {
         RateConfig::Static { rps } => Box::new(StaticRateController::new(*rps)),
         RateConfig::Step { steps } => {
@@ -146,13 +169,16 @@ where
         )),
     };
 
-    // Run coordinator on this thread (blocking)
     let mut coordinator = Coordinator::new(
         rate_controller,
         handles,
         config.duration,
         config.control_interval,
     );
+
+    if let Some(callback) = on_progress {
+        coordinator.on_progress(callback);
+    }
 
     Ok(coordinator.run())
 }

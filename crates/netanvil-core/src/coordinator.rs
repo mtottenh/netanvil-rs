@@ -1,10 +1,22 @@
 use std::time::{Duration, Instant};
 
 use netanvil_metrics::AggregateMetrics;
-use netanvil_types::{RateController, RateDecision, WorkerCommand};
+use netanvil_types::{MetricsSummary, RateController, RateDecision, WorkerCommand};
 
 use crate::handle::WorkerHandle;
 use crate::result::TestResult;
+
+/// Snapshot of live progress during a test, emitted each tick.
+#[derive(Debug, Clone)]
+pub struct ProgressUpdate {
+    pub elapsed: Duration,
+    pub remaining: Duration,
+    pub current_rps: f64,
+    pub target_rps: f64,
+    pub total_requests: u64,
+    pub total_errors: u64,
+    pub window: MetricsSummary,
+}
 
 /// Orchestrates a load test by distributing rate targets to workers
 /// and collecting metrics.
@@ -22,6 +34,8 @@ pub struct Coordinator {
     test_duration: Duration,
     control_interval: Duration,
     start_time: Instant,
+    /// Optional callback invoked each tick with live progress.
+    on_progress: Option<Box<dyn FnMut(&ProgressUpdate)>>,
 }
 
 impl Coordinator {
@@ -39,7 +53,13 @@ impl Coordinator {
             test_duration,
             control_interval,
             start_time: Instant::now(),
+            on_progress: None,
         }
+    }
+
+    /// Set a callback that receives live progress updates each tick.
+    pub fn on_progress(&mut self, f: impl FnMut(&ProgressUpdate) + 'static) {
+        self.on_progress = Some(Box::new(f));
     }
 
     /// Run the full coordinator loop. Blocks until the test completes.
@@ -81,6 +101,21 @@ impl Coordinator {
 
         // Distribute to workers
         self.distribute_rate(decision.target_rps);
+
+        // Emit progress update
+        if let Some(ref mut callback) = self.on_progress {
+            let elapsed = self.start_time.elapsed();
+            let update = ProgressUpdate {
+                elapsed,
+                remaining: self.test_duration.saturating_sub(elapsed),
+                current_rps: summary.request_rate,
+                target_rps: decision.target_rps,
+                total_requests: self.total_aggregate.total_requests(),
+                total_errors: self.total_aggregate.total_errors(),
+                window: summary,
+            };
+            callback(&update);
+        }
 
         decision
     }

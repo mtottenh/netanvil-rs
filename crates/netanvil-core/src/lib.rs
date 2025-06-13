@@ -14,10 +14,11 @@ pub mod worker;
 
 pub use controller::{PidRateController, StaticRateController, StepRateController};
 pub use coordinator::Coordinator;
-pub use engine::run_test;
+pub use coordinator::ProgressUpdate;
+pub use engine::{run_test, run_test_with_progress};
 pub use generator::SimpleGenerator;
 pub use handle::WorkerHandle;
-pub use report::Report;
+pub use report::{ProgressLine, Report};
 pub use result::TestResult;
 pub use scheduler::{ConstantRateScheduler, PoissonScheduler};
 pub use transformer::{HeaderTransformer, NoopTransformer};

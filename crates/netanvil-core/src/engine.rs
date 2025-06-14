@@ -206,5 +206,13 @@ where
         coordinator.set_external_commands(rx);
     }
 
+    // Wire external signal source from config (e.g. server load metric)
+    if let Some(source) = crate::signal::make_signal_source(
+        config.external_metrics_url.as_deref(),
+        config.external_metrics_field.as_deref(),
+    ) {
+        coordinator.set_external_signal_source(source);
+    }
+
     Ok(coordinator.run())
 }

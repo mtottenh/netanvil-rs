@@ -41,6 +41,9 @@ pub struct Coordinator {
     external_command_rx: Option<flume::Receiver<WorkerCommand>>,
     /// Set to true when an external Stop command is received.
     stopped: bool,
+    /// Optional external signal source, polled each tick.
+    /// Returns `(signal_name, signal_value)` pairs to inject into MetricsSummary.
+    external_signal_source: Option<Box<dyn FnMut() -> Vec<(String, f64)>>>,
 }
 
 impl Coordinator {
@@ -61,6 +64,7 @@ impl Coordinator {
             on_progress: None,
             external_command_rx: None,
             stopped: false,
+            external_signal_source: None,
         }
     }
 
@@ -73,6 +77,16 @@ impl Coordinator {
     /// to workers each tick. Used by the HTTP control API and distributed leader.
     pub fn set_external_commands(&mut self, rx: flume::Receiver<WorkerCommand>) {
         self.external_command_rx = Some(rx);
+    }
+
+    /// Set an external signal source, polled each tick before the rate controller.
+    /// Returns `(signal_name, value)` pairs injected into MetricsSummary.
+    /// Used for server-reported metrics (e.g. proxy load, queue depth).
+    pub fn set_external_signal_source(
+        &mut self,
+        f: impl FnMut() -> Vec<(String, f64)> + 'static,
+    ) {
+        self.external_signal_source = Some(Box::new(f));
     }
 
     /// Run the full coordinator loop. Blocks until the test completes.
@@ -135,8 +149,26 @@ impl Coordinator {
         }
 
         // Rate controller computes new target from the recent window
-        let summary = self.tick_aggregate.to_summary();
+        let mut summary = self.tick_aggregate.to_summary();
+
+        // Inject external signals (e.g. server-reported load metrics)
+        if let Some(ref mut source) = self.external_signal_source {
+            let signals = source();
+            if !signals.is_empty() {
+                tracing::debug!(?signals, "injected external signals into metrics summary");
+            }
+            summary.external_signals = signals;
+        }
+
         let decision = self.rate_controller.update(&summary);
+
+        tracing::debug!(
+            tick_requests = summary.total_requests,
+            total_requests = self.total_aggregate.total_requests(),
+            target_rps = decision.target_rps,
+            workers = self.workers.len(),
+            "coordinator tick"
+        );
 
         // Distribute to workers
         self.distribute_rate(decision.target_rps);

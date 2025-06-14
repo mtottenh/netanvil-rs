@@ -9,6 +9,7 @@ pub mod precision;
 pub mod report;
 pub mod result;
 pub mod scheduler;
+pub mod signal;
 pub mod transformer;
 pub mod worker;
 

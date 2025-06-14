@@ -99,4 +99,11 @@ impl RateController for PidRateController {
     fn current_rate(&self) -> f64 {
         self.current_rps
     }
+
+    fn set_rate(&mut self, rps: f64) {
+        self.current_rps = rps.clamp(self.min_rps, self.max_rps);
+        // Reset integral to avoid fighting the new setpoint
+        self.integral = 0.0;
+        self.last_error = 0.0;
+    }
 }

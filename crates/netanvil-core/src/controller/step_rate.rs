@@ -60,4 +60,9 @@ impl RateController for StepRateController {
     fn current_rate(&self) -> f64 {
         self.current_rps
     }
+
+    fn set_rate(&mut self, rps: f64) {
+        // Override the current step; next time-based update will reclaim
+        self.current_rps = rps;
+    }
 }

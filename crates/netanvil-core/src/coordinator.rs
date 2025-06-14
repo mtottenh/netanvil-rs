@@ -36,6 +36,11 @@ pub struct Coordinator {
     start_time: Instant,
     /// Optional callback invoked each tick with live progress.
     on_progress: Option<Box<dyn FnMut(&ProgressUpdate)>>,
+    /// Optional external command channel (from API server, distributed leader, etc.).
+    /// Drained each tick; commands forwarded to workers.
+    external_command_rx: Option<flume::Receiver<WorkerCommand>>,
+    /// Set to true when an external Stop command is received.
+    stopped: bool,
 }
 
 impl Coordinator {
@@ -54,12 +59,20 @@ impl Coordinator {
             control_interval,
             start_time: Instant::now(),
             on_progress: None,
+            external_command_rx: None,
+            stopped: false,
         }
     }
 
     /// Set a callback that receives live progress updates each tick.
     pub fn on_progress(&mut self, f: impl FnMut(&ProgressUpdate) + 'static) {
         self.on_progress = Some(Box::new(f));
+    }
+
+    /// Set an external command channel. Commands received here are forwarded
+    /// to workers each tick. Used by the HTTP control API and distributed leader.
+    pub fn set_external_commands(&mut self, rx: flume::Receiver<WorkerCommand>) {
+        self.external_command_rx = Some(rx);
     }
 
     /// Run the full coordinator loop. Blocks until the test completes.
@@ -86,6 +99,32 @@ impl Coordinator {
     /// Public so a future DistributedCoordinator can call this and also
     /// forward metrics/decisions over the network.
     pub fn tick(&mut self) -> RateDecision {
+        // Drain external commands (from API server, distributed leader, etc.)
+        if let Some(ref rx) = self.external_command_rx {
+            while let Ok(cmd) = rx.try_recv() {
+                match cmd {
+                    WorkerCommand::UpdateRate(rps) => {
+                        self.rate_controller.set_rate(rps);
+                        self.distribute_rate(rps);
+                    }
+                    WorkerCommand::UpdateTargets(ref targets) => {
+                        for w in &self.workers {
+                            let _ = w.command_tx.send(WorkerCommand::UpdateTargets(targets.clone()));
+                        }
+                    }
+                    WorkerCommand::UpdateHeaders(ref headers) => {
+                        for w in &self.workers {
+                            let _ = w.command_tx.send(WorkerCommand::UpdateHeaders(headers.clone()));
+                        }
+                    }
+                    WorkerCommand::Stop => {
+                        self.stop_workers();
+                        self.stopped = true;
+                    }
+                }
+            }
+        }
+
         // Collect metrics from all workers into the tick window
         self.tick_aggregate.reset();
         for worker in &self.workers {
@@ -142,7 +181,7 @@ impl Coordinator {
     }
 
     fn is_test_complete(&self) -> bool {
-        self.start_time.elapsed() >= self.test_duration
+        self.stopped || self.start_time.elapsed() >= self.test_duration
     }
 
     fn collect_final_metrics(&mut self) -> TestResult {

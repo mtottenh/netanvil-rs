@@ -24,4 +24,8 @@ impl RateController for StaticRateController {
     fn current_rate(&self) -> f64 {
         self.rps
     }
+
+    fn set_rate(&mut self, rps: f64) {
+        self.rps = rps;
+    }
 }

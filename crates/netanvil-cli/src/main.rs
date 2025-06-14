@@ -3,7 +3,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use netanvil_core::{run_test_with_progress, report::ProgressLine};
+use netanvil_api::{ControlServer, SharedState};
+use netanvil_core::{run_test_with_api, run_test_with_progress, report::ProgressLine};
 use netanvil_http::HttpExecutor;
 use netanvil_types::{
     ConnectionConfig, PidTarget, RateConfig, SchedulerConfig, TargetMetric, TestConfig,
@@ -95,6 +96,11 @@ enum Commands {
         /// HTTP status codes >= this value count as errors (0 = transport errors only)
         #[arg(long, default_value = "400")]
         error_threshold: u16,
+
+        /// Enable HTTP control API on this port (e.g. 8080). Allows mid-test
+        /// rate changes, target updates, and live metrics via curl.
+        #[arg(long)]
+        api_port: Option<u16>,
     },
 }
 
@@ -229,6 +235,7 @@ fn main() -> Result<()> {
             timeout,
             headers,
             error_threshold,
+            api_port,
         } => {
             let duration = parse_duration(&duration).context("invalid --duration")?;
             let timeout = parse_duration(&timeout).context("invalid --timeout")?;
@@ -287,14 +294,38 @@ fn main() -> Result<()> {
             );
 
             let request_timeout = timeout;
-            let result = run_test_with_progress(
-                config,
-                move || HttpExecutor::with_timeout(request_timeout),
-                |update| {
-                    eprint!("\r{}", ProgressLine::new(update));
-                },
-            )
-            .context("load test failed")?;
+            let result = if let Some(port) = api_port {
+                // API mode: spawn control server, wire up shared state
+                let shared_state = SharedState::new();
+                let (ext_cmd_tx, ext_cmd_rx) = flume::unbounded();
+
+                let server = ControlServer::new(port, shared_state.clone(), ext_cmd_tx)
+                    .context(format!("failed to start API server on port {port}"))?;
+                let _server_handle = server.spawn();
+                eprintln!("Control API listening on http://0.0.0.0:{port}");
+
+                let progress_state = shared_state.clone();
+                run_test_with_api(
+                    config,
+                    move || HttpExecutor::with_timeout(request_timeout),
+                    move |update| {
+                        progress_state.update_from_progress(update);
+                        eprint!("\r{}", ProgressLine::new(update));
+                    },
+                    ext_cmd_rx,
+                )
+                .context("load test failed")?
+            } else {
+                // No API: simple progress output
+                run_test_with_progress(
+                    config,
+                    move || HttpExecutor::with_timeout(request_timeout),
+                    |update| {
+                        eprint!("\r{}", ProgressLine::new(update));
+                    },
+                )
+                .context("load test failed")?
+            };
             eprintln!(); // newline after progress
 
             output::print_results(&result);

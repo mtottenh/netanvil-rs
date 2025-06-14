@@ -25,13 +25,22 @@ pub trait RequestScheduler {
 /// Implementations: SimpleGenerator, TemplatedGenerator
 pub trait RequestGenerator {
     fn generate(&mut self, context: &RequestContext) -> RequestSpec;
+
+    /// Replace the target URLs mid-test. Default: no-op.
+    fn update_targets(&mut self, _targets: Vec<String>) {}
 }
 
 /// Modifies requests before execution.
 ///
+/// Uses `&self` for `transform` (called from Rc-shared context).
+/// Uses `&self` for `update_headers` (interior mutability via RefCell).
+///
 /// Implementations: NoopTransformer, HeaderTransformer
 pub trait RequestTransformer {
     fn transform(&self, spec: RequestSpec, context: &RequestContext) -> RequestSpec;
+
+    /// Replace the header list mid-test. Default: no-op.
+    fn update_headers(&self, _headers: Vec<(String, String)>) {}
 }
 
 /// Executes requests against the target system.
@@ -77,11 +86,17 @@ impl RequestGenerator for Box<dyn RequestGenerator> {
     fn generate(&mut self, context: &RequestContext) -> RequestSpec {
         (**self).generate(context)
     }
+    fn update_targets(&mut self, targets: Vec<String>) {
+        (**self).update_targets(targets)
+    }
 }
 
 impl RequestTransformer for Box<dyn RequestTransformer> {
     fn transform(&self, spec: RequestSpec, context: &RequestContext) -> RequestSpec {
         (**self).transform(spec, context)
+    }
+    fn update_headers(&self, headers: Vec<(String, String)>) {
+        (**self).update_headers(headers)
     }
 }
 
@@ -98,4 +113,9 @@ impl RequestTransformer for Box<dyn RequestTransformer> {
 pub trait RateController {
     fn update(&mut self, summary: &MetricsSummary) -> RateDecision;
     fn current_rate(&self) -> f64;
+
+    /// Override the target rate externally (e.g. from the control API).
+    /// The controller should adopt this as its new baseline.
+    /// Default: no-op (controller ignores external overrides).
+    fn set_rate(&mut self, _rps: f64) {}
 }

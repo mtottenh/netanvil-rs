@@ -33,4 +33,11 @@ impl RequestGenerator for SimpleGenerator {
             body: None,
         }
     }
+
+    fn update_targets(&mut self, targets: Vec<String>) {
+        if !targets.is_empty() {
+            self.targets = targets;
+            self.index = 0;
+        }
+    }
 }

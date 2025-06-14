@@ -28,7 +28,7 @@ where
     E: RequestExecutor + 'static,
     F: Fn() -> E + Send + 'static,
 {
-    run_test_inner(config, executor_factory, None)
+    run_test_inner(config, executor_factory, None, None)
 }
 
 /// Like `run_test`, but with a progress callback invoked each coordinator tick.
@@ -42,15 +42,37 @@ where
     F: Fn() -> E + Send + 'static,
     P: FnMut(&crate::coordinator::ProgressUpdate) + 'static,
 {
-    // Reuse run_test's worker setup by factoring it out would be ideal,
-    // but for now we duplicate minimally by calling run_test_inner.
-    run_test_inner(config, executor_factory, Some(Box::new(on_progress)))
+    run_test_inner(config, executor_factory, Some(Box::new(on_progress)), None)
+}
+
+/// Full-featured entry point: progress callback + external command channel.
+///
+/// The `external_command_rx` allows injecting `WorkerCommand`s into the
+/// coordinator from outside (HTTP API, distributed leader, etc.).
+pub fn run_test_with_api<E, F, P>(
+    config: TestConfig,
+    executor_factory: F,
+    on_progress: P,
+    external_command_rx: flume::Receiver<netanvil_types::WorkerCommand>,
+) -> netanvil_types::Result<TestResult>
+where
+    E: RequestExecutor + 'static,
+    F: Fn() -> E + Send + 'static,
+    P: FnMut(&crate::coordinator::ProgressUpdate) + 'static,
+{
+    run_test_inner(
+        config,
+        executor_factory,
+        Some(Box::new(on_progress)),
+        Some(external_command_rx),
+    )
 }
 
 fn run_test_inner<E, F>(
     config: TestConfig,
     executor_factory: F,
     on_progress: Option<Box<dyn FnMut(&crate::coordinator::ProgressUpdate)>>,
+    external_command_rx: Option<flume::Receiver<netanvil_types::WorkerCommand>>,
 ) -> netanvil_types::Result<TestResult>
 where
     E: RequestExecutor + 'static,
@@ -178,6 +200,10 @@ where
 
     if let Some(callback) = on_progress {
         coordinator.on_progress(callback);
+    }
+
+    if let Some(rx) = external_command_rx {
+        coordinator.set_external_commands(rx);
     }
 
     Ok(coordinator.run())

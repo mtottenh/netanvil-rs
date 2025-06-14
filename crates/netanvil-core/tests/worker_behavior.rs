@@ -1,8 +1,9 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use netanvil_core::{
-    ConstantRateScheduler, NoopTransformer, SimpleGenerator, Worker,
+    ConstantRateScheduler, HeaderTransformer, NoopTransformer, SimpleGenerator, Worker,
 };
 use netanvil_metrics::HdrMetricsCollector;
 use netanvil_types::{
@@ -257,5 +258,181 @@ fn worker_sends_periodic_metrics_snapshots() {
     assert!(
         total_requests > 150,
         "total requests across snapshots should be ~200, got {total_requests}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Capturing executor: records the RequestSpec of each call
+// ---------------------------------------------------------------------------
+
+struct CapturingExecutor {
+    captured: Rc<RefCell<Vec<RequestSpec>>>,
+}
+
+impl CapturingExecutor {
+    fn new() -> (Self, Rc<RefCell<Vec<RequestSpec>>>) {
+        let captured = Rc::new(RefCell::new(Vec::new()));
+        (
+            Self {
+                captured: captured.clone(),
+            },
+            captured,
+        )
+    }
+}
+
+impl RequestExecutor for CapturingExecutor {
+    async fn execute(&self, spec: &RequestSpec, context: &RequestContext) -> ExecutionResult {
+        self.captured.borrow_mut().push(spec.clone());
+        ExecutionResult {
+            request_id: context.request_id,
+            intended_time: context.intended_time,
+            actual_time: context.actual_time,
+            timing: TimingBreakdown {
+                total: Duration::from_micros(50),
+                ..Default::default()
+            },
+            status: Some(200),
+            response_size: 64,
+            error: None,
+        }
+    }
+}
+
+#[test]
+fn worker_responds_to_target_update() {
+    let (cmd_tx, cmd_rx) = flume::unbounded();
+    let (metrics_tx, _metrics_rx) = flume::unbounded();
+
+    let start = Instant::now();
+    let scheduler = ConstantRateScheduler::new(100.0, start, Some(Duration::from_secs(3)));
+    let generator = SimpleGenerator::get(vec!["http://original.test/".into()]);
+    let (executor, captured) = CapturingExecutor::new();
+    let collector = HdrMetricsCollector::new(0);
+
+    let worker = Worker::new(
+        scheduler,
+        generator,
+        NoopTransformer,
+        executor,
+        collector,
+        cmd_rx,
+        metrics_tx,
+        0,
+        Duration::from_millis(500),
+    );
+
+    // After 500ms, change targets
+    let cmd_tx_clone = cmd_tx.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        let _ = cmd_tx_clone.send(WorkerCommand::UpdateTargets(vec![
+            "http://new-target.test/a".into(),
+            "http://new-target.test/b".into(),
+        ]));
+        // Let it run another 500ms then stop
+        std::thread::sleep(Duration::from_millis(500));
+        let _ = cmd_tx_clone.send(WorkerCommand::Stop);
+    });
+
+    let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
+    rt.block_on(worker.run());
+
+    let specs = captured.borrow();
+    assert!(specs.len() > 20, "should have generated requests, got {}", specs.len());
+
+    // Early requests should go to original target
+    let first_url = &specs[0].url;
+    assert!(
+        first_url.contains("original.test"),
+        "first request should hit original target, got {first_url}"
+    );
+
+    // Later requests should go to new targets
+    let last_url = &specs[specs.len() - 1].url;
+    assert!(
+        last_url.contains("new-target.test"),
+        "last request should hit new target, got {last_url}"
+    );
+
+    // Verify new targets round-robin
+    let new_target_specs: Vec<&RequestSpec> = specs
+        .iter()
+        .filter(|s| s.url.contains("new-target.test"))
+        .collect();
+    assert!(new_target_specs.len() > 5, "should have several requests to new targets");
+    let has_a = new_target_specs.iter().any(|s| s.url.contains("/a"));
+    let has_b = new_target_specs.iter().any(|s| s.url.contains("/b"));
+    assert!(has_a && has_b, "should round-robin across both new targets");
+}
+
+#[test]
+fn worker_responds_to_header_update() {
+    let (cmd_tx, cmd_rx) = flume::unbounded();
+    let (metrics_tx, _metrics_rx) = flume::unbounded();
+
+    let start = Instant::now();
+    let scheduler = ConstantRateScheduler::new(100.0, start, Some(Duration::from_secs(3)));
+    let generator = SimpleGenerator::get(vec!["http://test.local/".into()]);
+    let transformer = HeaderTransformer::new(vec![("X-Original".into(), "yes".into())]);
+    let (executor, captured) = CapturingExecutor::new();
+    let collector = HdrMetricsCollector::new(0);
+
+    let worker = Worker::new(
+        scheduler,
+        generator,
+        transformer,
+        executor,
+        collector,
+        cmd_rx,
+        metrics_tx,
+        0,
+        Duration::from_millis(500),
+    );
+
+    // After 500ms, change headers
+    let cmd_tx_clone = cmd_tx.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        let _ = cmd_tx_clone.send(WorkerCommand::UpdateHeaders(vec![
+            ("X-New-Header".into(), "new-value".into()),
+            ("Authorization".into(), "Bearer token123".into()),
+        ]));
+        std::thread::sleep(Duration::from_millis(500));
+        let _ = cmd_tx_clone.send(WorkerCommand::Stop);
+    });
+
+    let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
+    rt.block_on(worker.run());
+
+    let specs = captured.borrow();
+    assert!(specs.len() > 20, "should have generated requests");
+
+    // Early requests should have original header
+    let first_headers: Vec<&str> = specs[0].headers.iter().map(|(k, _)| k.as_str()).collect();
+    assert!(
+        first_headers.contains(&"X-Original"),
+        "first request should have original header, got {:?}",
+        specs[0].headers
+    );
+
+    // Later requests should have new headers (not the original)
+    let last = &specs[specs.len() - 1];
+    let last_header_names: Vec<&str> = last.headers.iter().map(|(k, _)| k.as_str()).collect();
+    assert!(
+        last_header_names.contains(&"X-New-Header"),
+        "last request should have new header, got {:?}",
+        last.headers
+    );
+    assert!(
+        last_header_names.contains(&"Authorization"),
+        "last request should have Authorization header, got {:?}",
+        last.headers
+    );
+    // Original header should be gone (replaced, not appended)
+    assert!(
+        !last_header_names.contains(&"X-Original"),
+        "original header should be replaced, got {:?}",
+        last.headers
     );
 }

@@ -15,7 +15,7 @@ pub mod worker;
 pub use controller::{PidRateController, StaticRateController, StepRateController};
 pub use coordinator::Coordinator;
 pub use coordinator::ProgressUpdate;
-pub use engine::{run_test, run_test_with_progress};
+pub use engine::{run_test, run_test_with_api, run_test_with_progress};
 pub use generator::SimpleGenerator;
 pub use handle::WorkerHandle;
 pub use report::{ProgressLine, Report};

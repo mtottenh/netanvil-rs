@@ -5,6 +5,7 @@ members = [
     "crates/netanvil-metrics",
     "crates/netanvil-core",
     "crates/netanvil-http",
+    "crates/netanvil-api",
     "crates/netanvil-cli",
 ]
 
@@ -28,6 +29,9 @@ flume = "0.11"
 
 # CPU core pinning
 core_affinity = "0.8"
+
+# Embedded HTTP server (for control API)
+tiny_http = "0.12"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -63,6 +67,7 @@ netanvil-types = { path = "crates/netanvil-types" }
 netanvil-metrics = { path = "crates/netanvil-metrics" }
 netanvil-core = { path = "crates/netanvil-core" }
 netanvil-http = { path = "crates/netanvil-http" }
+netanvil-api = { path = "crates/netanvil-api" }
 netanvil-cli = { path = "crates/netanvil-cli" }
 
 [profile.release]

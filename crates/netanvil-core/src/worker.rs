@@ -81,6 +81,12 @@ where
                 Ok(WorkerCommand::UpdateRate(rps)) => {
                     self.scheduler.update_rate(rps);
                 }
+                Ok(WorkerCommand::UpdateTargets(targets)) => {
+                    self.generator.update_targets(targets);
+                }
+                Ok(WorkerCommand::UpdateHeaders(headers)) => {
+                    self.transformer.update_headers(headers);
+                }
                 Ok(WorkerCommand::Stop) => break,
                 Err(_) => {}
             }

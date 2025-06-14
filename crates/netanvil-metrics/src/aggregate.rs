@@ -93,6 +93,7 @@ impl AggregateMetrics {
             latency_p90_ns: self.histogram.value_at_quantile(0.90),
             latency_p99_ns: self.histogram.value_at_quantile(0.99),
             window_duration,
+            external_signals: Vec::new(), // populated by the coordinator if external source configured
         }
     }
 

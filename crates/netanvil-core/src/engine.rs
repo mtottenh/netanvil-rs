@@ -180,7 +180,7 @@ where
             Box::new(StepRateController::with_start_time(steps.clone(), start_time))
         }
         RateConfig::Pid { initial_rps, target } => Box::new(PidRateController::new(
-            target.metric,
+            target.metric.clone(),
             target.value,
             *initial_rps,
             target.min_rps,

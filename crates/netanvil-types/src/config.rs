@@ -29,6 +29,13 @@ pub struct TestConfig {
     /// Set to 0 to disable HTTP error classification (only transport errors count).
     /// Default: 400 (all 4xx and 5xx are errors).
     pub error_status_threshold: u16,
+    /// Optional URL to poll for external metrics (JSON object).
+    /// Used with PID `TargetMetric::External` to control rate based on
+    /// server-reported metrics (e.g. proxy load, queue depth).
+    pub external_metrics_url: Option<String>,
+    /// JSON field name to extract from the external metrics response.
+    /// E.g. "load" extracts the numeric value from `{"load": 82.5}`.
+    pub external_metrics_field: Option<String>,
 }
 
 impl TestConfig {
@@ -58,6 +65,8 @@ impl Default for TestConfig {
             metrics_interval: Duration::from_millis(500),
             control_interval: Duration::from_millis(100),
             error_status_threshold: 400,
+            external_metrics_url: None,
+            external_metrics_field: None,
         }
     }
 }
@@ -110,12 +119,16 @@ pub struct PidTarget {
 }
 
 /// Which metric the PID controller targets.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TargetMetric {
     LatencyP50,
     LatencyP90,
     LatencyP99,
     ErrorRate,
+    /// Server-reported metric, identified by name.
+    /// The coordinator polls an external endpoint and injects the value
+    /// into MetricsSummary::external_signals.
+    External { name: String },
 }
 
 /// Connection pool and timeout settings.

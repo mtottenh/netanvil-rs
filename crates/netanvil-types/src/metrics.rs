@@ -35,6 +35,10 @@ pub struct MetricsSummary {
     pub latency_p90_ns: u64,
     pub latency_p99_ns: u64,
     pub window_duration: Duration,
+    /// External signals from the system under test.
+    /// E.g. `[("load", 82.5)]` from a server-reported load metric.
+    /// Injected by the coordinator from an external source (HTTP poll, push, etc.).
+    pub external_signals: Vec<(String, f64)>,
 }
 
 /// Output of a RateController: new target rate and when to check again.

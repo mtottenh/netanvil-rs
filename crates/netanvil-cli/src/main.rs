@@ -272,6 +272,7 @@ fn main() -> Result<()> {
                 metrics_interval: Duration::from_millis(500),
                 control_interval: Duration::from_millis(100),
                 error_status_threshold: error_threshold,
+                ..Default::default()
             };
 
             let rate_desc = match &config.rate {

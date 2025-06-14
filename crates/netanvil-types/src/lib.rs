@@ -5,8 +5,10 @@
 
 pub mod command;
 pub mod config;
+pub mod distributed;
 pub mod error;
 pub mod metrics;
+pub mod node;
 pub mod request;
 pub mod traits;
 
@@ -14,7 +16,9 @@ pub use command::WorkerCommand;
 pub use config::{
     ConnectionConfig, PidTarget, RateConfig, SchedulerConfig, TargetMetric, TestConfig,
 };
+pub use distributed::{MetricsFetcher, NodeCommander, NodeDiscovery, RemoteMetrics};
 pub use error::{NetAnvilError, Result};
+pub use node::{NodeId, NodeInfo, NodeState};
 pub use metrics::{MetricsSnapshot, MetricsSummary, RateDecision};
 pub use request::{ExecutionError, ExecutionResult, RequestContext, RequestSpec, TimingBreakdown};
 pub use traits::{
@@ -96,5 +100,49 @@ mod tests {
 
     fn _assert_rc_generator_compiles(g: Rc<dyn RequestGenerator>) {
         let _ = g;
+    }
+
+    #[test]
+    fn node_info_serde_roundtrip() {
+        let info = NodeInfo {
+            id: NodeId("agent-1".into()),
+            addr: "10.0.0.1:9090".into(),
+            cores: 8,
+            state: NodeState::Running,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: NodeInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.id, info.id);
+        assert_eq!(parsed.cores, 8);
+        assert_eq!(parsed.state, NodeState::Running);
+    }
+
+    #[test]
+    fn remote_metrics_serde_roundtrip() {
+        let m = RemoteMetrics {
+            node_id: NodeId("agent-1".into()),
+            current_rps: 500.0,
+            target_rps: 500.0,
+            total_requests: 10000,
+            total_errors: 5,
+            error_rate: 0.0005,
+            latency_p50_ms: 2.5,
+            latency_p90_ms: 8.0,
+            latency_p99_ms: 25.0,
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let parsed: RemoteMetrics = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.total_requests, 10000);
+        assert!((parsed.latency_p99_ms - 25.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn target_metric_external_serde_roundtrip() {
+        let metric = TargetMetric::External {
+            name: "load".into(),
+        };
+        let json = serde_json::to_string(&metric).unwrap();
+        let parsed: TargetMetric = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, TargetMetric::External { name } if name == "load"));
     }
 }

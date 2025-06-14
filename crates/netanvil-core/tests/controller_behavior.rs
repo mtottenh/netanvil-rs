@@ -96,6 +96,7 @@ fn make_summary(requests: u64, p99_ms: f64, error_rate: f64) -> MetricsSummary {
         latency_p90_ns: (p99_ms * 0.9 * 1_000_000.0) as u64,
         latency_p99_ns: (p99_ms * 1_000_000.0) as u64,
         window_duration: Duration::from_secs(1),
+        external_signals: Vec::new(),
     }
 }
 
@@ -337,4 +338,139 @@ fn header_transformer_appends_headers() {
     assert_eq!(result.headers.len(), 3);
     assert_eq!(result.headers[1].0, "X-Custom");
     assert_eq!(result.headers[2].0, "Authorization");
+}
+
+// ---------------------------------------------------------------------------
+// External signal PID control tests
+// ---------------------------------------------------------------------------
+
+fn make_summary_with_signal(
+    requests: u64,
+    signal_name: &str,
+    signal_value: f64,
+) -> MetricsSummary {
+    MetricsSummary {
+        total_requests: requests,
+        total_errors: 0,
+        error_rate: 0.0,
+        request_rate: requests as f64,
+        latency_p50_ns: 5_000_000,
+        latency_p90_ns: 10_000_000,
+        latency_p99_ns: 20_000_000,
+        window_duration: Duration::from_secs(1),
+        external_signals: vec![(signal_name.to_string(), signal_value)],
+    }
+}
+
+#[test]
+fn pid_reduces_rate_when_external_load_exceeds_target() {
+    let mut ctrl = PidRateController::new(
+        TargetMetric::External {
+            name: "load".into(),
+        },
+        80.0, // target: keep load at 80%
+        500.0,
+        10.0,
+        10000.0,
+        0.5, 0.01, 0.1,
+    );
+
+    let initial = ctrl.current_rate();
+
+    // Feed load=95 (above 80 target) → should reduce rate
+    for _ in 0..10 {
+        ctrl.update(&make_summary_with_signal(100, "load", 95.0));
+    }
+
+    assert!(
+        ctrl.current_rate() < initial,
+        "rate should decrease when server load exceeds target: was {initial}, now {}",
+        ctrl.current_rate()
+    );
+}
+
+#[test]
+fn pid_increases_rate_when_external_load_below_target() {
+    let mut ctrl = PidRateController::new(
+        TargetMetric::External {
+            name: "load".into(),
+        },
+        80.0,
+        200.0,
+        10.0,
+        10000.0,
+        0.5, 0.01, 0.1,
+    );
+
+    let initial = ctrl.current_rate();
+
+    // Feed load=40 (well below 80 target) → should increase rate
+    for _ in 0..10 {
+        ctrl.update(&make_summary_with_signal(100, "load", 40.0));
+    }
+
+    assert!(
+        ctrl.current_rate() > initial,
+        "rate should increase when server load is below target: was {initial}, now {}",
+        ctrl.current_rate()
+    );
+}
+
+#[test]
+fn pid_stabilizes_on_external_signal() {
+    let mut ctrl = PidRateController::new(
+        TargetMetric::External {
+            name: "cpu".into(),
+        },
+        70.0, // target 70% CPU
+        500.0,
+        10.0,
+        10000.0,
+        0.1, 0.001, 0.05,
+    );
+
+    // Simulate: cpu_load = rate / 10 (linear relationship)
+    // Equilibrium: rate=700 → load=70
+    for _ in 0..200 {
+        let rate = ctrl.current_rate();
+        let simulated_cpu = rate / 10.0;
+        ctrl.update(&make_summary_with_signal(100, "cpu", simulated_cpu));
+    }
+
+    let final_rate = ctrl.current_rate();
+    assert!(
+        (final_rate - 700.0).abs() < 150.0,
+        "rate should stabilize near 700 (where cpu=70%), got {final_rate:.1}"
+    );
+}
+
+#[test]
+fn pid_handles_missing_external_signal_gracefully() {
+    let mut ctrl = PidRateController::new(
+        TargetMetric::External {
+            name: "load".into(),
+        },
+        80.0,
+        500.0,
+        10.0,
+        10000.0,
+        0.5, 0.01, 0.1,
+    );
+
+    // Feed a summary with NO external signals — should default to 0.0
+    // target=80, current=0 → error = 80 → rate should increase aggressively
+    let summary = MetricsSummary {
+        total_requests: 100,
+        external_signals: vec![], // empty!
+        ..Default::default()
+    };
+
+    let initial = ctrl.current_rate();
+    ctrl.update(&summary);
+
+    // Rate should increase (PID sees error=80, tries to push load up)
+    assert!(
+        ctrl.current_rate() >= initial,
+        "rate should not decrease when signal is missing"
+    );
 }

@@ -1,13 +1,19 @@
 use std::time::{Duration, Instant};
 
-/// Threshold below which we switch from runtime timer to busy-spin.
-/// 1ms is a good default — the runtime timer is imprecise below this.
-const SPIN_THRESHOLD: Duration = Duration::from_millis(1);
+/// Minimum sleep duration — below this, we skip the sleep and return
+/// immediately rather than busy-spinning (which would starve the runtime).
+const MIN_SLEEP: Duration = Duration::from_micros(500);
 
-/// Sleep until `target` with high precision.
+/// Sleep until `target` using the compio runtime timer.
 ///
-/// Uses the compio runtime timer for the coarse portion (saving CPU),
-/// then busy-spins for the final microseconds (maximum precision).
+/// Never busy-spins — the compio runtime uses cooperative scheduling,
+/// so any synchronous spin would starve spawned I/O tasks on the same
+/// thread. Instead, we use the runtime timer for all delays.
+///
+/// For intervals shorter than `MIN_SLEEP`, we return immediately.
+/// The scheduling loop handles the catch-up naturally: when the next
+/// intended time is already in the past, it fires the request
+/// immediately without sleeping.
 pub async fn precision_sleep_until(target: Instant) {
     let now = Instant::now();
     if target <= now {
@@ -15,12 +21,9 @@ pub async fn precision_sleep_until(target: Instant) {
     }
 
     let remaining = target - now;
-    if remaining > SPIN_THRESHOLD {
-        compio::time::sleep(remaining - SPIN_THRESHOLD).await;
+    if remaining >= MIN_SLEEP {
+        compio::time::sleep(remaining).await;
     }
-
-    // Busy-spin for the final stretch
-    while Instant::now() < target {
-        std::hint::spin_loop();
-    }
+    // For sub-500μs sleeps: return immediately.
+    // The request fires slightly early, but we don't starve the runtime.
 }

@@ -102,7 +102,7 @@ fn pid_controller_adapts_rate_based_on_external_server_load() {
         targets: vec![format!("http://{}/", server_addr)],
         duration: Duration::from_secs(6),
         rate: RateConfig::Pid {
-            initial_rps: 300.0,
+            initial_rps: 2000.0, // start well above equilibrium
             target: PidTarget {
                 metric: TargetMetric::External {
                     name: "load".into(),
@@ -112,7 +112,7 @@ fn pid_controller_adapts_rate_based_on_external_server_load() {
                 ki: 0.01,
                 kd: 0.1,
                 min_rps: 50.0,
-                max_rps: 2000.0,
+                max_rps: 5000.0,
             },
         },
         num_cores: 1,
@@ -188,6 +188,44 @@ fn pid_without_external_signal_generates_requests() {
         result.total_requests > 100,
         "PID mode should generate requests, got {}",
         result.total_requests
+    );
+}
+
+#[test]
+fn high_rps_does_not_stall_worker() {
+    // Regression test: previously, >500 RPS per core caused the scheduling
+    // loop to busy-spin in precision_sleep_until, starving I/O tasks.
+    let (server_addr, request_count) = start_signal_server();
+
+    let config = TestConfig {
+        targets: vec![format!("http://{}/", server_addr)],
+        duration: Duration::from_secs(3),
+        rate: RateConfig::Static { rps: 2000.0 },
+        num_cores: 1,
+        connections: ConnectionConfig {
+            request_timeout: Duration::from_secs(5),
+            ..Default::default()
+        },
+        metrics_interval: Duration::from_millis(200),
+        control_interval: Duration::from_millis(100),
+        ..Default::default()
+    };
+
+    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(5))).unwrap();
+
+    // At 2000 RPS for 3 seconds, we expect ~6000 requests.
+    // Allow wide tolerance since this is a real HTTP server.
+    assert!(
+        result.total_requests > 2000,
+        "at 2000 RPS for 3s, expected >2000 requests, got {} (rate: {:.0} req/s)",
+        result.total_requests,
+        result.request_rate,
+    );
+
+    let server_count = request_count.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        server_count > 2000,
+        "server should have received >2000 requests, got {server_count}"
     );
 }
 

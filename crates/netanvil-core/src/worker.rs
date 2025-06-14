@@ -1,5 +1,5 @@
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use netanvil_types::{
     MetricsCollector, MetricsSnapshot, RequestContext, RequestExecutor, RequestGenerator,
@@ -7,6 +7,10 @@ use netanvil_types::{
 };
 
 use crate::precision::precision_sleep_until;
+
+/// Maximum requests to fire in a burst before yielding to the runtime.
+/// This prevents starvation of I/O tasks when catching up after a delay.
+const YIELD_AFTER_BURST: u32 = 64;
 
 /// Per-core worker that runs the request scheduling loop.
 ///
@@ -34,7 +38,7 @@ where
     metrics_tx: flume::Sender<MetricsSnapshot>,
 
     core_id: usize,
-    metrics_interval: std::time::Duration,
+    metrics_interval: Duration,
 }
 
 impl<S, G, T, E, M> Worker<S, G, T, E, M>
@@ -54,7 +58,7 @@ where
         command_rx: flume::Receiver<WorkerCommand>,
         metrics_tx: flume::Sender<MetricsSnapshot>,
         core_id: usize,
-        metrics_interval: std::time::Duration,
+        metrics_interval: Duration,
     ) -> Self {
         Self {
             scheduler,
@@ -74,6 +78,7 @@ where
     pub async fn run(mut self) {
         let mut request_seq: u64 = 0;
         let mut last_report = Instant::now();
+        let mut consecutive_immediate: u32 = 0;
 
         loop {
             // 1. Check for coordinator commands (non-blocking)
@@ -96,8 +101,22 @@ where
                 break; // Test duration complete
             };
 
-            // 3. Precision sleep until intended send time
-            precision_sleep_until(intended_time).await;
+            // 3. Sleep until intended send time, or yield if catching up
+            let now = Instant::now();
+            if intended_time > now {
+                // Future request — sleep via compio timer (yields to runtime)
+                precision_sleep_until(intended_time).await;
+                consecutive_immediate = 0;
+            } else {
+                // Request is due now (or overdue) — fire immediately
+                consecutive_immediate += 1;
+                if consecutive_immediate >= YIELD_AFTER_BURST {
+                    // We've fired a burst without yielding — give the
+                    // runtime a chance to process I/O completions
+                    compio::time::sleep(Duration::from_micros(100)).await;
+                    consecutive_immediate = 0;
+                }
+            }
 
             // 4. Build context capturing both intended and actual time
             let context = RequestContext {

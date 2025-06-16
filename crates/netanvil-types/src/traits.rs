@@ -12,7 +12,7 @@ use crate::request::{ExecutionResult, RequestContext, RequestSpec};
 /// Computes when to fire the next request.
 ///
 /// Implementations: ConstantRateScheduler, PoissonScheduler
-pub trait RequestScheduler {
+pub trait RequestScheduler: Send {
     /// Returns the next intended send time, or None if the test is done.
     fn next_request_time(&mut self) -> Option<Instant>;
 

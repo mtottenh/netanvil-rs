@@ -12,9 +12,10 @@ pub mod node;
 pub mod request;
 pub mod traits;
 
-pub use command::WorkerCommand;
+pub use command::{ScheduledRequest, TimerCommand, WorkerCommand};
 pub use config::{
-    ConnectionConfig, PidTarget, RateConfig, SchedulerConfig, TargetMetric, TestConfig,
+    ConnectionConfig, ConnectionPolicy, CountDistribution, PidTarget, RateConfig, SchedulerConfig,
+    TargetMetric, TestConfig,
 };
 pub use distributed::{MetricsFetcher, NodeCommander, NodeDiscovery, RemoteMetrics};
 pub use error::{NetAnvilError, Result};
@@ -92,12 +93,14 @@ mod tests {
         assert_eq!(s.error_rate, 0.0);
     }
 
-    // Compile test: traits have no Send bound, so Rc<dyn Trait> must compile.
-    // If traits required Send, this would fail because Rc is !Send.
-    fn _assert_rc_scheduler_compiles(s: Rc<dyn RequestScheduler>) {
-        let _ = s;
+    // Compile test: RequestScheduler requires Send (for timer thread architecture).
+    // Box<dyn RequestScheduler> must be Send.
+    fn _assert_box_scheduler_is_send(s: Box<dyn RequestScheduler>) {
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&s);
     }
 
+    // Compile test: other hot-path traits remain !Send (Rc-based sharing on I/O workers).
     fn _assert_rc_generator_compiles(g: Rc<dyn RequestGenerator>) {
         let _ = g;
     }

@@ -4,6 +4,11 @@
 //! measures: achieved rate, p99 latency, error rate, and the achieved/target
 //! ratio. When the ratio drops below 0.8, we've hit the ceiling.
 //!
+//! With the N:M timer thread architecture, scheduling overhead is eliminated
+//! from the I/O worker — the timer thread handles all timing via synchronous
+//! precision sleep (~1μs). This should yield higher ceilings and better
+//! rate accuracy than the old per-worker scheduling model.
+//!
 //! Run with: cargo test -p netanvil-core --test scale_test --release -- --nocapture
 //! (release mode is important for realistic numbers)
 
@@ -62,12 +67,12 @@ struct ScaleResult {
     p99_ms: f64,
 }
 
-fn run_at_rate(addr: SocketAddr, target_rps: f64, duration_secs: u64) -> ScaleResult {
+fn run_at_rate(addr: SocketAddr, target_rps: f64, duration_secs: u64, num_cores: usize) -> ScaleResult {
     let config = TestConfig {
         targets: vec![format!("http://{}/", addr)],
         duration: Duration::from_secs(duration_secs),
         rate: RateConfig::Static { rps: target_rps },
-        num_cores: 1,
+        num_cores,
         connections: ConnectionConfig {
             max_connections_per_core: 500,
             request_timeout: Duration::from_secs(10),
@@ -96,18 +101,21 @@ fn scale_characterization() {
     let (addr, _server_count) = start_fast_server();
 
     // Warm up connections
-    let _ = run_at_rate(addr, 100.0, 1);
+    let _ = run_at_rate(addr, 100.0, 1, 1);
+
+    eprintln!();
+    eprintln!("  === Single-core scale characterization (timer thread architecture) ===");
+    eprintln!();
 
     let rates = [500.0, 1000.0, 2000.0, 5000.0, 10000.0];
     let mut results = Vec::new();
 
-    eprintln!();
     eprintln!("  {:<12} {:>12} {:>8} {:>10} {:>8} {:>8}",
         "Target RPS", "Achieved RPS", "Ratio", "Requests", "Errors", "p99 ms");
     eprintln!("  {}", "-".repeat(70));
 
     for &target in &rates {
-        let r = run_at_rate(addr, target, 3);
+        let r = run_at_rate(addr, target, 3, 1);
         eprintln!(
             "  {:<12.0} {:>12.1} {:>8.2} {:>10} {:>8} {:>8.1}",
             r.target_rps, r.achieved_rps, r.ratio, r.total_requests, r.total_errors, r.p99_ms
@@ -123,7 +131,7 @@ fn scale_characterization() {
         results[0].ratio
     );
 
-    // At 1000 RPS, should still be viable after the spin-loop fix
+    // At 1000 RPS, should still be viable
     assert!(
         results[1].ratio > 0.70,
         "should achieve >70% of 1000 RPS target, got ratio {:.2}",
@@ -139,4 +147,46 @@ fn scale_characterization() {
         .unwrap_or(0.0);
     eprintln!("  Estimated single-core ceiling: ~{ceiling:.0} RPS (ratio > 0.7)");
     eprintln!();
+}
+
+#[test]
+fn scale_multi_core() {
+    let (addr, _server_count) = start_fast_server();
+
+    // Warm up
+    let _ = run_at_rate(addr, 100.0, 1, 1);
+
+    eprintln!();
+    eprintln!("  === Multi-core scaling (timer thread architecture) ===");
+    eprintln!();
+
+    let target_rps = 2000.0;
+    let core_counts = [1, 2, 4];
+
+    eprintln!("  {:<8} {:>12} {:>12} {:>8} {:>10} {:>8}",
+        "Cores", "Target RPS", "Achieved RPS", "Ratio", "Requests", "p99 ms");
+    eprintln!("  {}", "-".repeat(68));
+
+    let mut results = Vec::new();
+    for &cores in &core_counts {
+        let r = run_at_rate(addr, target_rps, 3, cores);
+        eprintln!(
+            "  {:<8} {:>12.0} {:>12.1} {:>8.2} {:>10} {:>8.1}",
+            cores, r.target_rps, r.achieved_rps, r.ratio, r.total_requests, r.p99_ms
+        );
+        results.push((cores, r));
+    }
+    eprintln!();
+
+    // With more cores, the achieved rate should be at least as good
+    // (the timer thread handles scheduling, so I/O workers are uncontended)
+    let single_ratio = results[0].1.ratio;
+    for &(cores, ref r) in &results[1..] {
+        assert!(
+            r.ratio >= single_ratio * 0.80,
+            "multi-core ({cores}) should not degrade significantly vs single-core: \
+             single={single_ratio:.2}, multi={:.2}",
+            r.ratio
+        );
+    }
 }

@@ -6,6 +6,7 @@ members = [
     "crates/netanvil-core",
     "crates/netanvil-http",
     "crates/netanvil-api",
+    "crates/netanvil-distributed",
     "crates/netanvil-cli",
 ]
 
@@ -68,6 +69,7 @@ netanvil-metrics = { path = "crates/netanvil-metrics" }
 netanvil-core = { path = "crates/netanvil-core" }
 netanvil-http = { path = "crates/netanvil-http" }
 netanvil-api = { path = "crates/netanvil-api" }
+netanvil-distributed = { path = "crates/netanvil-distributed" }
 netanvil-cli = { path = "crates/netanvil-cli" }
 
 [profile.release]

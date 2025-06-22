@@ -16,7 +16,9 @@ netanvil-core = { workspace = true }
 netanvil-http = { workspace = true }
 netanvil-metrics = { workspace = true }
 netanvil-api = { workspace = true }
+netanvil-distributed = { workspace = true }
 flume = { workspace = true }
+serde_json = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

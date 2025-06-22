@@ -14,6 +14,8 @@ pub struct SharedState {
 struct SharedStateInner {
     pub status: TestStatus,
     pub metrics: Option<MetricsView>,
+    /// Signals pushed via PUT /signal. Read by the coordinator each tick.
+    pub pushed_signals: Vec<(String, f64)>,
 }
 
 impl SharedState {
@@ -64,6 +66,23 @@ impl SharedState {
 
     pub fn mark_completed(&self) {
         self.inner.lock().unwrap().status.state = "completed".into();
+    }
+
+    /// Push an external signal (e.g., from PUT /signal).
+    /// Overwrites any existing signal with the same name.
+    pub fn push_signal(&self, name: String, value: f64) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(existing) = inner.pushed_signals.iter_mut().find(|(k, _)| k == &name) {
+            existing.1 = value;
+        } else {
+            inner.pushed_signals.push((name, value));
+        }
+    }
+
+    /// Read and return all pushed signals. Does not clear them — signals
+    /// persist until overwritten by a new push.
+    pub fn get_pushed_signals(&self) -> Vec<(String, f64)> {
+        self.inner.lock().unwrap().pushed_signals.clone()
     }
 }
 
@@ -146,4 +165,10 @@ pub struct UpdateTargetsRequest {
 #[derive(Debug, Deserialize)]
 pub struct UpdateHeadersRequest {
     pub headers: Vec<(String, String)>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PushSignalRequest {
+    pub name: String,
+    pub value: f64,
 }

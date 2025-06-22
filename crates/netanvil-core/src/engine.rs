@@ -139,6 +139,7 @@ where
     transformer_factory: Option<Box<dyn Fn(usize) -> Box<dyn RequestTransformer> + Send>>,
     on_progress: Option<Box<dyn FnMut(&crate::coordinator::ProgressUpdate)>>,
     external_command_rx: Option<flume::Receiver<netanvil_types::WorkerCommand>>,
+    pushed_signal_source: Option<Box<dyn FnMut() -> Vec<(String, f64)>>>,
 }
 
 impl<E, F> TestBuilder<E, F>
@@ -155,6 +156,7 @@ where
             transformer_factory: None,
             on_progress: None,
             external_command_rx: None,
+            pushed_signal_source: None,
         }
     }
 
@@ -192,6 +194,14 @@ where
         self
     }
 
+    /// Set a push-based signal source. Read each coordinator tick.
+    /// Pushed signals override polled signals (from config) with the same key.
+    /// Typically wired to `SharedState::get_pushed_signals()` for `PUT /signal`.
+    pub fn pushed_signal_source(mut self, f: impl FnMut() -> Vec<(String, f64)> + 'static) -> Self {
+        self.pushed_signal_source = Some(Box::new(f));
+        self
+    }
+
     /// Build and run the test. Blocks until completion.
     pub fn run(self) -> netanvil_types::Result<TestResult> {
         run_test_impl(
@@ -201,6 +211,7 @@ where
             self.transformer_factory,
             self.on_progress,
             self.external_command_rx,
+            self.pushed_signal_source,
         )
     }
 }
@@ -216,6 +227,7 @@ fn run_test_impl<E, F>(
     transformer_factory: Option<Box<dyn Fn(usize) -> Box<dyn RequestTransformer> + Send>>,
     on_progress: Option<Box<dyn FnMut(&crate::coordinator::ProgressUpdate)>>,
     external_command_rx: Option<flume::Receiver<netanvil_types::WorkerCommand>>,
+    pushed_signal_source: Option<Box<dyn FnMut() -> Vec<(String, f64)>>>,
 ) -> netanvil_types::Result<TestResult>
 where
     E: RequestExecutor + 'static,
@@ -418,12 +430,17 @@ where
         coordinator.set_external_commands(rx);
     }
 
-    // Wire external signal source from config (e.g. server load metric)
+    // Wire pull-based external signal source from config (e.g. server load metric)
     if let Some(source) = crate::signal::make_signal_source(
         config.external_metrics_url.as_deref(),
         config.external_metrics_field.as_deref(),
     ) {
         coordinator.set_external_signal_source(source);
+    }
+
+    // Wire push-based signal source (e.g. from PUT /signal API endpoint)
+    if let Some(source) = pushed_signal_source {
+        coordinator.set_pushed_signal_source(source);
     }
 
     Ok(coordinator.run())

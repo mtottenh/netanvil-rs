@@ -128,6 +128,10 @@ impl AgentServer {
                     );
                 }
             }
+            ("PUT", "/signal") => {
+                let inner = self.inner.lock().unwrap();
+                handlers::handle_put_signal(request, &inner.shared_state);
+            }
             ("POST", "/stop") => {
                 let inner = self.inner.lock().unwrap();
                 if let Some(ref tx) = inner.command_tx {

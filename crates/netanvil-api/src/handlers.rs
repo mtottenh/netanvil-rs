@@ -56,6 +56,14 @@ pub fn handle_post_stop(
     respond_json(request, 200, &ApiResponse::success());
 }
 
+pub fn handle_put_signal(request: tiny_http::Request, state: &SharedState) {
+    read_json_then_respond::<PushSignalRequest>(request, |body, req| {
+        tracing::debug!(name = %body.name, value = body.value, "received pushed signal");
+        state.push_signal(body.name, body.value);
+        respond_json(req, 200, &ApiResponse::success());
+    });
+}
+
 pub fn handle_get_metrics_prometheus(request: tiny_http::Request, state: &SharedState) {
     let body = match state.get_metrics() {
         Some(m) => {

@@ -72,6 +72,7 @@ impl ControlServer {
             ("PUT", "/rate") => handlers::handle_put_rate(request, &self.command_tx),
             ("PUT", "/targets") => handlers::handle_put_targets(request, &self.command_tx),
             ("PUT", "/headers") => handlers::handle_put_headers(request, &self.command_tx),
+            ("PUT", "/signal") => handlers::handle_put_signal(request, &self.shared_state),
             ("POST", "/stop") => handlers::handle_post_stop(request, &self.command_tx),
             _ => handlers::handle_not_found(request),
         }

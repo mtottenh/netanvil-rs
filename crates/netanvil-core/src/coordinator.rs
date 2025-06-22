@@ -76,9 +76,12 @@ pub struct Coordinator {
     external_command_rx: Option<flume::Receiver<WorkerCommand>>,
     /// Set to true when an external Stop command is received.
     stopped: bool,
-    /// Optional external signal source, polled each tick.
+    /// Optional external signal source (pull-based), polled each tick.
     /// Returns `(signal_name, signal_value)` pairs to inject into MetricsSummary.
     external_signal_source: Option<Box<dyn FnMut() -> Vec<(String, f64)>>>,
+    /// Optional pushed signal source (push-based), read each tick.
+    /// Pushed signals override polled signals with the same key.
+    pushed_signal_source: Option<Box<dyn FnMut() -> Vec<(String, f64)>>>,
 }
 
 impl Coordinator {
@@ -102,6 +105,7 @@ impl Coordinator {
             external_command_rx: None,
             stopped: false,
             external_signal_source: None,
+            pushed_signal_source: None,
         }
     }
 
@@ -116,7 +120,7 @@ impl Coordinator {
         self.external_command_rx = Some(rx);
     }
 
-    /// Set an external signal source, polled each tick before the rate controller.
+    /// Set an external signal source (pull-based), polled each tick.
     /// Returns `(signal_name, value)` pairs injected into MetricsSummary.
     /// Used for server-reported metrics (e.g. proxy load, queue depth).
     pub fn set_external_signal_source(
@@ -124,6 +128,16 @@ impl Coordinator {
         f: impl FnMut() -> Vec<(String, f64)> + 'static,
     ) {
         self.external_signal_source = Some(Box::new(f));
+    }
+
+    /// Set a pushed signal source, read each tick.
+    /// Used for signals pushed via HTTP API (`PUT /signal`).
+    /// Pushed signals override polled signals with the same key.
+    pub fn set_pushed_signal_source(
+        &mut self,
+        f: impl FnMut() -> Vec<(String, f64)> + 'static,
+    ) {
+        self.pushed_signal_source = Some(Box::new(f));
     }
 
     /// Run the full coordinator loop. Blocks until the test completes.
@@ -179,14 +193,25 @@ impl Coordinator {
         // Rate controller computes new target from the recent window
         let mut summary = self.tick_aggregate.to_summary();
 
-        // Inject external signals (e.g. server-reported load metrics)
+        // Inject external signals from both pull and push sources.
+        // Pushed signals override polled signals with the same key.
+        let mut signals = Vec::new();
         if let Some(ref mut source) = self.external_signal_source {
-            let signals = source();
-            if !signals.is_empty() {
-                tracing::debug!(?signals, "injected external signals into metrics summary");
-            }
-            summary.external_signals = signals;
+            signals = source();
         }
+        if let Some(ref mut source) = self.pushed_signal_source {
+            for (name, value) in source() {
+                if let Some(existing) = signals.iter_mut().find(|(k, _)| k == &name) {
+                    existing.1 = value;
+                } else {
+                    signals.push((name, value));
+                }
+            }
+        }
+        if !signals.is_empty() {
+            tracing::debug!(?signals, "injected external signals into metrics summary");
+        }
+        summary.external_signals = signals;
 
         let decision = self.rate_controller.update(&summary);
 

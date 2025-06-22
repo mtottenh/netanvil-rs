@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use netanvil_api::{AgentServer, ControlServer, SharedState};
-use netanvil_core::{run_test_with_api, run_test_with_progress, report::ProgressLine};
+use netanvil_core::{run_test_with_progress, report::ProgressLine};
 use netanvil_distributed::{
     DistributedCoordinator, HttpMetricsFetcher, HttpNodeCommander, HttpSignalPoller,
     StaticDiscovery,
@@ -492,18 +492,21 @@ fn main() -> Result<()> {
                 let server = ControlServer::new(port, shared_state.clone(), ext_cmd_tx)
                     .context(format!("failed to start API server on port {port}"))?;
                 let _server_handle = server.spawn();
-                eprintln!("Control API listening on http://0.0.0.0:{port}");
+                tracing::info!(port, "control API listening");
 
                 let progress_state = shared_state.clone();
-                run_test_with_api(
+                let signal_state = shared_state.clone();
+                netanvil_core::TestBuilder::new(
                     config,
                     move || HttpExecutor::with_timeout(request_timeout),
-                    move |update| {
-                        progress_state.update_from_progress(update);
-                        eprint!("\r{}", ProgressLine::new(update));
-                    },
-                    ext_cmd_rx,
                 )
+                .on_progress(move |update| {
+                    progress_state.update_from_progress(update);
+                    eprint!("\r{}", ProgressLine::new(update));
+                })
+                .external_commands(ext_cmd_rx)
+                .pushed_signal_source(move || signal_state.get_pushed_signals())
+                .run()
                 .context("load test failed")?
             } else {
                 // No API: simple progress output

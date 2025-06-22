@@ -140,6 +140,8 @@ pub struct ConnectionConfig {
     pub connect_timeout: Duration,
     /// Per-request timeout
     pub request_timeout: Duration,
+    /// Connection lifecycle policy
+    pub connection_policy: ConnectionPolicy,
 }
 
 impl Default for ConnectionConfig {
@@ -148,6 +150,54 @@ impl Default for ConnectionConfig {
             max_connections_per_core: 100,
             connect_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(30),
+            connection_policy: ConnectionPolicy::KeepAlive,
         }
     }
+}
+
+/// How connections to the target are managed.
+///
+/// Controls connection lifecycle via the `Connection: close` HTTP header.
+/// The actual TCP connections are managed by the HTTP client (cyper); this
+/// policy influences client behavior by requesting connection closure on
+/// selected requests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ConnectionPolicy {
+    /// Always reuse connections via HTTP keep-alive.
+    /// This is the default and matches standard HTTP/1.1 behavior.
+    KeepAlive,
+
+    /// Close the connection after every request.
+    /// Forces a new TCP connection (+ TLS handshake) for each request.
+    /// Useful for testing connection establishment rate.
+    AlwaysNew,
+
+    /// Mixed behavior simulating realistic client populations.
+    /// A configurable fraction of requests reuse connections; the
+    /// remainder force new connections.
+    Mixed {
+        /// Fraction of requests that reuse existing connections (0.0-1.0).
+        /// The remainder send `Connection: close`.
+        persistent_ratio: f64,
+        /// Connection lifetime in number of requests. When set, each
+        /// simulated connection closes after this many requests and a
+        /// new one is opened. The count is sampled from the distribution
+        /// each time a connection is "opened".
+        /// None = unlimited (close only based on persistent_ratio).
+        connection_lifetime: Option<CountDistribution>,
+    },
+}
+
+/// A distribution over positive integer counts.
+///
+/// Used to model realistic variation in connection lifetimes,
+/// request counts per session, etc.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CountDistribution {
+    /// Exactly N every time.
+    Fixed(u32),
+    /// Uniform random between min and max (inclusive).
+    Uniform { min: u32, max: u32 },
+    /// Normal (Gaussian) distribution, clamped to >= 1.
+    Normal { mean: f64, stddev: f64 },
 }

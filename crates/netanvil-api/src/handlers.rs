@@ -56,6 +56,81 @@ pub fn handle_post_stop(
     respond_json(request, 200, &ApiResponse::success());
 }
 
+pub fn handle_get_metrics_prometheus(request: tiny_http::Request, state: &SharedState) {
+    let body = match state.get_metrics() {
+        Some(m) => {
+            let mut out = String::with_capacity(2048);
+
+            // Counters
+            out.push_str("# HELP netanvil_requests_total Total requests sent.\n");
+            out.push_str("# TYPE netanvil_requests_total counter\n");
+            out.push_str(&format!("netanvil_requests_total {}\n", m.total_requests));
+
+            out.push_str("# HELP netanvil_errors_total Total errors.\n");
+            out.push_str("# TYPE netanvil_errors_total counter\n");
+            out.push_str(&format!("netanvil_errors_total {}\n", m.total_errors));
+
+            // Gauges
+            out.push_str("# HELP netanvil_request_rate Current requests per second.\n");
+            out.push_str("# TYPE netanvil_request_rate gauge\n");
+            out.push_str(&format!("netanvil_request_rate {:.1}\n", m.current_rps));
+
+            out.push_str("# HELP netanvil_target_rps Target requests per second.\n");
+            out.push_str("# TYPE netanvil_target_rps gauge\n");
+            out.push_str(&format!("netanvil_target_rps {:.1}\n", m.target_rps));
+
+            out.push_str("# HELP netanvil_error_rate Current error rate (0-1).\n");
+            out.push_str("# TYPE netanvil_error_rate gauge\n");
+            out.push_str(&format!("netanvil_error_rate {:.6}\n", m.error_rate));
+
+            out.push_str("# HELP netanvil_elapsed_seconds Test elapsed time.\n");
+            out.push_str("# TYPE netanvil_elapsed_seconds gauge\n");
+            out.push_str(&format!("netanvil_elapsed_seconds {:.1}\n", m.elapsed_secs));
+
+            // Latency histogram (cumulative buckets, Prometheus native format)
+            out.push_str("# HELP netanvil_latency_seconds Request latency distribution.\n");
+            out.push_str("# TYPE netanvil_latency_seconds histogram\n");
+            for &(le, count) in &m.latency_buckets {
+                if le.is_infinite() {
+                    out.push_str(&format!(
+                        "netanvil_latency_seconds_bucket{{le=\"+Inf\"}} {count}\n"
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "netanvil_latency_seconds_bucket{{le=\"{le}\"}} {count}\n"
+                    ));
+                }
+            }
+            // _count and _sum (sum approximated from percentiles — exact sum
+            // would require tracking in the coordinator, but count is exact)
+            out.push_str(&format!(
+                "netanvil_latency_seconds_count {}\n",
+                m.total_requests
+            ));
+            // Approximate sum from p50 * count (rough, but Prometheus needs it)
+            let approx_sum = m.latency_p50_ms / 1000.0 * m.total_requests as f64;
+            out.push_str(&format!(
+                "netanvil_latency_seconds_sum {:.3}\n",
+                approx_sum
+            ));
+
+            out
+        }
+        None => "# No metrics available yet\n".to_string(),
+    };
+
+    let response = tiny_http::Response::from_string(body)
+        .with_status_code(200)
+        .with_header(
+            tiny_http::Header::from_bytes(
+                &b"Content-Type"[..],
+                &b"text/plain; version=0.0.4; charset=utf-8"[..],
+            )
+            .unwrap(),
+        );
+    let _ = request.respond(response);
+}
+
 pub fn handle_not_found(request: tiny_http::Request) {
     respond_json(request, 404, &ApiResponse::error("not found"));
 }
@@ -79,7 +154,7 @@ fn read_json_then_respond<T: serde::de::DeserializeOwned>(
     }
 }
 
-fn respond_json(request: tiny_http::Request, status_code: u16, body: &impl serde::Serialize) {
+pub fn respond_json(request: tiny_http::Request, status_code: u16, body: &impl serde::Serialize) {
     let json = serde_json::to_string(body).unwrap_or_else(|_| r#"{"ok":false}"#.to_string());
     let response = tiny_http::Response::from_string(json)
         .with_status_code(status_code)

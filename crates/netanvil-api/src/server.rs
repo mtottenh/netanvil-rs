@@ -66,6 +66,9 @@ impl ControlServer {
         match (method.as_str(), path.as_str()) {
             ("GET", "/status") => handlers::handle_get_status(request, &self.shared_state),
             ("GET", "/metrics") => handlers::handle_get_metrics(request, &self.shared_state),
+            ("GET", "/metrics/prometheus") => {
+                handlers::handle_get_metrics_prometheus(request, &self.shared_state)
+            }
             ("PUT", "/rate") => handlers::handle_put_rate(request, &self.command_tx),
             ("PUT", "/targets") => handlers::handle_put_targets(request, &self.command_tx),
             ("PUT", "/headers") => handlers::handle_put_headers(request, &self.command_tx),

@@ -50,6 +50,7 @@ impl SharedState {
             latency_p99_ms: update.window.latency_p99_ns as f64 / 1_000_000.0,
             elapsed_secs: update.elapsed.as_secs_f64(),
             remaining_secs: update.remaining.as_secs_f64(),
+            latency_buckets: update.latency_buckets.clone(),
         });
     }
 
@@ -101,6 +102,10 @@ pub struct MetricsView {
     pub latency_p99_ms: f64,
     pub elapsed_secs: f64,
     pub remaining_secs: f64,
+    /// Cumulative histogram buckets: (upper_bound_seconds, cumulative_count).
+    /// Standard Prometheus bucket boundaries.
+    #[serde(default)]
+    pub latency_buckets: Vec<(f64, u64)>,
 }
 
 #[derive(Debug, Serialize)]

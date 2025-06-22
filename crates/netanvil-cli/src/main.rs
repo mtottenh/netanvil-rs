@@ -505,7 +505,7 @@ fn main() -> Result<()> {
                     eprint!("\r{}", ProgressLine::new(update));
                 })
                 .external_commands(ext_cmd_rx)
-                .pushed_signal_source(move || signal_state.get_pushed_signals())
+                .pushed_signal_source(move || signal_state.drain_pushed_signals())
                 .run()
                 .context("load test failed")?
             } else {

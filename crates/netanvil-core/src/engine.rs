@@ -196,7 +196,7 @@ where
 
     /// Set a push-based signal source. Read each coordinator tick.
     /// Pushed signals override polled signals (from config) with the same key.
-    /// Typically wired to `SharedState::get_pushed_signals()` for `PUT /signal`.
+    /// Typically wired to `SharedState::drain_pushed_signals()` for `PUT /signal`.
     pub fn pushed_signal_source(mut self, f: impl FnMut() -> Vec<(String, f64)> + 'static) -> Self {
         self.pushed_signal_source = Some(Box::new(f));
         self

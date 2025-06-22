@@ -79,10 +79,11 @@ impl SharedState {
         }
     }
 
-    /// Read and return all pushed signals. Does not clear them — signals
-    /// persist until overwritten by a new push.
-    pub fn get_pushed_signals(&self) -> Vec<(String, f64)> {
-        self.inner.lock().unwrap().pushed_signals.clone()
+    /// Drain all pushed signals. Signals are consumed — each push is a
+    /// single update, not a persistent value. If the external system stops
+    /// pushing, the signal disappears from the next coordinator tick.
+    pub fn drain_pushed_signals(&self) -> Vec<(String, f64)> {
+        std::mem::take(&mut self.inner.lock().unwrap().pushed_signals)
     }
 }
 

@@ -1,0 +1,92 @@
+flowchart TB
+    %% Main components
+    CLI[loadtester-cli]
+    Core[loadtester-core]
+    
+    %% Core library modules
+    subgraph "loadtester-core"
+        direction TB
+        CoreLib["lib.rs (Entry Point)"]
+        Traits["traits.rs"]
+        
+        subgraph Controllers["controllers/"]
+            direction LR
+            CtrlMod["mod.rs"]
+            StaticCtrl["static_controller.rs"]
+            PIDCtrl["pid_controller.rs"]
+            StepCtrl["step_controller.rs"]
+        end
+        
+        subgraph Schedulers["schedulers/"]
+            direction LR
+            SchMod["mod.rs"]
+            ConstantSch["constant_rate_scheduler.rs"]
+            PoissonSch["poisson_scheduler.rs"]
+        end
+        
+        subgraph Executors["executors/"]
+            direction LR
+            ExecMod["mod.rs"]
+            HttpExec["http_executor.rs"]
+            ConfigExec["configurable_executor.rs"]
+        end
+        
+        subgraph Collectors["collectors/"]
+            direction LR
+            CollMod["mod.rs"]
+            Collector["results_collector.rs"]
+        end
+        
+        subgraph Recorders["recorders/"]
+            direction LR
+            RecMod["mod.rs"]
+            CsvRec["csv_recorder.rs"]
+            InfluxRec["influxdb_recorder.rs"]
+        end
+        
+        subgraph Reporters["reporters/"]
+            direction LR
+            RepMod["mod.rs"]
+            ConsoleRep["console_reporter.rs"]
+            HtmlRep["html_reporter.rs"]
+        end
+        
+        CoreLib --> Traits
+        CoreLib --> Controllers
+        CoreLib --> Schedulers
+        CoreLib --> Executors
+        CoreLib --> Collectors
+        CoreLib --> Recorders
+        CoreLib --> Reporters
+    end
+    
+    %% CLI Application
+    subgraph "loadtester-cli"
+        direction TB
+        Main["main.rs"]
+        Config["config.rs"]
+        Commands["commands/"]
+        Commands --> RunCmd["run.rs"]
+        Commands --> ReportCmd["report.rs"]
+    end
+    
+    %% Relationships
+    CLI --> Core
+    
+    %% Data flow (simplified)
+    Schedulers -.-> Executors
+    Executors -.-> Collectors
+    Collectors -.-> Controllers
+    Controllers -.-> Schedulers
+    Collectors -.-> Recorders
+    Collectors -.-> Reporters
+    
+    %% Classes
+    class CLI,Core main
+    class CoreLib,Traits,CtrlMod,SchMod,ExecMod,CollMod,RecMod,RepMod interface
+    class StaticCtrl,PIDCtrl,StepCtrl,ConstantSch,PoissonSch,HttpExec,ConfigExec,CsvRec,InfluxRec,ConsoleRep,HtmlRep implementation
+    
+    %% Styles
+    classDef main fill:#f9f,stroke:#333,stroke-width:2px
+    classDef interface fill:#bbf,stroke:#333,stroke-width:1px
+    classDef implementation fill:#bfd,stroke:#333,stroke-width:1px

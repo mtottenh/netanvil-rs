@@ -170,10 +170,13 @@ fn main() {
     eprintln!("  Total requests: {}", result.total_requests);
     eprintln!("  Total errors:   {}", result.total_errors);
     eprintln!("  Duration:       {:.1}s", result.duration.as_secs_f64());
+    eprintln!("  Avg RPS:        {:.1}", result.request_rate);
     eprintln!(
-        "  Avg RPS:        {:.1}",
-        result.request_rate
+        "  Latency p50:    {:.1}ms",
+        result.latency_p50.as_secs_f64() * 1000.0
     );
-    eprintln!("  Latency p50:    {:.1}ms", result.latency_p50.as_secs_f64() * 1000.0);
-    eprintln!("  Latency p99:    {:.1}ms", result.latency_p99.as_secs_f64() * 1000.0);
+    eprintln!(
+        "  Latency p99:    {:.1}ms",
+        result.latency_p99.as_secs_f64() * 1000.0
+    );
 }

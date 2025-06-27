@@ -36,6 +36,35 @@ pub struct TestConfig {
     /// JSON field name to extract from the external metrics response.
     /// E.g. "load" extracts the numeric value from `{"load": 82.5}`.
     pub external_metrics_field: Option<String>,
+    /// Optional plugin configuration for custom request generation.
+    /// When set, the test uses the plugin's generator instead of the default
+    /// `SimpleGenerator`. In distributed mode, the leader embeds the plugin
+    /// source (script text or WASM bytes) so agents can instantiate generators.
+    #[serde(default)]
+    pub plugin: Option<PluginConfig>,
+}
+
+/// Plugin configuration embedded in TestConfig.
+///
+/// Carries the plugin type and source code/binary so it can be serialized
+/// over the wire from leader to agent nodes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginConfig {
+    /// Which plugin runtime to use.
+    pub plugin_type: PluginType,
+    /// Plugin source: script text (for Lua/hybrid) or WASM binary bytes.
+    pub source: Vec<u8>,
+}
+
+/// Available plugin runtime types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PluginType {
+    /// Lua config script → native Rust hot path. Zero per-request overhead.
+    Hybrid,
+    /// LuaJIT per-request generator. ~2μs per call.
+    Lua,
+    /// WASM module per-request generator. ~2.7μs per call.
+    Wasm,
 }
 
 impl TestConfig {
@@ -43,10 +72,9 @@ impl TestConfig {
     pub fn initial_rps(&self) -> f64 {
         match &self.rate {
             RateConfig::Static { rps } => *rps,
-            RateConfig::Step { steps } => {
-                steps.first().map(|(_, rps)| *rps).unwrap_or(100.0)
-            }
+            RateConfig::Step { steps } => steps.first().map(|(_, rps)| *rps).unwrap_or(100.0),
             RateConfig::Pid { initial_rps, .. } => *initial_rps,
+            RateConfig::CompositePid { initial_rps, .. } => *initial_rps,
         }
     }
 }
@@ -67,14 +95,16 @@ impl Default for TestConfig {
             error_status_threshold: 400,
             external_metrics_url: None,
             external_metrics_field: None,
+            plugin: None,
         }
     }
 }
 
 /// Which scheduling discipline to use for request timing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum SchedulerConfig {
     /// Fixed intervals: exactly 1/rate between each request.
+    #[default]
     ConstantRate,
     /// Poisson process: exponentially distributed inter-arrival times.
     /// Models realistic independent user arrivals.
@@ -84,12 +114,6 @@ pub enum SchedulerConfig {
     },
 }
 
-impl Default for SchedulerConfig {
-    fn default() -> Self {
-        Self::ConstantRate
-    }
-}
-
 /// How request rate is controlled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RateConfig {
@@ -97,25 +121,63 @@ pub enum RateConfig {
     Static { rps: f64 },
     /// Rate changes at specified time offsets. Vec of (offset_from_start, rps).
     Step { steps: Vec<(Duration, f64)> },
-    /// PID controller targeting a metric.
-    Pid {
+    /// PID controller targeting a single metric.
+    Pid { initial_rps: f64, target: PidTarget },
+    /// PID controller with multiple simultaneous constraints.
+    /// Finds the maximum rate where ALL constraints are satisfied.
+    CompositePid {
         initial_rps: f64,
-        target: PidTarget,
+        constraints: Vec<PidConstraint>,
+        min_rps: f64,
+        max_rps: f64,
     },
 }
 
-/// PID controller target configuration.
+/// PID controller target configuration (single-metric mode).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PidTarget {
     pub metric: TargetMetric,
     /// Target value for the metric (e.g., 200ms for latency)
     pub value: f64,
-    pub kp: f64,
-    pub ki: f64,
-    pub kd: f64,
+    /// PID gains — auto-tuned by default, or manually specified.
+    pub gains: PidGains,
     /// Min/max RPS bounds
     pub min_rps: f64,
     pub max_rps: f64,
+}
+
+/// How PID gains are determined.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PidGains {
+    /// Automatically determine gains from system response (default).
+    Auto {
+        /// Maximum duration for the exploration phase. Default: 3s.
+        autotune_duration: Duration,
+        /// EMA smoothing factor for metric noise reduction (0.0-1.0). Default: 0.3.
+        smoothing: f64,
+    },
+    /// User-specified fixed gains.
+    Manual { kp: f64, ki: f64, kd: f64 },
+}
+
+impl Default for PidGains {
+    fn default() -> Self {
+        PidGains::Auto {
+            autotune_duration: Duration::from_secs(3),
+            smoothing: 0.3,
+        }
+    }
+}
+
+/// A single constraint in composite PID mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PidConstraint {
+    /// Which metric to constrain.
+    pub metric: TargetMetric,
+    /// Upper limit for this metric (e.g., 500.0 for "p99 < 500ms").
+    pub limit: f64,
+    /// Per-constraint gains. Defaults to auto-tuning.
+    pub gains: PidGains,
 }
 
 /// Which metric the PID controller targets.
@@ -128,7 +190,9 @@ pub enum TargetMetric {
     /// Server-reported metric, identified by name.
     /// The coordinator polls an external endpoint and injects the value
     /// into MetricsSummary::external_signals.
-    External { name: String },
+    External {
+        name: String,
+    },
 }
 
 /// Connection pool and timeout settings.
@@ -200,4 +264,21 @@ pub enum CountDistribution {
     Uniform { min: u32, max: u32 },
     /// Normal (Gaussian) distribution, clamped to >= 1.
     Normal { mean: f64, stddev: f64 },
+}
+
+/// TLS configuration for mTLS between leader and agent nodes.
+///
+/// When provided, all leader↔agent communication uses mTLS:
+/// - The server presents `cert`/`key` and verifies the client's cert against `ca_cert`
+/// - The client presents `cert`/`key` and verifies the server's cert against `ca_cert`
+///
+/// All paths are to PEM-encoded files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsConfig {
+    /// Path to the CA certificate PEM file (used to verify the peer).
+    pub ca_cert: String,
+    /// Path to this node's certificate PEM file.
+    pub cert: String,
+    /// Path to this node's private key PEM file.
+    pub key: String,
 }

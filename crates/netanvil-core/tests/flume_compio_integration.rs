@@ -124,7 +124,10 @@ fn flume_bounded_channel_provides_backpressure() {
     }
 
     // Next send should fail (full)
-    assert!(tx.try_send(99).is_err(), "bounded channel should reject when full");
+    assert!(
+        tx.try_send(99).is_err(),
+        "bounded channel should reject when full"
+    );
 
     // Drain one
     let _ = rx.try_recv().unwrap();

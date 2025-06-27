@@ -14,6 +14,12 @@ pub struct HttpExecutor {
     request_timeout: Duration,
 }
 
+impl Default for HttpExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HttpExecutor {
     pub fn new() -> Self {
         Self {
@@ -103,10 +109,7 @@ impl HttpExecutor {
 
         // Send request — this includes connect + TLS + send
         let request_sent = Instant::now();
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| categorize_error(e))?;
+        let response = builder.send().await.map_err(categorize_error)?;
 
         let ttfb = request_sent.elapsed();
         let status = response.status().as_u16();
@@ -126,8 +129,8 @@ impl HttpExecutor {
             status,
             response_size,
             TimingBreakdown {
-                dns_lookup: Duration::ZERO, // cyper doesn't expose this
-                tcp_connect: Duration::ZERO, // cyper doesn't expose this
+                dns_lookup: Duration::ZERO,    // cyper doesn't expose this
+                tcp_connect: Duration::ZERO,   // cyper doesn't expose this
                 tls_handshake: Duration::ZERO, // cyper doesn't expose this
                 time_to_first_byte: ttfb,
                 content_transfer,

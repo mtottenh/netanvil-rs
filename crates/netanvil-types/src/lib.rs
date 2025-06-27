@@ -14,13 +14,15 @@ pub mod traits;
 
 pub use command::{ScheduledRequest, TimerCommand, WorkerCommand};
 pub use config::{
-    ConnectionConfig, ConnectionPolicy, CountDistribution, PidTarget, RateConfig, SchedulerConfig,
-    TargetMetric, TestConfig,
+    ConnectionConfig, ConnectionPolicy, CountDistribution, PidConstraint, PidGains, PidTarget,
+    PluginConfig, PluginType, RateConfig, SchedulerConfig, TargetMetric, TestConfig, TlsConfig,
 };
 pub use distributed::{MetricsFetcher, NodeCommander, NodeDiscovery, RemoteMetrics};
 pub use error::{NetAnvilError, Result};
+pub use metrics::{
+    MetricsSnapshot, MetricsSummary, RateDecision, SaturationAssessment, SaturationInfo,
+};
 pub use node::{NodeId, NodeInfo, NodeState};
-pub use metrics::{MetricsSnapshot, MetricsSummary, RateDecision};
 pub use request::{ExecutionError, ExecutionResult, RequestContext, RequestSpec, TimingBreakdown};
 pub use traits::{
     MetricsCollector, RateController, RequestExecutor, RequestGenerator, RequestScheduler,
@@ -73,15 +75,20 @@ mod tests {
 
     #[test]
     fn test_config_initial_rps() {
-        let mut config = TestConfig::default();
-        config.rate = RateConfig::Static { rps: 500.0 };
+        let config = TestConfig {
+            rate: RateConfig::Static { rps: 500.0 },
+            ..Default::default()
+        };
         assert_eq!(config.initial_rps(), 500.0);
 
-        config.rate = RateConfig::Step {
-            steps: vec![
-                (Duration::from_secs(0), 100.0),
-                (Duration::from_secs(5), 200.0),
-            ],
+        let config = TestConfig {
+            rate: RateConfig::Step {
+                steps: vec![
+                    (Duration::from_secs(0), 100.0),
+                    (Duration::from_secs(5), 200.0),
+                ],
+            },
+            ..Default::default()
         };
         assert_eq!(config.initial_rps(), 100.0);
     }

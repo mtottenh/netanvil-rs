@@ -7,15 +7,18 @@ use netanvil_types::{
     RequestTransformer, SchedulerConfig, TestConfig,
 };
 
-use crate::controller::{PidRateController, StaticRateController, StepRateController};
+use crate::controller::{
+    AutotuningPidController, CompositePidController, PidRateController, StaticRateController,
+    StepRateController,
+};
 use crate::coordinator::Coordinator;
+use crate::generator::SimpleGenerator;
 use crate::handle::IoWorkerHandle;
 use crate::io_worker::io_worker_loop;
 use crate::result::TestResult;
 use crate::scheduler::{ConstantRateScheduler, PoissonScheduler};
 use crate::timer_thread::{self, TimerThreadHandle, FIRE_CHANNEL_CAPACITY};
 use crate::transformer::{ConnectionPolicyTransformer, HeaderTransformer, NoopTransformer};
-use crate::generator::SimpleGenerator;
 
 // ---------------------------------------------------------------------------
 // Convenience entry points (use defaults from TestConfig for everything)
@@ -135,11 +138,11 @@ where
 {
     config: TestConfig,
     executor_factory: F,
-    generator_factory: Option<Box<dyn Fn(usize) -> Box<dyn RequestGenerator> + Send>>,
-    transformer_factory: Option<Box<dyn Fn(usize) -> Box<dyn RequestTransformer> + Send>>,
-    on_progress: Option<Box<dyn FnMut(&crate::coordinator::ProgressUpdate)>>,
+    generator_factory: Option<crate::GeneratorFactory>,
+    transformer_factory: Option<crate::TransformerFactory>,
+    on_progress: Option<crate::ProgressCallback>,
     external_command_rx: Option<flume::Receiver<netanvil_types::WorkerCommand>>,
-    pushed_signal_source: Option<Box<dyn FnMut() -> Vec<(String, f64)>>>,
+    pushed_signal_source: Option<crate::SignalSourceFn>,
 }
 
 impl<E, F> TestBuilder<E, F>
@@ -167,7 +170,10 @@ where
     /// disjoint user ID pools, etc.).
     ///
     /// If not set, uses `SimpleGenerator` from the config's `targets` and `method`.
-    pub fn generator_factory(mut self, factory: impl Fn(usize) -> Box<dyn RequestGenerator> + Send + 'static) -> Self {
+    pub fn generator_factory(
+        mut self,
+        factory: impl Fn(usize) -> Box<dyn RequestGenerator> + Send + 'static,
+    ) -> Self {
         self.generator_factory = Some(Box::new(factory));
         self
     }
@@ -177,13 +183,19 @@ where
     /// If not set, uses `HeaderTransformer` from config's `headers`,
     /// wrapped with `ConnectionPolicyTransformer` if the connection policy
     /// is not `KeepAlive`.
-    pub fn transformer_factory(mut self, factory: impl Fn(usize) -> Box<dyn RequestTransformer> + Send + 'static) -> Self {
+    pub fn transformer_factory(
+        mut self,
+        factory: impl Fn(usize) -> Box<dyn RequestTransformer> + Send + 'static,
+    ) -> Self {
         self.transformer_factory = Some(Box::new(factory));
         self
     }
 
     /// Set a progress callback invoked each coordinator tick (~10-100Hz).
-    pub fn on_progress(mut self, callback: impl FnMut(&crate::coordinator::ProgressUpdate) + 'static) -> Self {
+    pub fn on_progress(
+        mut self,
+        callback: impl FnMut(&crate::coordinator::ProgressUpdate) + 'static,
+    ) -> Self {
         self.on_progress = Some(Box::new(callback));
         self
     }
@@ -223,11 +235,11 @@ where
 fn run_test_impl<E, F>(
     config: TestConfig,
     executor_factory: F,
-    generator_factory: Option<Box<dyn Fn(usize) -> Box<dyn RequestGenerator> + Send>>,
-    transformer_factory: Option<Box<dyn Fn(usize) -> Box<dyn RequestTransformer> + Send>>,
-    on_progress: Option<Box<dyn FnMut(&crate::coordinator::ProgressUpdate)>>,
+    generator_factory: Option<crate::GeneratorFactory>,
+    transformer_factory: Option<crate::TransformerFactory>,
+    on_progress: Option<crate::ProgressCallback>,
     external_command_rx: Option<flume::Receiver<netanvil_types::WorkerCommand>>,
-    pushed_signal_source: Option<Box<dyn FnMut() -> Vec<(String, f64)>>>,
+    pushed_signal_source: Option<crate::SignalSourceFn>,
 ) -> netanvil_types::Result<TestResult>
 where
     E: RequestExecutor + 'static,
@@ -345,10 +357,9 @@ where
 
                             match &config.connections.connection_policy {
                                 ConnectionPolicy::KeepAlive => base,
-                                policy => Box::new(ConnectionPolicyTransformer::new(
-                                    base,
-                                    policy.clone(),
-                                )),
+                                policy => {
+                                    Box::new(ConnectionPolicyTransformer::new(base, policy.clone()))
+                                }
                             }
                         }
                     };
@@ -357,14 +368,16 @@ where
                     let collector = HdrMetricsCollector::new(config.error_status_threshold);
 
                     io_worker_loop(
-                        fire_rx,
+                        crate::io_worker::IoWorkerConfig {
+                            fire_rx,
+                            metrics_tx,
+                            core_id,
+                            metrics_interval: config.metrics_interval,
+                        },
                         generator,
                         Rc::new(transformer),
                         Rc::new(executor),
                         Rc::new(collector),
-                        metrics_tx,
-                        core_id,
-                        config.metrics_interval,
                     )
                     .await;
                 });
@@ -379,6 +392,8 @@ where
     }
 
     // ── Spawn timer thread ──
+    let timer_stats = timer_thread::TimerStats::new();
+    let timer_stats_clone = timer_stats.clone();
     let timer_thread = std::thread::Builder::new()
         .name("netanvil-timer".into())
         .spawn(move || {
@@ -387,30 +402,66 @@ where
                 tracing::warn!("failed to pin timer thread to core 0");
             }
 
-            timer_thread::timer_loop(schedulers, fire_txs, timer_cmd_rx);
+            timer_thread::timer_loop(schedulers, fire_txs, timer_cmd_rx, timer_stats_clone);
         })
         .map_err(|e| netanvil_types::NetAnvilError::Other(format!("spawn timer thread: {e}")))?;
 
     let timer_handle = TimerThreadHandle {
         command_tx: timer_cmd_tx,
         thread: Some(timer_thread),
+        stats: timer_stats,
     };
 
     // ── Create coordinator ──
     let rate_controller: Box<dyn netanvil_types::RateController> = match &config.rate {
         RateConfig::Static { rps } => Box::new(StaticRateController::new(*rps)),
-        RateConfig::Step { steps } => {
-            Box::new(StepRateController::with_start_time(steps.clone(), start_time))
-        }
-        RateConfig::Pid { initial_rps, target } => Box::new(PidRateController::new(
-            target.metric.clone(),
-            target.value,
+        RateConfig::Step { steps } => Box::new(StepRateController::with_start_time(
+            steps.clone(),
+            start_time,
+        )),
+        RateConfig::Pid {
+            initial_rps,
+            target,
+        } => match &target.gains {
+            netanvil_types::PidGains::Manual { kp, ki, kd } => Box::new(PidRateController::new(
+                target.metric.clone(),
+                target.value,
+                *initial_rps,
+                target.min_rps,
+                target.max_rps,
+                crate::PidGainValues {
+                    kp: *kp,
+                    ki: *ki,
+                    kd: *kd,
+                },
+            )),
+            netanvil_types::PidGains::Auto {
+                autotune_duration,
+                smoothing,
+            } => Box::new(AutotuningPidController::new(
+                target.metric.clone(),
+                target.value,
+                *initial_rps,
+                target.min_rps,
+                target.max_rps,
+                crate::AutotuneParams {
+                    autotune_duration: *autotune_duration,
+                    smoothing: *smoothing,
+                    control_interval: config.control_interval,
+                },
+            )),
+        },
+        RateConfig::CompositePid {
+            initial_rps,
+            constraints,
+            min_rps,
+            max_rps,
+        } => Box::new(CompositePidController::new(
+            constraints,
             *initial_rps,
-            target.min_rps,
-            target.max_rps,
-            target.kp,
-            target.ki,
-            target.kd,
+            *min_rps,
+            *max_rps,
+            config.control_interval,
         )),
     };
 

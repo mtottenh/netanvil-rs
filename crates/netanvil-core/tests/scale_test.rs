@@ -67,7 +67,12 @@ struct ScaleResult {
     p99_ms: f64,
 }
 
-fn run_at_rate(addr: SocketAddr, target_rps: f64, duration_secs: u64, num_cores: usize) -> ScaleResult {
+fn run_at_rate(
+    addr: SocketAddr,
+    target_rps: f64,
+    duration_secs: u64,
+    num_cores: usize,
+) -> ScaleResult {
     let config = TestConfig {
         targets: vec![format!("http://{}/", addr)],
         duration: Duration::from_secs(duration_secs),
@@ -83,7 +88,10 @@ fn run_at_rate(addr: SocketAddr, target_rps: f64, duration_secs: u64, num_cores:
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(10))
+    })
+    .unwrap();
 
     let achieved_rps = result.total_requests as f64 / result.duration.as_secs_f64();
     ScaleResult {
@@ -110,8 +118,10 @@ fn scale_characterization() {
     let rates = [500.0, 1000.0, 2000.0, 5000.0, 10000.0];
     let mut results = Vec::new();
 
-    eprintln!("  {:<12} {:>12} {:>8} {:>10} {:>8} {:>8}",
-        "Target RPS", "Achieved RPS", "Ratio", "Requests", "Errors", "p99 ms");
+    eprintln!(
+        "  {:<12} {:>12} {:>8} {:>10} {:>8} {:>8}",
+        "Target RPS", "Achieved RPS", "Ratio", "Requests", "Errors", "p99 ms"
+    );
     eprintln!("  {}", "-".repeat(70));
 
     for &target in &rates {
@@ -163,8 +173,10 @@ fn scale_multi_core() {
     let target_rps = 2000.0;
     let core_counts = [1, 2, 4];
 
-    eprintln!("  {:<8} {:>12} {:>12} {:>8} {:>10} {:>8}",
-        "Cores", "Target RPS", "Achieved RPS", "Ratio", "Requests", "p99 ms");
+    eprintln!(
+        "  {:<8} {:>12} {:>12} {:>8} {:>10} {:>8}",
+        "Cores", "Target RPS", "Achieved RPS", "Ratio", "Requests", "p99 ms"
+    );
     eprintln!("  {}", "-".repeat(68));
 
     let mut results = Vec::new();

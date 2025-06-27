@@ -39,8 +39,14 @@ fn start_target_server() -> SocketAddr {
 
 fn http_get(addr: &str, path: &str) -> (u16, String) {
     let mut stream = TcpStream::connect(addr).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    write!(stream, "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     parse_http_response(&response)
@@ -48,7 +54,9 @@ fn http_get(addr: &str, path: &str) -> (u16, String) {
 
 fn http_put(addr: &str, path: &str, body: &str) -> (u16, String) {
     let mut stream = TcpStream::connect(addr).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     write!(
         stream,
         "PUT {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -62,7 +70,9 @@ fn http_put(addr: &str, path: &str, body: &str) -> (u16, String) {
 
 fn http_post(addr: &str, path: &str) -> (u16, String) {
     let mut stream = TcpStream::connect(addr).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     write!(
         stream,
         "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -253,8 +263,11 @@ fn post_stop_terminates_test_early() {
 fn put_targets_accepted() {
     let target = start_target_server();
     with_api_test(target, 19005, Duration::from_secs(2), 50.0, |api_addr| {
-        let (status, body) =
-            http_put(api_addr, "/targets", r#"{"targets": ["http://new-target/"]}"#);
+        let (status, body) = http_put(
+            api_addr,
+            "/targets",
+            r#"{"targets": ["http://new-target/"]}"#,
+        );
         assert_eq!(status, 200);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["ok"], true);

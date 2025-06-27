@@ -7,6 +7,23 @@ members = [
     "crates/netanvil-http",
     "crates/netanvil-api",
     "crates/netanvil-distributed",
+    "crates/netanvil-plugin",
+    "crates/netanvil-plugin-luajit",
+    "crates/netanvil-plugin-lua54",
+    "crates/netanvil-cli",
+]
+
+# Only build luajit by default (lua54 conflicts at link time).
+# Build lua54 explicitly: cargo build -p netanvil-plugin-lua54
+default-members = [
+    "crates/netanvil-types",
+    "crates/netanvil-metrics",
+    "crates/netanvil-core",
+    "crates/netanvil-http",
+    "crates/netanvil-api",
+    "crates/netanvil-distributed",
+    "crates/netanvil-plugin",
+    "crates/netanvil-plugin-luajit",
     "crates/netanvil-cli",
 ]
 
@@ -70,6 +87,9 @@ netanvil-core = { path = "crates/netanvil-core" }
 netanvil-http = { path = "crates/netanvil-http" }
 netanvil-api = { path = "crates/netanvil-api" }
 netanvil-distributed = { path = "crates/netanvil-distributed" }
+netanvil-plugin = { path = "crates/netanvil-plugin" }
+netanvil-plugin-luajit = { path = "crates/netanvil-plugin-luajit" }
+netanvil-plugin-lua54 = { path = "crates/netanvil-plugin-lua54" }
 netanvil-cli = { path = "crates/netanvil-cli" }
 
 [profile.release]

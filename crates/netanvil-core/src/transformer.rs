@@ -91,7 +91,8 @@ fn sample_count(dist: &CountDistribution, rng: &mut SmallRng) -> u32 {
         CountDistribution::Fixed(n) => *n,
         CountDistribution::Uniform { min, max } => rng.gen_range(*min..=*max),
         CountDistribution::Normal { mean, stddev } => {
-            let normal = Normal::new(*mean, *stddev).unwrap_or_else(|_| Normal::new(1.0, 0.0).unwrap());
+            let normal =
+                Normal::new(*mean, *stddev).unwrap_or_else(|_| Normal::new(1.0, 0.0).unwrap());
             let sample: f64 = normal.sample(rng);
             // Clamp to >= 1
             sample.round().max(1.0) as u32
@@ -135,8 +136,7 @@ impl RequestTransformer for ConnectionPolicyTransformer {
         };
 
         if close {
-            spec.headers
-                .push(("Connection".into(), "close".into()));
+            spec.headers.push(("Connection".into(), "close".into()));
         }
 
         spec

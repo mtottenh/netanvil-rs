@@ -76,14 +76,15 @@ fn always_new_policy_creates_many_connections() {
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(10))
+    })
+    .unwrap();
 
     let unique_ports = ports.lock().unwrap().len();
     let total_requests = result.total_requests;
 
-    eprintln!(
-        "AlwaysNew: {total_requests} requests, {unique_ports} unique source ports"
-    );
+    eprintln!("AlwaysNew: {total_requests} requests, {unique_ports} unique source ports");
 
     // With AlwaysNew, nearly every request should use a different source port.
     // Allow some reuse due to TIME_WAIT recycling.
@@ -112,14 +113,15 @@ fn keepalive_policy_reuses_connections() {
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(10))
+    })
+    .unwrap();
 
     let unique_ports = ports.lock().unwrap().len();
     let total_requests = result.total_requests;
 
-    eprintln!(
-        "KeepAlive: {total_requests} requests, {unique_ports} unique source ports"
-    );
+    eprintln!("KeepAlive: {total_requests} requests, {unique_ports} unique source ports");
 
     // With KeepAlive, connections should be reused — far fewer unique ports than requests.
     assert!(
@@ -150,14 +152,15 @@ fn mixed_policy_produces_both_new_and_reused_connections() {
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(10))
+    })
+    .unwrap();
 
     let unique_ports = ports.lock().unwrap().len();
     let total_requests = result.total_requests;
 
-    eprintln!(
-        "Mixed(0.5): {total_requests} requests, {unique_ports} unique source ports"
-    );
+    eprintln!("Mixed(0.5): {total_requests} requests, {unique_ports} unique source ports");
 
     // With 50/50 mixed, we should see more ports than pure KeepAlive
     // but fewer than AlwaysNew. Just verify we got requests.

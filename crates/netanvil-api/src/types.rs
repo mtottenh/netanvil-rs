@@ -18,6 +18,12 @@ struct SharedStateInner {
     pub pushed_signals: Vec<(String, f64)>,
 }
 
+impl Default for SharedState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SharedState {
     pub fn new() -> Self {
         Self {
@@ -53,6 +59,7 @@ impl SharedState {
             elapsed_secs: update.elapsed.as_secs_f64(),
             remaining_secs: update.remaining.as_secs_f64(),
             latency_buckets: update.latency_buckets.clone(),
+            saturation: update.saturation.clone(),
         });
     }
 
@@ -126,6 +133,9 @@ pub struct MetricsView {
     /// Standard Prometheus bucket boundaries.
     #[serde(default)]
     pub latency_buckets: Vec<(f64, u64)>,
+    /// Client/server saturation assessment.
+    #[serde(default)]
+    pub saturation: netanvil_types::SaturationInfo,
 }
 
 #[derive(Debug, Serialize)]

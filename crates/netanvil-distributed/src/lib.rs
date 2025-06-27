@@ -9,5 +9,8 @@ pub mod http_cluster;
 pub mod signal;
 
 pub use coordinator::{DistributedCoordinator, DistributedProgressUpdate, DistributedTestResult};
-pub use http_cluster::{HttpMetricsFetcher, HttpNodeCommander, StaticDiscovery};
+pub use http_cluster::{
+    HttpMetricsFetcher, HttpNodeCommander, MtlsMetricsFetcher, MtlsNodeCommander,
+    MtlsStaticDiscovery, StaticDiscovery,
+};
 pub use signal::HttpSignalPoller;

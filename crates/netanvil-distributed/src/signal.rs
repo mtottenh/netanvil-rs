@@ -48,9 +48,7 @@ impl HttpSignalPoller {
     fn http_get(&self) -> Option<String> {
         // Parse host:port from URL
         let url = &self.url;
-        let without_scheme = url
-            .strip_prefix("http://")
-            .unwrap_or(url);
+        let without_scheme = url.strip_prefix("http://").unwrap_or(url);
         let (host_port, path) = without_scheme
             .split_once('/')
             .map(|(h, p)| (h, format!("/{p}")))
@@ -60,9 +58,8 @@ impl HttpSignalPoller {
         stream.set_read_timeout(Some(self.timeout)).ok()?;
         stream.set_write_timeout(Some(self.timeout)).ok()?;
 
-        let request = format!(
-            "GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n"
-        );
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n");
         stream.write_all(request.as_bytes()).ok()?;
 
         // Read response

@@ -103,8 +103,7 @@ fn distributed_test_with_two_agents() {
     let fetcher = HttpMetricsFetcher::new(Duration::from_secs(5));
     let commander = HttpNodeCommander::new(Duration::from_secs(10));
 
-    let rate_controller =
-        Box::new(netanvil_core::StaticRateController::new(200.0));
+    let rate_controller = Box::new(netanvil_core::StaticRateController::new(200.0));
 
     let mut coordinator =
         DistributedCoordinator::new(discovery, fetcher, commander, config, rate_controller);
@@ -118,7 +117,10 @@ fn distributed_test_with_two_agents() {
 
     eprintln!("Distributed test: {total} requests in {duration_secs:.1}s");
     for (id, m) in &result.nodes {
-        eprintln!("  {id}: {} requests, {:.1} RPS", m.total_requests, m.current_rps);
+        eprintln!(
+            "  {id}: {} requests, {:.1} RPS",
+            m.total_requests, m.current_rps
+        );
     }
 
     // Should have generated a reasonable number of requests
@@ -165,8 +167,7 @@ fn distributed_stop_terminates_all_agents() {
     let discovery = StaticDiscovery::new(vec![format!("127.0.0.1:{port}")]);
     let fetcher = HttpMetricsFetcher::new(Duration::from_secs(5));
     let commander = HttpNodeCommander::new(Duration::from_secs(10));
-    let rate_controller =
-        Box::new(netanvil_core::StaticRateController::new(100.0));
+    let rate_controller = Box::new(netanvil_core::StaticRateController::new(100.0));
 
     let mut coordinator =
         DistributedCoordinator::new(discovery, fetcher, commander, config, rate_controller);

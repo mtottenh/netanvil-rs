@@ -11,9 +11,7 @@ use std::time::Duration;
 
 use netanvil_core::run_test;
 use netanvil_http::HttpExecutor;
-use netanvil_types::{
-    ConnectionConfig, PidTarget, RateConfig, TargetMetric, TestConfig,
-};
+use netanvil_types::{ConnectionConfig, PidTarget, RateConfig, TargetMetric, TestConfig};
 
 /// Test server that:
 /// - Serves GET / (target endpoint for load generation)
@@ -108,9 +106,11 @@ fn pid_controller_adapts_rate_based_on_external_server_load() {
                     name: "load".into(),
                 },
                 value: 70.0,
-                kp: 0.3,
-                ki: 0.01,
-                kd: 0.1,
+                gains: netanvil_types::PidGains::Manual {
+                    kp: 0.3,
+                    ki: 0.01,
+                    kd: 0.1,
+                },
                 min_rps: 50.0,
                 max_rps: 5000.0,
             },
@@ -127,7 +127,10 @@ fn pid_controller_adapts_rate_based_on_external_server_load() {
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(5))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(5))
+    })
+    .unwrap();
 
     eprintln!(
         "External signal test result: {} requests, {:.1} req/s, p99={:?}, errors={}",
@@ -166,9 +169,11 @@ fn pid_without_external_signal_generates_requests() {
             target: PidTarget {
                 metric: TargetMetric::LatencyP99,
                 value: 100.0,
-                kp: 0.1,
-                ki: 0.01,
-                kd: 0.05,
+                gains: netanvil_types::PidGains::Manual {
+                    kp: 0.1,
+                    ki: 0.01,
+                    kd: 0.05,
+                },
                 min_rps: 10.0,
                 max_rps: 5000.0,
             },
@@ -183,7 +188,10 @@ fn pid_without_external_signal_generates_requests() {
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(5))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(5))
+    })
+    .unwrap();
     assert!(
         result.total_requests > 100,
         "PID mode should generate requests, got {}",
@@ -211,7 +219,10 @@ fn high_rps_does_not_stall_worker() {
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(5))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(5))
+    })
+    .unwrap();
 
     // At 2000 RPS for 3 seconds, we expect ~6000 requests.
     // Allow wide tolerance since this is a real HTTP server.
@@ -249,7 +260,10 @@ fn external_signal_not_configured_does_not_affect_static_rate() {
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(5))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(5))
+    })
+    .unwrap();
 
     let expected = 200u64;
     let lower = (expected as f64 * 0.70) as u64;

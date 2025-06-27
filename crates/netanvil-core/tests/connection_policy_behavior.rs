@@ -38,10 +38,8 @@ fn has_connection_close(spec: &RequestSpec) -> bool {
 
 #[test]
 fn keepalive_policy_never_adds_connection_close() {
-    let transformer = ConnectionPolicyTransformer::new(
-        Box::new(NoopTransformer),
-        ConnectionPolicy::KeepAlive,
-    );
+    let transformer =
+        ConnectionPolicyTransformer::new(Box::new(NoopTransformer), ConnectionPolicy::KeepAlive);
 
     let ctx = make_context();
     for _ in 0..100 {
@@ -55,10 +53,8 @@ fn keepalive_policy_never_adds_connection_close() {
 
 #[test]
 fn always_new_policy_always_adds_connection_close() {
-    let transformer = ConnectionPolicyTransformer::new(
-        Box::new(NoopTransformer),
-        ConnectionPolicy::AlwaysNew,
-    );
+    let transformer =
+        ConnectionPolicyTransformer::new(Box::new(NoopTransformer), ConnectionPolicy::AlwaysNew);
 
     let ctx = make_context();
     for _ in 0..100 {
@@ -199,10 +195,7 @@ fn uniform_lifetime_varies_connection_lengths() {
     );
 
     // Check that intervals between closes vary (not all the same)
-    let intervals: Vec<usize> = close_indices
-        .windows(2)
-        .map(|w| w[1] - w[0])
-        .collect();
+    let intervals: Vec<usize> = close_indices.windows(2).map(|w| w[1] - w[0]).collect();
     let all_same = intervals.windows(2).all(|w| w[0] == w[1]);
     assert!(
         !all_same,
@@ -267,9 +260,10 @@ fn normal_lifetime_clusters_around_mean() {
 fn connection_policy_preserves_inner_transformer_headers() {
     use netanvil_core::HeaderTransformer;
 
-    let inner = Box::new(HeaderTransformer::new(vec![
-        ("X-Custom".into(), "value".into()),
-    ]));
+    let inner = Box::new(HeaderTransformer::new(vec![(
+        "X-Custom".into(),
+        "value".into(),
+    )]));
 
     let transformer = ConnectionPolicyTransformer::new(inner, ConnectionPolicy::AlwaysNew);
 
@@ -288,9 +282,10 @@ fn connection_policy_preserves_inner_transformer_headers() {
 fn connection_policy_forwards_update_headers_to_inner() {
     use netanvil_core::HeaderTransformer;
 
-    let inner = Box::new(HeaderTransformer::new(vec![
-        ("X-Original".into(), "yes".into()),
-    ]));
+    let inner = Box::new(HeaderTransformer::new(vec![(
+        "X-Original".into(),
+        "yes".into(),
+    )]));
 
     let transformer = ConnectionPolicyTransformer::new(inner, ConnectionPolicy::AlwaysNew);
 

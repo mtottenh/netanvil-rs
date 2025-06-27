@@ -70,21 +70,16 @@ impl HttpSignalPoller {
 }
 
 /// Create a signal source closure from TestConfig fields.
-pub fn make_signal_source(
-    url: Option<&str>,
-    field: Option<&str>,
-) -> Option<Box<dyn FnMut() -> Vec<(String, f64)>>> {
+pub fn make_signal_source(url: Option<&str>, field: Option<&str>) -> Option<crate::SignalSourceFn> {
     let url = url?;
     let field = field?;
     let poller = HttpSignalPoller::new(url, field)?;
 
-    Some(Box::new(move || {
-        match poller.poll() {
-            Some(signal) => vec![signal],
-            None => {
-                tracing::warn!("failed to poll external signal from {}", poller.url);
-                Vec::new()
-            }
+    Some(Box::new(move || match poller.poll() {
+        Some(signal) => vec![signal],
+        None => {
+            tracing::warn!("failed to poll external signal from {}", poller.url);
+            Vec::new()
         }
     }))
 }

@@ -10,8 +10,10 @@
 pub mod agent;
 pub mod handlers;
 pub mod server;
+pub mod tls;
 pub mod types;
 
 pub use agent::AgentServer;
 pub use server::ControlServer;
+pub use tls::{build_client_config, mtls_request, MtlsServer};
 pub use types::{MetricsView, SharedState};

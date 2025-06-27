@@ -1,0 +1,30 @@
+[package]
+name = "netanvil-plugin"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Plugin system core: WASM runtime, Rhai scripting, hybrid config, shared types"
+
+[dependencies]
+netanvil-types = { workspace = true }
+http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# WASM runtime
+wasmtime = "29"
+wasmtime-wasi = "29"
+
+# Rhai scripting
+rhai = "1.21"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+netanvil-plugin-luajit = { workspace = true }
+
+[[bench]]
+name = "plugin_overhead"
+harness = false

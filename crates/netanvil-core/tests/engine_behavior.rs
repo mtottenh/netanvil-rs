@@ -64,7 +64,9 @@ impl RequestExecutor for ErrorExecutor {
             },
             status: Some(500),
             response_size: 0,
-            error: Some(netanvil_types::ExecutionError::Http("500 Internal Server Error".into())),
+            error: Some(netanvil_types::ExecutionError::Http(
+                "500 Internal Server Error".into(),
+            )),
         }
     }
 }
@@ -98,7 +100,11 @@ fn engine_runs_constant_rate_test_with_correct_request_count() {
         result.total_requests
     );
     assert_eq!(result.total_errors, 0);
-    assert!(result.request_rate > 100.0, "rate too low: {}", result.request_rate);
+    assert!(
+        result.request_rate > 100.0,
+        "rate too low: {}",
+        result.request_rate
+    );
 }
 
 #[test]
@@ -114,7 +120,10 @@ fn engine_records_latency_percentiles() {
         ..Default::default()
     };
 
-    let result = run_test(config, || MockExecutor::with_latency(Duration::from_millis(5))).unwrap();
+    let result = run_test(config, || {
+        MockExecutor::with_latency(Duration::from_millis(5))
+    })
+    .unwrap();
 
     assert!(result.total_requests > 100);
     // Mock latency is 5ms — p50 should be in that ballpark
@@ -143,7 +152,11 @@ fn engine_tracks_errors() {
 
     assert!(result.total_requests > 50);
     assert_eq!(result.total_requests, result.total_errors);
-    assert!((result.error_rate - 1.0).abs() < 0.01, "error rate should be ~1.0, got {}", result.error_rate);
+    assert!(
+        (result.error_rate - 1.0).abs() < 0.01,
+        "error rate should be ~1.0, got {}",
+        result.error_rate
+    );
 }
 
 #[test]

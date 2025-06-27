@@ -4,10 +4,10 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use netanvil_api::{AgentServer, ControlServer, SharedState};
-use netanvil_core::{run_test_with_progress, report::ProgressLine};
+use netanvil_core::{report::ProgressLine, TestBuilder};
 use netanvil_distributed::{
     DistributedCoordinator, HttpMetricsFetcher, HttpNodeCommander, HttpSignalPoller,
-    StaticDiscovery,
+    MtlsMetricsFetcher, MtlsNodeCommander, MtlsStaticDiscovery, StaticDiscovery,
 };
 use netanvil_http::HttpExecutor;
 use netanvil_types::{
@@ -31,8 +31,19 @@ enum Commands {
     /// Run a load test
     Test {
         /// Target URL(s). Specify multiple times for round-robin.
-        #[arg(long, required = true, num_args = 1..)]
+        #[arg(long, required_unless_present = "plugin", num_args = 1..)]
         url: Vec<String>,
+
+        /// Path to a plugin script (.lua) or WASM module (.wasm).
+        /// The plugin implements request generation logic.
+        #[arg(long)]
+        plugin: Option<String>,
+
+        /// Plugin type: "hybrid" (Lua config → native hot path),
+        /// "lua" (LuaJIT per-request), or "wasm" (WASM per-request).
+        /// Auto-detected from file extension if omitted.
+        #[arg(long, default_value = "auto")]
+        plugin_type: String,
 
         /// HTTP method
         #[arg(long, default_value = "GET")]
@@ -62,17 +73,17 @@ enum Commands {
         #[arg(long, default_value = "200.0")]
         pid_target: f64,
 
-        /// PID proportional gain
-        #[arg(long, default_value = "0.1")]
-        pid_kp: f64,
+        /// PID proportional gain (omit for autotuning)
+        #[arg(long)]
+        pid_kp: Option<f64>,
 
-        /// PID integral gain
-        #[arg(long, default_value = "0.01")]
-        pid_ki: f64,
+        /// PID integral gain (omit for autotuning)
+        #[arg(long)]
+        pid_ki: Option<f64>,
 
-        /// PID derivative gain
-        #[arg(long, default_value = "0.05")]
-        pid_kd: f64,
+        /// PID derivative gain (omit for autotuning)
+        #[arg(long)]
+        pid_kd: Option<f64>,
 
         /// PID minimum RPS
         #[arg(long, default_value = "10")]
@@ -81,6 +92,18 @@ enum Commands {
         /// PID maximum RPS
         #[arg(long, default_value = "10000")]
         pid_max_rps: f64,
+
+        /// PID constraint for composite mode. Repeatable.
+        /// Format: "metric < value" (e.g. "latency-p99 < 500", "error-rate < 2",
+        /// "external:load < 80"). When specified, finds the max RPS where ALL
+        /// constraints are satisfied.
+        #[arg(long = "pid-constraint", num_args = 1)]
+        pid_constraints: Vec<String>,
+
+        /// Autotuning exploration duration (e.g. "3s", "5s").
+        /// Only used when PID gains are not manually specified.
+        #[arg(long, default_value = "3s")]
+        pid_autotune_duration: String,
 
         /// Scheduling discipline: "constant" or "poisson"
         #[arg(long, default_value = "constant")]
@@ -135,6 +158,18 @@ enum Commands {
         /// Number of worker cores (0 = auto-detect)
         #[arg(long, default_value = "0")]
         cores: usize,
+
+        /// Path to CA certificate PEM (enables mTLS)
+        #[arg(long)]
+        tls_ca: Option<String>,
+
+        /// Path to this agent's certificate PEM
+        #[arg(long)]
+        tls_cert: Option<String>,
+
+        /// Path to this agent's private key PEM
+        #[arg(long)]
+        tls_key: Option<String>,
     },
 
     /// Run as distributed test leader, coordinating agent nodes
@@ -146,6 +181,15 @@ enum Commands {
         /// Target URL(s)
         #[arg(long, required = true, num_args = 1..)]
         url: Vec<String>,
+
+        /// Path to a plugin script (.lua) or WASM module (.wasm).
+        /// The plugin is read locally and sent to all agents.
+        #[arg(long)]
+        plugin: Option<String>,
+
+        /// Plugin type: "hybrid", "lua", or "wasm". Auto-detected from extension if omitted.
+        #[arg(long, default_value = "auto")]
+        plugin_type: String,
 
         /// HTTP method
         #[arg(long, default_value = "GET")]
@@ -175,17 +219,17 @@ enum Commands {
         #[arg(long, default_value = "200.0")]
         pid_target: f64,
 
-        /// PID proportional gain
-        #[arg(long, default_value = "0.1")]
-        pid_kp: f64,
+        /// PID proportional gain (omit for autotuning)
+        #[arg(long)]
+        pid_kp: Option<f64>,
 
-        /// PID integral gain
-        #[arg(long, default_value = "0.01")]
-        pid_ki: f64,
+        /// PID integral gain (omit for autotuning)
+        #[arg(long)]
+        pid_ki: Option<f64>,
 
-        /// PID derivative gain
-        #[arg(long, default_value = "0.05")]
-        pid_kd: f64,
+        /// PID derivative gain (omit for autotuning)
+        #[arg(long)]
+        pid_kd: Option<f64>,
 
         /// PID minimum RPS
         #[arg(long, default_value = "10")]
@@ -194,6 +238,14 @@ enum Commands {
         /// PID maximum RPS
         #[arg(long, default_value = "10000")]
         pid_max_rps: f64,
+
+        /// PID constraint for composite mode. Repeatable.
+        #[arg(long = "pid-constraint", num_args = 1)]
+        pid_constraints: Vec<String>,
+
+        /// Autotuning exploration duration
+        #[arg(long, default_value = "3s")]
+        pid_autotune_duration: String,
 
         /// Number of worker cores per agent (0 = auto-detect)
         #[arg(long, default_value = "0")]
@@ -218,6 +270,18 @@ enum Commands {
         /// JSON field to extract from external metrics
         #[arg(long)]
         external_metrics_field: Option<String>,
+
+        /// Path to CA certificate PEM (enables mTLS for agent communication)
+        #[arg(long)]
+        tls_ca: Option<String>,
+
+        /// Path to leader's certificate PEM
+        #[arg(long)]
+        tls_cert: Option<String>,
+
+        /// Path to leader's private key PEM
+        #[arg(long)]
+        tls_key: Option<String>,
     },
 }
 
@@ -255,15 +319,43 @@ fn parse_scheduler(s: &str) -> Result<SchedulerConfig> {
 }
 
 fn parse_target_metric(s: &str) -> Result<TargetMetric> {
+    // Check for "external:name" prefix first
+    if let Some(name) = s.strip_prefix("external:") {
+        return Ok(TargetMetric::External {
+            name: name.to_string(),
+        });
+    }
     match s.to_lowercase().as_str() {
         "latency-p50" | "p50" => Ok(TargetMetric::LatencyP50),
         "latency-p90" | "p90" => Ok(TargetMetric::LatencyP90),
         "latency-p99" | "p99" => Ok(TargetMetric::LatencyP99),
         "error-rate" | "errors" => Ok(TargetMetric::ErrorRate),
         other => anyhow::bail!(
-            "unknown PID metric: {other} (use 'latency-p50', 'latency-p90', 'latency-p99', or 'error-rate')"
+            "unknown PID metric: {other} (use 'latency-p50', 'latency-p90', 'latency-p99', \
+             'error-rate', or 'external:<name>')"
         ),
     }
+}
+
+/// Parse a PID constraint string: "metric < value" or "metric > value".
+/// Only '<' (upper limit) is supported for now.
+fn parse_pid_constraint(s: &str) -> Result<netanvil_types::PidConstraint> {
+    let parts: Vec<&str> = s.split('<').collect();
+    if parts.len() != 2 {
+        anyhow::bail!(
+            "constraint must be in 'metric < value' format (e.g. 'latency-p99 < 500'), got: {s}"
+        );
+    }
+    let metric = parse_target_metric(parts[0].trim())?;
+    let limit: f64 = parts[1]
+        .trim()
+        .parse()
+        .context("invalid numeric limit in constraint")?;
+    Ok(netanvil_types::PidConstraint {
+        metric,
+        limit,
+        gains: netanvil_types::PidGains::default(),
+    })
 }
 
 /// Parse step definitions: "0s:100,5s:500,10s:200"
@@ -296,9 +388,7 @@ fn parse_connection_policy(
             if !(0.0..=1.0).contains(&persistent_ratio) {
                 anyhow::bail!("--persistent-ratio must be between 0.0 and 1.0");
             }
-            let lifetime = conn_lifetime
-                .map(parse_count_distribution)
-                .transpose()?;
+            let lifetime = conn_lifetime.map(parse_count_distribution).transpose()?;
             Ok(ConnectionPolicy::Mixed {
                 persistent_ratio,
                 connection_lifetime: lifetime,
@@ -317,7 +407,10 @@ fn parse_count_distribution(s: &str) -> Result<CountDistribution> {
         .context("distribution format: 'fixed:N', 'uniform:min,max', or 'normal:mean,stddev'")?;
     match kind.to_lowercase().as_str() {
         "fixed" => {
-            let n: u32 = params.trim().parse().context("fixed:N requires an integer")?;
+            let n: u32 = params
+                .trim()
+                .parse()
+                .context("fixed:N requires an integer")?;
             Ok(CountDistribution::Fixed(n))
         }
         "uniform" => {
@@ -339,23 +432,122 @@ fn parse_count_distribution(s: &str) -> Result<CountDistribution> {
             let stddev: f64 = stddev_s.trim().parse().context("invalid stddev")?;
             Ok(CountDistribution::Normal { mean, stddev })
         }
-        other => anyhow::bail!(
-            "unknown distribution: {other} (use 'fixed', 'uniform', or 'normal')"
-        ),
+        other => {
+            anyhow::bail!("unknown distribution: {other} (use 'fixed', 'uniform', or 'normal')")
+        }
     }
+}
+
+/// Detect plugin type from file extension or explicit --plugin-type flag.
+fn detect_plugin_type(path: &str, explicit: &str) -> Result<PluginType> {
+    if explicit != "auto" {
+        return match explicit.to_lowercase().as_str() {
+            "hybrid" => Ok(PluginType::Hybrid),
+            "lua" | "luajit" => Ok(PluginType::Lua),
+            "wasm" => Ok(PluginType::Wasm),
+            other => {
+                anyhow::bail!("unknown --plugin-type: {other} (use 'hybrid', 'lua', or 'wasm')")
+            }
+        };
+    }
+    // Auto-detect from extension
+    if path.ends_with(".wasm") {
+        Ok(PluginType::Wasm)
+    } else if path.ends_with(".lua") {
+        Ok(PluginType::Lua)
+    } else {
+        anyhow::bail!("cannot auto-detect plugin type for '{path}'. Use --plugin-type to specify.")
+    }
+}
+
+use netanvil_types::PluginType;
+
+/// Build a generator factory from a plugin file.
+///
+/// Returns a closure suitable for `TestBuilder::generator_factory()`.
+/// Each call creates a new generator instance for one core.
+fn build_plugin_factory(
+    plugin_path: &str,
+    plugin_type: PluginType,
+    targets: &[String],
+) -> Result<netanvil_core::GeneratorFactory> {
+    match plugin_type {
+        PluginType::Hybrid => {
+            let script = std::fs::read_to_string(plugin_path)
+                .context(format!("failed to read plugin: {plugin_path}"))?;
+            let config = netanvil_plugin_luajit::config_from_lua(&script)
+                .map_err(|e| anyhow::anyhow!("hybrid config error: {e}"))?;
+            Ok(Box::new(move |_core_id| {
+                Box::new(netanvil_plugin::HybridGenerator::new(config.clone()))
+                    as Box<dyn netanvil_types::RequestGenerator>
+            }))
+        }
+        PluginType::Lua => {
+            let script = std::fs::read_to_string(plugin_path)
+                .context(format!("failed to read plugin: {plugin_path}"))?;
+            let targets = targets.to_vec();
+            Ok(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin_luajit::LuaJitGenerator::new(&script, &targets)
+                        .expect("LuaJIT generator init failed"),
+                ) as Box<dyn netanvil_types::RequestGenerator>
+            }))
+        }
+        PluginType::Wasm => {
+            let wasm_bytes = std::fs::read(plugin_path)
+                .context(format!("failed to read WASM module: {plugin_path}"))?;
+            let (engine, module) = netanvil_plugin::compile_wasm_module(&wasm_bytes)
+                .map_err(|e| anyhow::anyhow!("WASM compile error: {e}"))?;
+            let targets = targets.to_vec();
+            Ok(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin::WasmGenerator::new(&engine, &module, &targets)
+                        .expect("WASM generator init failed"),
+                ) as Box<dyn netanvil_types::RequestGenerator>
+            }))
+        }
+    }
+}
+
+fn build_pid_gains(
+    pid_kp: Option<f64>,
+    pid_ki: Option<f64>,
+    pid_kd: Option<f64>,
+    autotune_duration: Duration,
+) -> netanvil_types::PidGains {
+    match (pid_kp, pid_ki, pid_kd) {
+        (Some(kp), Some(ki), Some(kd)) => netanvil_types::PidGains::Manual { kp, ki, kd },
+        (None, None, None) => netanvil_types::PidGains::Auto {
+            autotune_duration,
+            smoothing: 0.3,
+        },
+        // Partial specification: fill missing with defaults
+        (kp, ki, kd) => netanvil_types::PidGains::Manual {
+            kp: kp.unwrap_or(0.1),
+            ki: ki.unwrap_or(0.01),
+            kd: kd.unwrap_or(0.05),
+        },
+    }
+}
+
+/// PID-specific arguments for building a rate config.
+struct PidArgs<'a> {
+    metric: &'a str,
+    target: f64,
+    kp: Option<f64>,
+    ki: Option<f64>,
+    kd: Option<f64>,
+    min_rps: f64,
+    max_rps: f64,
+    constraints: &'a [String],
+    autotune_duration: Duration,
 }
 
 fn build_rate_config(
     rate_mode: &str,
     rps: f64,
     steps: Option<&str>,
-    pid_metric: &str,
-    pid_target: f64,
-    pid_kp: f64,
-    pid_ki: f64,
-    pid_kd: f64,
-    pid_min_rps: f64,
-    pid_max_rps: f64,
+    pid: &PidArgs<'_>,
 ) -> Result<RateConfig> {
     match rate_mode.to_lowercase().as_str() {
         "static" | "const" => Ok(RateConfig::Static { rps }),
@@ -365,19 +557,43 @@ fn build_rate_config(
             Ok(RateConfig::Step { steps })
         }
         "pid" => {
-            let metric = parse_target_metric(pid_metric)?;
-            Ok(RateConfig::Pid {
-                initial_rps: rps,
-                target: PidTarget {
-                    metric,
-                    value: pid_target,
-                    kp: pid_kp,
-                    ki: pid_ki,
-                    kd: pid_kd,
-                    min_rps: pid_min_rps,
-                    max_rps: pid_max_rps,
-                },
-            })
+            if !pid.constraints.is_empty() {
+                // Composite mode: multiple constraints
+                let mut constraints: Vec<netanvil_types::PidConstraint> = pid
+                    .constraints
+                    .iter()
+                    .map(|s| parse_pid_constraint(s))
+                    .collect::<Result<_>>()?;
+
+                // Apply manual gains to all constraints if specified
+                let gains = build_pid_gains(pid.kp, pid.ki, pid.kd, pid.autotune_duration);
+                if matches!(gains, netanvil_types::PidGains::Manual { .. }) {
+                    for c in &mut constraints {
+                        c.gains = gains.clone();
+                    }
+                }
+
+                Ok(RateConfig::CompositePid {
+                    initial_rps: rps,
+                    constraints,
+                    min_rps: pid.min_rps,
+                    max_rps: pid.max_rps,
+                })
+            } else {
+                // Single-metric mode
+                let metric = parse_target_metric(pid.metric)?;
+                let gains = build_pid_gains(pid.kp, pid.ki, pid.kd, pid.autotune_duration);
+                Ok(RateConfig::Pid {
+                    initial_rps: rps,
+                    target: PidTarget {
+                        metric,
+                        value: pid.target,
+                        gains,
+                        min_rps: pid.min_rps,
+                        max_rps: pid.max_rps,
+                    },
+                })
+            }
         }
         other => anyhow::bail!("unknown rate mode: {other} (use 'static', 'step', or 'pid')"),
     }
@@ -396,6 +612,8 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Test {
             url,
+            plugin,
+            plugin_type,
             method,
             rps,
             duration,
@@ -413,6 +631,8 @@ fn main() -> Result<()> {
             timeout,
             headers,
             error_threshold,
+            pid_constraints,
+            pid_autotune_duration,
             connection_policy,
             persistent_ratio,
             conn_lifetime,
@@ -421,6 +641,8 @@ fn main() -> Result<()> {
         } => {
             let duration = parse_duration(&duration).context("invalid --duration")?;
             let timeout = parse_duration(&timeout).context("invalid --timeout")?;
+            let autotune_dur = parse_duration(&pid_autotune_duration)
+                .context("invalid --pid-autotune-duration")?;
             let scheduler = parse_scheduler(&scheduler).context("invalid --scheduler")?;
             let headers: Vec<(String, String)> = headers
                 .iter()
@@ -430,13 +652,17 @@ fn main() -> Result<()> {
                 &rate_mode,
                 rps,
                 steps.as_deref(),
-                &pid_metric,
-                pid_target,
-                pid_kp,
-                pid_ki,
-                pid_kd,
-                pid_min_rps,
-                pid_max_rps,
+                &PidArgs {
+                    metric: &pid_metric,
+                    target: pid_target,
+                    kp: pid_kp,
+                    ki: pid_ki,
+                    kd: pid_kd,
+                    min_rps: pid_min_rps,
+                    max_rps: pid_max_rps,
+                    constraints: &pid_constraints,
+                    autotune_duration: autotune_dur,
+                },
             )?;
 
             let conn_policy = parse_connection_policy(
@@ -467,9 +693,24 @@ fn main() -> Result<()> {
             let rate_desc = match &config.rate {
                 RateConfig::Static { rps } => format!("{rps} RPS (static)"),
                 RateConfig::Step { steps } => format!("{} steps", steps.len()),
-                RateConfig::Pid { initial_rps, .. } => {
-                    format!("{initial_rps} RPS initial (PID)")
+                RateConfig::Pid {
+                    initial_rps,
+                    target,
+                } => {
+                    let mode = match &target.gains {
+                        netanvil_types::PidGains::Auto { .. } => "PID/autotune",
+                        netanvil_types::PidGains::Manual { .. } => "PID",
+                    };
+                    format!("{initial_rps} RPS initial ({mode})")
                 }
+                RateConfig::CompositePid {
+                    initial_rps,
+                    constraints,
+                    ..
+                } => format!(
+                    "{initial_rps} RPS initial (composite PID, {} constraints)",
+                    constraints.len()
+                ),
             };
 
             eprintln!(
@@ -482,6 +723,20 @@ fn main() -> Result<()> {
                     cores.to_string()
                 },
             );
+
+            // Build plugin generator factory if --plugin is specified
+            let plugin_factory = if let Some(ref plugin_path) = plugin {
+                let ptype = detect_plugin_type(plugin_path, &plugin_type)?;
+                let factory = build_plugin_factory(plugin_path, ptype, &config.targets)?;
+                tracing::info!(
+                    plugin = %plugin_path,
+                    plugin_type = ?ptype,
+                    "loaded plugin generator"
+                );
+                Some(factory)
+            } else {
+                None
+            };
 
             let request_timeout = timeout;
             let result = if let Some(port) = api_port {
@@ -496,37 +751,47 @@ fn main() -> Result<()> {
 
                 let progress_state = shared_state.clone();
                 let signal_state = shared_state.clone();
-                netanvil_core::TestBuilder::new(
-                    config,
-                    move || HttpExecutor::with_timeout(request_timeout),
-                )
-                .on_progress(move |update| {
-                    progress_state.update_from_progress(update);
-                    eprint!("\r{}", ProgressLine::new(update));
-                })
-                .external_commands(ext_cmd_rx)
-                .pushed_signal_source(move || signal_state.drain_pushed_signals())
-                .run()
-                .context("load test failed")?
+                let mut builder =
+                    TestBuilder::new(config, move || HttpExecutor::with_timeout(request_timeout))
+                        .on_progress(move |update| {
+                            progress_state.update_from_progress(update);
+                            eprint!("\r{}", ProgressLine::new(update));
+                        })
+                        .external_commands(ext_cmd_rx)
+                        .pushed_signal_source(move || signal_state.drain_pushed_signals());
+
+                if let Some(factory) = plugin_factory {
+                    builder = builder.generator_factory(factory);
+                }
+
+                builder.run().context("load test failed")?
             } else {
-                // No API: simple progress output
-                run_test_with_progress(
-                    config,
-                    move || HttpExecutor::with_timeout(request_timeout),
-                    |update| {
-                        eprint!("\r{}", ProgressLine::new(update));
-                    },
-                )
-                .context("load test failed")?
+                let mut builder =
+                    TestBuilder::new(config, move || HttpExecutor::with_timeout(request_timeout))
+                        .on_progress(|update| {
+                            eprint!("\r{}", ProgressLine::new(update));
+                        });
+
+                if let Some(factory) = plugin_factory {
+                    builder = builder.generator_factory(factory);
+                }
+
+                builder.run().context("load test failed")?
             };
             eprintln!(); // newline after progress
 
-            let output_format = output::OutputFormat::parse(&output)
-                .map_err(|e| anyhow::anyhow!(e))?;
+            let output_format =
+                output::OutputFormat::parse(&output).map_err(|e| anyhow::anyhow!(e))?;
             output::print_results(&result, output_format);
         }
 
-        Commands::Agent { listen, cores } => {
+        Commands::Agent {
+            listen,
+            cores,
+            tls_ca,
+            tls_cert,
+            tls_key,
+        } => {
             let cores = if cores == 0 {
                 std::thread::available_parallelism()
                     .map(|n| n.get())
@@ -535,15 +800,28 @@ fn main() -> Result<()> {
                 cores
             };
 
-            tracing::info!(port = listen, cores, "starting agent");
-            let server = AgentServer::new(listen, cores)
-                .context(format!("failed to start agent on port {listen}"))?;
+            let server = if let (Some(ca), Some(cert), Some(key)) = (tls_ca, tls_cert, tls_key) {
+                let tls = netanvil_types::TlsConfig {
+                    ca_cert: ca,
+                    cert,
+                    key,
+                };
+                tracing::info!(port = listen, cores, "starting agent (mTLS)");
+                AgentServer::with_tls(listen, cores, &tls)
+                    .context(format!("failed to start mTLS agent on port {listen}"))?
+            } else {
+                tracing::info!(port = listen, cores, "starting agent (plain HTTP)");
+                AgentServer::new(listen, cores)
+                    .context(format!("failed to start agent on port {listen}"))?
+            };
             server.run(); // blocks until Ctrl+C
         }
 
         Commands::Leader {
             workers,
             url,
+            plugin,
+            plugin_type,
             method,
             rps,
             duration,
@@ -556,15 +834,22 @@ fn main() -> Result<()> {
             pid_kd,
             pid_min_rps,
             pid_max_rps,
+            pid_constraints,
+            pid_autotune_duration,
             cores,
             timeout,
             headers,
             error_threshold,
             external_metrics_url,
             external_metrics_field,
+            tls_ca,
+            tls_cert,
+            tls_key,
         } => {
             let duration = parse_duration(&duration).context("invalid --duration")?;
             let timeout = parse_duration(&timeout).context("invalid --timeout")?;
+            let autotune_dur = parse_duration(&pid_autotune_duration)
+                .context("invalid --pid-autotune-duration")?;
             let headers: Vec<(String, String)> = headers
                 .iter()
                 .map(|h| parse_header(h))
@@ -573,14 +858,37 @@ fn main() -> Result<()> {
                 &rate_mode,
                 rps,
                 steps.as_deref(),
-                &pid_metric,
-                pid_target,
-                pid_kp,
-                pid_ki,
-                pid_kd,
-                pid_min_rps,
-                pid_max_rps,
+                &PidArgs {
+                    metric: &pid_metric,
+                    target: pid_target,
+                    kp: pid_kp,
+                    ki: pid_ki,
+                    kd: pid_kd,
+                    min_rps: pid_min_rps,
+                    max_rps: pid_max_rps,
+                    constraints: &pid_constraints,
+                    autotune_duration: autotune_dur,
+                },
             )?;
+
+            // Build plugin config: read the file locally and embed it for agents
+            let plugin_config = if let Some(ref plugin_path) = plugin {
+                let ptype = detect_plugin_type(plugin_path, &plugin_type)?;
+                let source = std::fs::read(plugin_path)
+                    .context(format!("failed to read plugin: {plugin_path}"))?;
+                tracing::info!(
+                    plugin = %plugin_path,
+                    plugin_type = ?ptype,
+                    size = source.len(),
+                    "embedding plugin for distribution to agents"
+                );
+                Some(netanvil_types::PluginConfig {
+                    plugin_type: ptype,
+                    source,
+                })
+            } else {
+                None
+            };
 
             let config = TestConfig {
                 targets: url,
@@ -599,7 +907,7 @@ fn main() -> Result<()> {
                 error_status_threshold: error_threshold,
                 external_metrics_url: external_metrics_url.clone(),
                 external_metrics_field: external_metrics_field.clone(),
-                ..Default::default()
+                plugin: plugin_config,
             };
 
             tracing::info!(
@@ -607,58 +915,144 @@ fn main() -> Result<()> {
                 targets = config.targets.len(),
                 rps,
                 ?duration,
+                plugin = plugin.as_deref().unwrap_or("none"),
                 "starting distributed test"
             );
 
             // Build rate controller
-            use netanvil_core::{PidRateController, StaticRateController, StepRateController};
+            use netanvil_core::{
+                AutotuningPidController, CompositePidController, PidRateController,
+                StaticRateController, StepRateController,
+            };
             let rate_controller: Box<dyn netanvil_types::RateController> = match &config.rate {
                 RateConfig::Static { rps } => Box::new(StaticRateController::new(*rps)),
-                RateConfig::Step { steps } => {
-                    Box::new(StepRateController::with_start_time(
-                        steps.clone(),
-                        std::time::Instant::now(),
-                    ))
-                }
-                RateConfig::Pid { initial_rps, target } => Box::new(PidRateController::new(
-                    target.metric.clone(),
-                    target.value,
+                RateConfig::Step { steps } => Box::new(StepRateController::with_start_time(
+                    steps.clone(),
+                    std::time::Instant::now(),
+                )),
+                RateConfig::Pid {
+                    initial_rps,
+                    target,
+                } => match &target.gains {
+                    netanvil_types::PidGains::Manual { kp, ki, kd } => {
+                        Box::new(PidRateController::new(
+                            target.metric.clone(),
+                            target.value,
+                            *initial_rps,
+                            target.min_rps,
+                            target.max_rps,
+                            netanvil_core::PidGainValues {
+                                kp: *kp,
+                                ki: *ki,
+                                kd: *kd,
+                            },
+                        ))
+                    }
+                    netanvil_types::PidGains::Auto {
+                        autotune_duration,
+                        smoothing,
+                    } => Box::new(AutotuningPidController::new(
+                        target.metric.clone(),
+                        target.value,
+                        *initial_rps,
+                        target.min_rps,
+                        target.max_rps,
+                        netanvil_core::AutotuneParams {
+                            autotune_duration: *autotune_duration,
+                            smoothing: *smoothing,
+                            control_interval: config.control_interval,
+                        },
+                    )),
+                },
+                RateConfig::CompositePid {
+                    initial_rps,
+                    constraints,
+                    min_rps,
+                    max_rps,
+                } => Box::new(CompositePidController::new(
+                    constraints,
                     *initial_rps,
-                    target.min_rps,
-                    target.max_rps,
-                    target.kp,
-                    target.ki,
-                    target.kd,
+                    *min_rps,
+                    *max_rps,
+                    config.control_interval,
                 )),
             };
 
-            let discovery = StaticDiscovery::new(workers);
-            let fetcher = HttpMetricsFetcher::new(Duration::from_secs(5));
-            let commander = HttpNodeCommander::new(Duration::from_secs(10));
+            let tls_config = match (&tls_ca, &tls_cert, &tls_key) {
+                (Some(ca), Some(cert), Some(key)) => Some(netanvil_types::TlsConfig {
+                    ca_cert: ca.clone(),
+                    cert: cert.clone(),
+                    key: key.clone(),
+                }),
+                _ => None,
+            };
 
-            let mut coordinator =
-                DistributedCoordinator::new(discovery, fetcher, commander, config, rate_controller);
-
-            // Wire external signal source
-            if let Some(poller) = HttpSignalPoller::from_config(
-                external_metrics_url.as_deref(),
-                external_metrics_field.as_deref(),
-            ) {
-                coordinator.set_signal_source(poller.into_source());
+            // Helper to configure and run a coordinator (generic over trait impls).
+            fn run_coordinator<D, M, C>(
+                mut coordinator: DistributedCoordinator<D, M, C>,
+                external_metrics_url: Option<&str>,
+                external_metrics_field: Option<&str>,
+            ) -> netanvil_distributed::DistributedTestResult
+            where
+                D: netanvil_types::NodeDiscovery,
+                M: netanvil_types::MetricsFetcher,
+                C: netanvil_types::NodeCommander,
+            {
+                if let Some(poller) =
+                    HttpSignalPoller::from_config(external_metrics_url, external_metrics_field)
+                {
+                    coordinator.set_signal_source(poller.into_source());
+                }
+                coordinator.on_progress(|update| {
+                    eprint!(
+                        "\r  [{:.1}s] {:.0} RPS target | {} requests | {} errors | {} nodes",
+                        update.elapsed.as_secs_f64(),
+                        update.target_rps,
+                        update.total_requests,
+                        update.total_errors,
+                        update.active_nodes,
+                    );
+                });
+                coordinator.run()
             }
 
-            coordinator.on_progress(|update| {
-                eprint!(
-                    "\r  [{:.1}s] {:.0} RPS target | {} requests | {} errors | {} nodes",
-                    update.elapsed.as_secs_f64(),
-                    update.target_rps,
-                    update.total_requests,
-                    update.total_errors,
-                    update.active_nodes,
+            let result = if let Some(ref tls) = tls_config {
+                tracing::info!("using mTLS for agent communication");
+                let discovery = MtlsStaticDiscovery::new(workers, tls)
+                    .map_err(|e| anyhow::anyhow!("mTLS discovery: {e}"))?;
+                let fetcher = MtlsMetricsFetcher::new(tls)
+                    .map_err(|e| anyhow::anyhow!("mTLS fetcher: {e}"))?;
+                let commander = MtlsNodeCommander::new(tls)
+                    .map_err(|e| anyhow::anyhow!("mTLS commander: {e}"))?;
+                let coordinator = DistributedCoordinator::new(
+                    discovery,
+                    fetcher,
+                    commander,
+                    config,
+                    rate_controller,
                 );
-            });
-
-            let result = coordinator.run();
+                run_coordinator(
+                    coordinator,
+                    external_metrics_url.as_deref(),
+                    external_metrics_field.as_deref(),
+                )
+            } else {
+                let discovery = StaticDiscovery::new(workers);
+                let fetcher = HttpMetricsFetcher::new(Duration::from_secs(5));
+                let commander = HttpNodeCommander::new(Duration::from_secs(10));
+                let coordinator = DistributedCoordinator::new(
+                    discovery,
+                    fetcher,
+                    commander,
+                    config,
+                    rate_controller,
+                );
+                run_coordinator(
+                    coordinator,
+                    external_metrics_url.as_deref(),
+                    external_metrics_field.as_deref(),
+                )
+            };
             eprintln!(); // newline after progress
 
             tracing::info!(
@@ -777,33 +1171,192 @@ mod tests {
 
     #[test]
     fn build_static_rate() {
-        let rate = build_rate_config("static", 500.0, None, "p99", 200.0, 0.1, 0.01, 0.05, 10.0, 10000.0).unwrap();
+        let rate = build_rate_config(
+            "static",
+            500.0,
+            None,
+            &PidArgs {
+                metric: "p99",
+                target: 200.0,
+                kp: None,
+                ki: None,
+                kd: None,
+                min_rps: 10.0,
+                max_rps: 10000.0,
+                constraints: &[],
+                autotune_duration: Duration::from_secs(3),
+            },
+        )
+        .unwrap();
         assert!(matches!(rate, RateConfig::Static { rps } if rps == 500.0));
     }
 
     #[test]
     fn build_step_rate() {
-        let rate = build_rate_config("step", 0.0, Some("0s:100,5s:500"), "p99", 200.0, 0.1, 0.01, 0.05, 10.0, 10000.0).unwrap();
+        let rate = build_rate_config(
+            "step",
+            0.0,
+            Some("0s:100,5s:500"),
+            &PidArgs {
+                metric: "p99",
+                target: 200.0,
+                kp: None,
+                ki: None,
+                kd: None,
+                min_rps: 10.0,
+                max_rps: 10000.0,
+                constraints: &[],
+                autotune_duration: Duration::from_secs(3),
+            },
+        )
+        .unwrap();
         assert!(matches!(rate, RateConfig::Step { steps } if steps.len() == 2));
     }
 
     #[test]
     fn build_step_rate_requires_steps() {
-        let result = build_rate_config("step", 0.0, None, "p99", 200.0, 0.1, 0.01, 0.05, 10.0, 10000.0);
+        let result = build_rate_config(
+            "step",
+            0.0,
+            None,
+            &PidArgs {
+                metric: "p99",
+                target: 200.0,
+                kp: None,
+                ki: None,
+                kd: None,
+                min_rps: 10.0,
+                max_rps: 10000.0,
+                constraints: &[],
+                autotune_duration: Duration::from_secs(3),
+            },
+        );
         assert!(result.is_err());
     }
 
     #[test]
-    fn build_pid_rate() {
-        let rate = build_rate_config("pid", 500.0, None, "latency-p99", 200.0, 0.1, 0.01, 0.05, 10.0, 10000.0).unwrap();
+    fn build_pid_rate_with_manual_gains() {
+        let rate = build_rate_config(
+            "pid",
+            500.0,
+            None,
+            &PidArgs {
+                metric: "latency-p99",
+                target: 200.0,
+                kp: Some(0.1),
+                ki: Some(0.01),
+                kd: Some(0.05),
+                min_rps: 10.0,
+                max_rps: 10000.0,
+                constraints: &[],
+                autotune_duration: Duration::from_secs(3),
+            },
+        )
+        .unwrap();
         match rate {
-            RateConfig::Pid { initial_rps, target } => {
+            RateConfig::Pid {
+                initial_rps,
+                target,
+            } => {
                 assert_eq!(initial_rps, 500.0);
                 assert_eq!(target.value, 200.0);
                 assert!(matches!(target.metric, TargetMetric::LatencyP99));
+                assert!(
+                    matches!(target.gains, netanvil_types::PidGains::Manual { kp, .. } if (kp - 0.1).abs() < 0.001)
+                );
             }
             _ => panic!("expected Pid"),
         }
+    }
+
+    #[test]
+    fn build_pid_rate_autotune_default() {
+        let rate = build_rate_config(
+            "pid",
+            500.0,
+            None,
+            &PidArgs {
+                metric: "latency-p99",
+                target: 200.0,
+                kp: None,
+                ki: None,
+                kd: None,
+                min_rps: 10.0,
+                max_rps: 10000.0,
+                constraints: &[],
+                autotune_duration: Duration::from_secs(3),
+            },
+        )
+        .unwrap();
+        match rate {
+            RateConfig::Pid { target, .. } => {
+                assert!(matches!(target.gains, netanvil_types::PidGains::Auto { .. }));
+            }
+            _ => panic!("expected Pid"),
+        }
+    }
+
+    #[test]
+    fn build_composite_pid() {
+        let constraints = vec![
+            "latency-p99 < 500".to_string(),
+            "error-rate < 2".to_string(),
+        ];
+        let rate = build_rate_config(
+            "pid",
+            1000.0,
+            None,
+            &PidArgs {
+                metric: "p99",
+                target: 200.0,
+                kp: None,
+                ki: None,
+                kd: None,
+                min_rps: 10.0,
+                max_rps: 50000.0,
+                constraints: &constraints,
+                autotune_duration: Duration::from_secs(3),
+            },
+        )
+        .unwrap();
+        match rate {
+            RateConfig::CompositePid {
+                initial_rps,
+                constraints,
+                ..
+            } => {
+                assert_eq!(initial_rps, 1000.0);
+                assert_eq!(constraints.len(), 2);
+                assert_eq!(constraints[0].limit, 500.0);
+                assert_eq!(constraints[1].limit, 2.0);
+            }
+            _ => panic!("expected CompositePid"),
+        }
+    }
+
+    #[test]
+    fn parse_pid_constraint_valid() {
+        let c = parse_pid_constraint("latency-p99 < 500").unwrap();
+        assert!(matches!(c.metric, TargetMetric::LatencyP99));
+        assert_eq!(c.limit, 500.0);
+    }
+
+    #[test]
+    fn parse_pid_constraint_external() {
+        let c = parse_pid_constraint("external:load < 80").unwrap();
+        assert!(matches!(c.metric, TargetMetric::External { name } if name == "load"));
+        assert_eq!(c.limit, 80.0);
+    }
+
+    #[test]
+    fn parse_pid_constraint_invalid() {
+        assert!(parse_pid_constraint("no-operator").is_err());
+    }
+
+    #[test]
+    fn parse_target_metric_external() {
+        let m = parse_target_metric("external:load").unwrap();
+        assert!(matches!(m, TargetMetric::External { name } if name == "load"));
     }
 
     #[test]
@@ -815,7 +1368,10 @@ mod tests {
     #[test]
     fn parse_count_distribution_uniform() {
         let d = parse_count_distribution("uniform:50,200").unwrap();
-        assert!(matches!(d, CountDistribution::Uniform { min: 50, max: 200 }));
+        assert!(matches!(
+            d,
+            CountDistribution::Uniform { min: 50, max: 200 }
+        ));
     }
 
     #[test]
@@ -848,9 +1404,15 @@ mod tests {
         ));
         let mixed = parse_connection_policy("mixed", 0.7, Some("fixed:100")).unwrap();
         match mixed {
-            ConnectionPolicy::Mixed { persistent_ratio, connection_lifetime } => {
+            ConnectionPolicy::Mixed {
+                persistent_ratio,
+                connection_lifetime,
+            } => {
                 assert!((persistent_ratio - 0.7).abs() < 0.01);
-                assert!(matches!(connection_lifetime, Some(CountDistribution::Fixed(100))));
+                assert!(matches!(
+                    connection_lifetime,
+                    Some(CountDistribution::Fixed(100))
+                ));
             }
             _ => panic!("expected Mixed"),
         }

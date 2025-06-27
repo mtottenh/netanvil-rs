@@ -105,8 +105,7 @@ fn start_test_server() -> TestServer {
                 .route(
                     "/echo-meta",
                     any(
-                        |State(s): State<ServerState>,
-                         req: Request<axum::body::Body>| async move {
+                        |State(s): State<ServerState>, req: Request<axum::body::Body>| async move {
                             s.request_count.fetch_add(1, Ordering::Relaxed);
                             let method = req.method().to_string();
                             let path = req.uri().path().to_string();
@@ -117,9 +116,7 @@ fn start_test_server() -> TestServer {
                                     let k = k.as_str();
                                     k.starts_with("x-") || k == "authorization"
                                 })
-                                .map(|(k, v)| {
-                                    (k.to_string(), v.to_str().unwrap_or("").to_string())
-                                })
+                                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
                                 .collect();
                             s.captured_meta
                                 .lock()
@@ -173,7 +170,10 @@ fn full_pipeline_generates_load_at_target_rate() {
     let server = start_test_server();
     let config = make_config(&server, 200.0, Duration::from_secs(3), 2);
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(10))
+    })
+    .unwrap();
 
     let expected = 600u64; // 200 RPS * 3s
     let lower = (expected as f64 * 0.70) as u64;
@@ -203,8 +203,10 @@ fn rate_accuracy_across_core_counts() {
         server.reset_count();
 
         let config = make_config(&server, 150.0, Duration::from_secs(2), num_cores);
-        let result =
-            run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
+        let result = run_test(config, || {
+            HttpExecutor::with_timeout(Duration::from_secs(10))
+        })
+        .unwrap();
 
         let expected = 300u64; // 150 RPS * 2s
         let lower = (expected as f64 * 0.65) as u64;
@@ -247,7 +249,10 @@ fn step_rate_changes_throughput() {
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(10))
+    })
+    .unwrap();
 
     // 2s at 100 + 2s at 300 = 200 + 600 = 800
     let expected = 800u64;
@@ -279,7 +284,10 @@ fn error_endpoint_tracks_errors() {
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(10))
+    })
+    .unwrap();
 
     assert!(result.total_requests > 100);
     // With default error_status_threshold=400, HTTP 500s count as errors
@@ -314,7 +322,10 @@ fn latency_reflects_server_delay() {
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(10))
+    })
+    .unwrap();
 
     assert!(result.total_requests > 50);
     // Server adds 50ms delay — p50 should be at least 30ms
@@ -347,7 +358,10 @@ fn coordinated_omission_detected_with_intermittent_delays() {
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(10))
+    })
+    .unwrap();
 
     assert!(result.total_requests > 300);
     // p50 should be fast (most requests are instant)
@@ -387,7 +401,10 @@ fn poisson_scheduler_generates_load_at_target_rate() {
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(10))
+    })
+    .unwrap();
 
     let expected = 600u64; // 200 RPS * 3s
     let lower = (expected as f64 * 0.65) as u64;
@@ -423,7 +440,10 @@ fn custom_headers_reach_the_server() {
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(10))
+    })
+    .unwrap();
 
     assert!(result.total_requests > 20);
 
@@ -469,7 +489,10 @@ fn http_method_is_configurable() {
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(10))
+    })
+    .unwrap();
 
     assert!(result.total_requests > 20);
 
@@ -501,7 +524,10 @@ fn error_threshold_zero_ignores_http_errors() {
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(10))
+    })
+    .unwrap();
 
     assert!(result.total_requests > 50);
     // With threshold=0, HTTP 500 responses are NOT counted as errors
@@ -531,7 +557,10 @@ fn error_threshold_500_only_counts_server_errors() {
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(10))
+    })
+    .unwrap();
 
     assert!(result.total_requests > 50);
     // 404 < 500, so no errors with this threshold
@@ -562,7 +591,10 @@ fn error_threshold_default_counts_4xx_and_5xx() {
         ..Default::default()
     };
 
-    let result = run_test(config, || HttpExecutor::with_timeout(Duration::from_secs(10))).unwrap();
+    let result = run_test(config, || {
+        HttpExecutor::with_timeout(Duration::from_secs(10))
+    })
+    .unwrap();
 
     assert!(result.total_requests > 50);
     assert_eq!(

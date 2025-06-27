@@ -36,6 +36,9 @@ mod tests {
 
         assert_eq!(decoded.len(), 3);
         assert_eq!(hist.value_at_quantile(0.5), decoded.value_at_quantile(0.5));
-        assert_eq!(hist.value_at_quantile(0.99), decoded.value_at_quantile(0.99));
+        assert_eq!(
+            hist.value_at_quantile(0.99),
+            decoded.value_at_quantile(0.99)
+        );
     }
 }

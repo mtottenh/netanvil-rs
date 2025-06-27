@@ -1,0 +1,13 @@
+[package]
+name = "netanvil-plugin-lua54"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Lua 5.4 plugin runtime for netanvil-rs"
+
+[dependencies]
+netanvil-types = { workspace = true }
+netanvil-plugin = { workspace = true }
+http = { workspace = true }
+mlua = { version = "0.10", features = ["lua54", "vendored", "send"] }

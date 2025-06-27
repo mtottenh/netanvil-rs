@@ -14,7 +14,10 @@ pub struct StepRateController {
 
 impl StepRateController {
     pub fn new(steps: Vec<(Duration, f64)>) -> Self {
-        assert!(!steps.is_empty(), "step controller requires at least one step");
+        assert!(
+            !steps.is_empty(),
+            "step controller requires at least one step"
+        );
         let initial_rps = steps[0].1;
         Self {
             steps,
@@ -25,7 +28,10 @@ impl StepRateController {
 
     /// Create with an explicit start time (for testing).
     pub fn with_start_time(steps: Vec<(Duration, f64)>, start_time: Instant) -> Self {
-        assert!(!steps.is_empty(), "step controller requires at least one step");
+        assert!(
+            !steps.is_empty(),
+            "step controller requires at least one step"
+        );
         let initial_rps = steps[0].1;
         Self {
             steps,

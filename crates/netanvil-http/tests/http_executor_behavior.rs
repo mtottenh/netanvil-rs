@@ -19,14 +19,15 @@ fn start_test_server() -> (SocketAddr, std::thread::JoinHandle<()>) {
 
             let app = axum::Router::new()
                 .route("/", get(|| async { "OK" }))
-                .route(
-                    "/echo",
-                    post(|body: String| async move { body }),
-                )
+                .route("/echo", post(|body: String| async move { body }))
                 .route(
                     "/status/{code}",
                     get(|Path(code): Path<u16>| async move {
-                        (axum::http::StatusCode::from_u16(code).unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR), "error")
+                        (
+                            axum::http::StatusCode::from_u16(code)
+                                .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+                            "error",
+                        )
                     }),
                 )
                 .route(
@@ -90,7 +91,11 @@ fn get_request_returns_200_with_body() {
         let result = executor.execute(&spec, &make_context()).await;
 
         assert_eq!(result.status, Some(200));
-        assert!(result.error.is_none(), "unexpected error: {:?}", result.error);
+        assert!(
+            result.error.is_none(),
+            "unexpected error: {:?}",
+            result.error
+        );
         assert!(result.response_size > 0, "body should not be empty");
         assert!(
             result.timing.total > Duration::ZERO,
@@ -284,7 +289,10 @@ fn multiple_sequential_requests_reuse_connection() {
         }
 
         // At least some of the subsequent TTFBs should be low (< 5ms for local)
-        let fast_count = ttfbs.iter().filter(|t| **t < Duration::from_millis(5)).count();
+        let fast_count = ttfbs
+            .iter()
+            .filter(|t| **t < Duration::from_millis(5))
+            .count();
         assert!(
             fast_count >= 3,
             "expected most requests to be fast with connection reuse, TTFBs: {:?}",

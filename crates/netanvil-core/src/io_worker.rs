@@ -14,6 +14,14 @@ use netanvil_types::{
     RequestTransformer, ScheduledRequest,
 };
 
+/// Infrastructure channels and config for an I/O worker.
+pub struct IoWorkerConfig {
+    pub fire_rx: flume::Receiver<ScheduledRequest>,
+    pub metrics_tx: flume::Sender<MetricsSnapshot>,
+    pub core_id: usize,
+    pub metrics_interval: Duration,
+}
+
 /// Run the I/O worker loop.
 ///
 /// Receives fire events from the timer thread, generates/transforms/executes
@@ -25,20 +33,23 @@ use netanvil_types::{
 /// message, the worker drains any accumulated messages, yielding to the
 /// runtime every ~50μs to ensure I/O completions are processed.
 pub async fn io_worker_loop<G, T, E, M>(
-    fire_rx: flume::Receiver<ScheduledRequest>,
+    config: IoWorkerConfig,
     mut generator: G,
     transformer: Rc<T>,
     executor: Rc<E>,
     metrics: Rc<M>,
-    metrics_tx: flume::Sender<MetricsSnapshot>,
-    core_id: usize,
-    metrics_interval: Duration,
 ) where
     G: RequestGenerator,
     T: RequestTransformer + 'static,
     E: RequestExecutor + 'static,
     M: MetricsCollector + 'static,
 {
+    let IoWorkerConfig {
+        fire_rx,
+        metrics_tx,
+        core_id,
+        metrics_interval,
+    } = config;
     let mut request_seq: u64 = 0;
     let mut last_report = Instant::now();
 
@@ -87,7 +98,12 @@ pub async fn io_worker_loop<G, T, E, M>(
                 &mut request_seq,
                 core_id,
             ) {
-                tracing::info!(core_id, request_seq, drained, "received stop during drain, exiting");
+                tracing::info!(
+                    core_id,
+                    request_seq,
+                    drained,
+                    "received stop during drain, exiting"
+                );
                 // Send final snapshot before exiting
                 let snapshot = metrics.snapshot();
                 let _ = metrics_tx.try_send(snapshot);

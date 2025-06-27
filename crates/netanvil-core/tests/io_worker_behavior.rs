@@ -8,8 +8,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use netanvil_core::io_worker::io_worker_loop;
-use netanvil_core::{NoopTransformer, SimpleGenerator, HeaderTransformer};
+use netanvil_core::io_worker::{io_worker_loop, IoWorkerConfig};
+use netanvil_core::{HeaderTransformer, NoopTransformer, SimpleGenerator};
 use netanvil_metrics::HdrMetricsCollector;
 use netanvil_types::{
     ExecutionResult, RequestContext, RequestExecutor, RequestSpec, ScheduledRequest,
@@ -125,14 +125,16 @@ fn io_worker_fires_requests_from_channel() {
         let collector = HdrMetricsCollector::new(0);
 
         io_worker_loop(
-            fire_rx,
+            IoWorkerConfig {
+                fire_rx,
+                metrics_tx,
+                core_id: 0,
+                metrics_interval: Duration::from_millis(50),
+            },
             generator,
             Rc::new(NoopTransformer),
             Rc::new(executor),
             Rc::new(collector),
-            metrics_tx,
-            0,
-            Duration::from_millis(50),
         )
         .await;
     });
@@ -171,14 +173,16 @@ fn io_worker_stops_on_stop_message() {
         let collector = HdrMetricsCollector::new(0);
 
         io_worker_loop(
-            fire_rx,
+            IoWorkerConfig {
+                fire_rx,
+                metrics_tx,
+                core_id: 0,
+                metrics_interval: Duration::from_millis(100),
+            },
             generator,
             Rc::new(NoopTransformer),
             Rc::new(executor),
             Rc::new(collector),
-            metrics_tx,
-            0,
-            Duration::from_millis(100),
         )
         .await;
     });
@@ -212,14 +216,16 @@ fn io_worker_exits_on_channel_disconnect() {
         let collector = HdrMetricsCollector::new(0);
 
         io_worker_loop(
-            fire_rx,
+            IoWorkerConfig {
+                fire_rx,
+                metrics_tx,
+                core_id: 0,
+                metrics_interval: Duration::from_millis(100),
+            },
             generator,
             Rc::new(NoopTransformer),
             Rc::new(executor),
             Rc::new(collector),
-            metrics_tx,
-            0,
-            Duration::from_millis(100),
         )
         .await;
     });
@@ -268,14 +274,16 @@ fn io_worker_handles_target_update() {
         let collector = HdrMetricsCollector::new(0);
 
         io_worker_loop(
-            fire_rx,
+            IoWorkerConfig {
+                fire_rx,
+                metrics_tx,
+                core_id: 0,
+                metrics_interval: Duration::from_secs(10),
+            },
             generator,
             Rc::new(NoopTransformer),
             Rc::new(executor),
             Rc::new(collector),
-            metrics_tx,
-            0,
-            Duration::from_secs(10),
         )
         .await;
     });
@@ -353,14 +361,16 @@ fn io_worker_handles_header_update() {
         let collector = HdrMetricsCollector::new(0);
 
         io_worker_loop(
-            fire_rx,
+            IoWorkerConfig {
+                fire_rx,
+                metrics_tx,
+                core_id: 0,
+                metrics_interval: Duration::from_secs(10),
+            },
             generator,
             Rc::new(transformer),
             Rc::new(executor),
             Rc::new(collector),
-            metrics_tx,
-            0,
-            Duration::from_secs(10),
         )
         .await;
     });
@@ -427,14 +437,16 @@ fn io_worker_sends_periodic_metrics_snapshots() {
         let collector = HdrMetricsCollector::new(0);
 
         io_worker_loop(
-            fire_rx,
+            IoWorkerConfig {
+                fire_rx,
+                metrics_tx,
+                core_id: 0,
+                metrics_interval: Duration::from_millis(200), // report every 200ms
+            },
             generator,
             Rc::new(NoopTransformer),
             Rc::new(executor),
             Rc::new(collector),
-            metrics_tx,
-            0,
-            Duration::from_millis(200), // report every 200ms
         )
         .await;
     });

@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use netanvil_types::{
-    MetricsFetcher, MetricsSummary, NodeCommander, NodeDiscovery, NodeId, NodeInfo,
-    RateController, RateDecision, RemoteMetrics, TestConfig,
+    MetricsFetcher, MetricsSummary, NodeCommander, NodeDiscovery, NodeId, NodeInfo, RateController,
+    RateDecision, RemoteMetrics, TestConfig,
 };
 
 /// Progress update emitted each tick of the distributed coordinator.
@@ -28,6 +28,7 @@ pub struct DistributedProgressUpdate {
 ///
 /// Generic over the three distributed traits so implementations can be
 /// swapped (HTTP for MVP, gossip/CRDT in the future).
+#[allow(clippy::type_complexity)]
 pub struct DistributedCoordinator<D, M, C>
 where
     D: NodeDiscovery,
@@ -71,17 +72,11 @@ where
         }
     }
 
-    pub fn set_signal_source(
-        &mut self,
-        f: impl FnMut() -> Vec<(String, f64)> + Send + 'static,
-    ) {
+    pub fn set_signal_source(&mut self, f: impl FnMut() -> Vec<(String, f64)> + Send + 'static) {
         self.signal_source = Some(Box::new(f));
     }
 
-    pub fn on_progress(
-        &mut self,
-        f: impl FnMut(&DistributedProgressUpdate) + 'static,
-    ) {
+    pub fn on_progress(&mut self, f: impl FnMut(&DistributedProgressUpdate) + 'static) {
         self.on_progress = Some(Box::new(f));
     }
 

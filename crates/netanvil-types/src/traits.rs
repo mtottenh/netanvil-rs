@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::time::Instant;
 
-use crate::metrics::{MetricsSummary, MetricsSnapshot, RateDecision};
+use crate::metrics::{MetricsSnapshot, MetricsSummary, RateDecision};
 use crate::request::{ExecutionResult, RequestContext, RequestSpec};
 
 // ---------------------------------------------------------------------------

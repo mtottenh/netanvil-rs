@@ -14,20 +14,28 @@ pub fn handle_get_metrics(request: tiny_http::Request, state: &SharedState) {
     }
 }
 
-pub fn handle_put_rate(
-    request: tiny_http::Request,
-    command_tx: &flume::Sender<WorkerCommand>,
-) {
+/// Build a status view for the mTLS handler (no tiny_http dependency).
+pub fn build_status_view(state: &SharedState) -> serde_json::Value {
+    serde_json::to_value(state.get_status()).unwrap_or(serde_json::json!({}))
+}
+
+/// Build a metrics view for the mTLS handler (no tiny_http dependency).
+pub fn build_metrics_view(state: &SharedState) -> serde_json::Value {
+    match state.get_metrics() {
+        Some(metrics) => serde_json::to_value(metrics).unwrap_or(serde_json::json!({})),
+        None => serde_json::to_value(ApiResponse::error("no metrics yet"))
+            .unwrap_or(serde_json::json!({})),
+    }
+}
+
+pub fn handle_put_rate(request: tiny_http::Request, command_tx: &flume::Sender<WorkerCommand>) {
     read_json_then_respond::<UpdateRateRequest>(request, |body, req| {
         let _ = command_tx.send(WorkerCommand::UpdateRate(body.rps));
         respond_json(req, 200, &ApiResponse::success());
     });
 }
 
-pub fn handle_put_targets(
-    request: tiny_http::Request,
-    command_tx: &flume::Sender<WorkerCommand>,
-) {
+pub fn handle_put_targets(request: tiny_http::Request, command_tx: &flume::Sender<WorkerCommand>) {
     read_json_then_respond::<UpdateTargetsRequest>(request, |body, req| {
         if body.targets.is_empty() {
             respond_json(req, 400, &ApiResponse::error("targets must not be empty"));
@@ -38,20 +46,14 @@ pub fn handle_put_targets(
     });
 }
 
-pub fn handle_put_headers(
-    request: tiny_http::Request,
-    command_tx: &flume::Sender<WorkerCommand>,
-) {
+pub fn handle_put_headers(request: tiny_http::Request, command_tx: &flume::Sender<WorkerCommand>) {
     read_json_then_respond::<UpdateHeadersRequest>(request, |body, req| {
         let _ = command_tx.send(WorkerCommand::UpdateHeaders(body.headers));
         respond_json(req, 200, &ApiResponse::success());
     });
 }
 
-pub fn handle_post_stop(
-    request: tiny_http::Request,
-    command_tx: &flume::Sender<WorkerCommand>,
-) {
+pub fn handle_post_stop(request: tiny_http::Request, command_tx: &flume::Sender<WorkerCommand>) {
     let _ = command_tx.send(WorkerCommand::Stop);
     respond_json(request, 200, &ApiResponse::success());
 }
@@ -117,9 +119,59 @@ pub fn handle_get_metrics_prometheus(request: tiny_http::Request, state: &Shared
             ));
             // Approximate sum from p50 * count (rough, but Prometheus needs it)
             let approx_sum = m.latency_p50_ms / 1000.0 * m.total_requests as f64;
+            out.push_str(&format!("netanvil_latency_seconds_sum {:.3}\n", approx_sum));
+
+            // Saturation / client health metrics
+            let s = &m.saturation;
+
+            out.push_str(
+                "# HELP netanvil_backpressure_drops_total Requests dropped (fire channel full).\n",
+            );
+            out.push_str("# TYPE netanvil_backpressure_drops_total counter\n");
             out.push_str(&format!(
-                "netanvil_latency_seconds_sum {:.3}\n",
-                approx_sum
+                "netanvil_backpressure_drops_total {}\n",
+                s.backpressure_drops
+            ));
+
+            out.push_str(
+                "# HELP netanvil_scheduling_delay_mean_seconds Mean scheduling delay (intended vs actual).\n",
+            );
+            out.push_str("# TYPE netanvil_scheduling_delay_mean_seconds gauge\n");
+            out.push_str(&format!(
+                "netanvil_scheduling_delay_mean_seconds {:.6}\n",
+                s.scheduling_delay_mean_ms / 1000.0
+            ));
+
+            out.push_str(
+                "# HELP netanvil_scheduling_delay_max_seconds Max scheduling delay this window.\n",
+            );
+            out.push_str("# TYPE netanvil_scheduling_delay_max_seconds gauge\n");
+            out.push_str(&format!(
+                "netanvil_scheduling_delay_max_seconds {:.6}\n",
+                s.scheduling_delay_max_ms / 1000.0
+            ));
+
+            out.push_str(
+                "# HELP netanvil_rate_achievement Ratio of achieved to target RPS (1.0 = on target).\n",
+            );
+            out.push_str("# TYPE netanvil_rate_achievement gauge\n");
+            out.push_str(&format!(
+                "netanvil_rate_achievement {:.4}\n",
+                s.rate_achievement
+            ));
+
+            out.push_str(
+                "# HELP netanvil_client_saturated Whether the client is the bottleneck (1=yes).\n",
+            );
+            out.push_str("# TYPE netanvil_client_saturated gauge\n");
+            let saturated = matches!(
+                s.assessment,
+                netanvil_types::SaturationAssessment::ClientSaturated
+                    | netanvil_types::SaturationAssessment::BothSaturated
+            );
+            out.push_str(&format!(
+                "netanvil_client_saturated {}\n",
+                if saturated { 1 } else { 0 }
             ));
 
             out
@@ -153,12 +205,20 @@ fn read_json_then_respond<T: serde::de::DeserializeOwned>(
 ) {
     let mut body = String::new();
     if let Err(e) = request.as_reader().read_to_string(&mut body) {
-        respond_json(request, 400, &ApiResponse::error(format!("read error: {e}")));
+        respond_json(
+            request,
+            400,
+            &ApiResponse::error(format!("read error: {e}")),
+        );
         return;
     }
     match serde_json::from_str::<T>(&body) {
         Ok(parsed) => handler(parsed, request),
-        Err(e) => respond_json(request, 400, &ApiResponse::error(format!("invalid JSON: {e}"))),
+        Err(e) => respond_json(
+            request,
+            400,
+            &ApiResponse::error(format!("invalid JSON: {e}")),
+        ),
     }
 }
 

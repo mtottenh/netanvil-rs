@@ -1,7 +1,11 @@
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use netanvil_metrics::AggregateMetrics;
-use netanvil_types::{MetricsSummary, RateController, RateDecision, TimerCommand, WorkerCommand};
+use netanvil_types::{
+    MetricsSummary, RateController, RateDecision, SaturationAssessment, SaturationInfo,
+    TimerCommand, WorkerCommand,
+};
 
 use crate::handle::IoWorkerHandle;
 use crate::result::TestResult;
@@ -21,22 +25,24 @@ pub struct ProgressUpdate {
     /// Each entry is (upper_bound_seconds, cumulative_count).
     /// Suitable for Prometheus histogram exposition.
     pub latency_buckets: Vec<(f64, u64)>,
+    /// Client/server saturation assessment for this tick.
+    pub saturation: SaturationInfo,
 }
 
 /// Standard Prometheus latency bucket boundaries in nanoseconds.
 const PROMETHEUS_BUCKET_BOUNDS_NS: &[u64] = &[
-    1_000_000,       // 1ms
-    5_000_000,       // 5ms
-    10_000_000,      // 10ms
-    25_000_000,      // 25ms
-    50_000_000,      // 50ms
-    100_000_000,     // 100ms
-    250_000_000,     // 250ms
-    500_000_000,     // 500ms
-    1_000_000_000,   // 1s
-    2_500_000_000,   // 2.5s
-    5_000_000_000,   // 5s
-    10_000_000_000,  // 10s
+    1_000_000,      // 1ms
+    5_000_000,      // 5ms
+    10_000_000,     // 10ms
+    25_000_000,     // 25ms
+    50_000_000,     // 50ms
+    100_000_000,    // 100ms
+    250_000_000,    // 250ms
+    500_000_000,    // 500ms
+    1_000_000_000,  // 1s
+    2_500_000_000,  // 2.5s
+    5_000_000_000,  // 5s
+    10_000_000_000, // 10s
 ];
 
 fn histogram_to_prometheus_buckets(hist: &hdrhistogram::Histogram<u64>) -> Vec<(f64, u64)> {
@@ -70,7 +76,7 @@ pub struct Coordinator {
     control_interval: Duration,
     start_time: Instant,
     /// Optional callback invoked each tick with live progress.
-    on_progress: Option<Box<dyn FnMut(&ProgressUpdate)>>,
+    on_progress: Option<crate::ProgressCallback>,
     /// Optional external command channel (from API server, distributed leader, etc.).
     /// Drained each tick; commands converted to TimerCommands and forwarded.
     external_command_rx: Option<flume::Receiver<WorkerCommand>>,
@@ -78,10 +84,13 @@ pub struct Coordinator {
     stopped: bool,
     /// Optional external signal source (pull-based), polled each tick.
     /// Returns `(signal_name, signal_value)` pairs to inject into MetricsSummary.
-    external_signal_source: Option<Box<dyn FnMut() -> Vec<(String, f64)>>>,
+    external_signal_source: Option<crate::SignalSourceFn>,
     /// Optional pushed signal source (push-based), read each tick.
     /// Pushed signals override polled signals with the same key.
-    pushed_signal_source: Option<Box<dyn FnMut() -> Vec<(String, f64)>>>,
+    pushed_signal_source: Option<crate::SignalSourceFn>,
+    /// Last-seen timer stats values (for computing per-tick deltas).
+    last_timer_dispatched: u64,
+    last_timer_dropped: u64,
 }
 
 impl Coordinator {
@@ -106,6 +115,8 @@ impl Coordinator {
             stopped: false,
             external_signal_source: None,
             pushed_signal_source: None,
+            last_timer_dispatched: 0,
+            last_timer_dropped: 0,
         }
     }
 
@@ -123,20 +134,14 @@ impl Coordinator {
     /// Set an external signal source (pull-based), polled each tick.
     /// Returns `(signal_name, value)` pairs injected into MetricsSummary.
     /// Used for server-reported metrics (e.g. proxy load, queue depth).
-    pub fn set_external_signal_source(
-        &mut self,
-        f: impl FnMut() -> Vec<(String, f64)> + 'static,
-    ) {
+    pub fn set_external_signal_source(&mut self, f: impl FnMut() -> Vec<(String, f64)> + 'static) {
         self.external_signal_source = Some(Box::new(f));
     }
 
     /// Set a pushed signal source, read each tick.
     /// Used for signals pushed via HTTP API (`PUT /signal`).
     /// Pushed signals override polled signals with the same key.
-    pub fn set_pushed_signal_source(
-        &mut self,
-        f: impl FnMut() -> Vec<(String, f64)> + 'static,
-    ) {
+    pub fn set_pushed_signal_source(&mut self, f: impl FnMut() -> Vec<(String, f64)> + 'static) {
         self.pushed_signal_source = Some(Box::new(f));
     }
 
@@ -225,6 +230,9 @@ impl Coordinator {
         // Distribute to workers via timer thread
         self.distribute_rate(decision.target_rps);
 
+        // Compute saturation info from timer stats + tick aggregate
+        let saturation = self.compute_saturation(&summary, decision.target_rps);
+
         // Emit progress update
         if let Some(ref mut callback) = self.on_progress {
             let elapsed = self.start_time.elapsed();
@@ -238,6 +246,7 @@ impl Coordinator {
                 total_errors: self.total_aggregate.total_errors(),
                 window: summary,
                 latency_buckets: buckets,
+                saturation,
             };
             callback(&update);
         }
@@ -278,6 +287,83 @@ impl Coordinator {
         let _ = self.timer_handle.command_tx.send(TimerCommand::Stop);
     }
 
+    /// Compute client/server saturation info from timer stats and tick metrics.
+    fn compute_saturation(&mut self, summary: &MetricsSummary, target_rps: f64) -> SaturationInfo {
+        // Read timer stats and compute per-tick deltas
+        let current_dispatched = self.timer_handle.stats.dispatched.load(Ordering::Relaxed);
+        let current_dropped = self.timer_handle.stats.dropped.load(Ordering::Relaxed);
+
+        let tick_dispatched = current_dispatched - self.last_timer_dispatched;
+        let tick_dropped = current_dropped - self.last_timer_dropped;
+        self.last_timer_dispatched = current_dispatched;
+        self.last_timer_dropped = current_dropped;
+
+        let total_attempted = tick_dispatched + tick_dropped;
+        let backpressure_ratio = if total_attempted > 0 {
+            tick_dropped as f64 / total_attempted as f64
+        } else {
+            0.0
+        };
+
+        // Scheduling delay from the tick aggregate
+        let delay_sum = self.tick_aggregate.scheduling_delay_sum_ns();
+        let delay_max = self.tick_aggregate.scheduling_delay_max_ns();
+        let delay_over_1ms = self.tick_aggregate.scheduling_delay_count_over_1ms();
+
+        let scheduling_delay_mean_ms = if summary.total_requests > 0 {
+            (delay_sum as f64 / summary.total_requests as f64) / 1_000_000.0
+        } else {
+            0.0
+        };
+        let scheduling_delay_max_ms = delay_max as f64 / 1_000_000.0;
+        let delayed_request_ratio = if summary.total_requests > 0 {
+            delay_over_1ms as f64 / summary.total_requests as f64
+        } else {
+            0.0
+        };
+
+        let rate_achievement = if target_rps > 0.0 {
+            (summary.request_rate / target_rps).min(2.0)
+        } else {
+            1.0
+        };
+
+        // Classification
+        let client_signals = backpressure_ratio > 0.01
+            || scheduling_delay_mean_ms > 5.0
+            || delayed_request_ratio > 0.10
+            || rate_achievement < 0.90;
+
+        let server_signals = summary.error_rate > 0.05 || (summary.latency_p99_ns > 5_000_000_000); // p99 > 5s
+
+        let assessment = match (client_signals, server_signals) {
+            (false, false) => SaturationAssessment::Healthy,
+            (true, false) => SaturationAssessment::ClientSaturated,
+            (false, true) => SaturationAssessment::ServerSaturated,
+            (true, true) => SaturationAssessment::BothSaturated,
+        };
+
+        if assessment != SaturationAssessment::Healthy {
+            tracing::warn!(
+                ?assessment,
+                backpressure_ratio,
+                scheduling_delay_mean_ms,
+                rate_achievement,
+                "saturation detected"
+            );
+        }
+
+        SaturationInfo {
+            backpressure_drops: tick_dropped,
+            backpressure_ratio,
+            scheduling_delay_mean_ms,
+            scheduling_delay_max_ms,
+            delayed_request_ratio,
+            rate_achievement,
+            assessment,
+        }
+    }
+
     fn is_test_complete(&self) -> bool {
         self.stopped || self.start_time.elapsed() >= self.test_duration
     }
@@ -315,21 +401,60 @@ impl Coordinator {
         let elapsed = self.start_time.elapsed();
         let hist = self.total_aggregate.histogram();
 
+        // Final saturation assessment from total timer stats + aggregate delay
+        let total_dispatched = self.timer_handle.stats.dispatched.load(Ordering::Relaxed);
+        let total_dropped = self.timer_handle.stats.dropped.load(Ordering::Relaxed);
+        let total_attempted = total_dispatched + total_dropped;
+        let total_requests = self.total_aggregate.total_requests();
+
+        let saturation = SaturationInfo {
+            backpressure_drops: total_dropped,
+            backpressure_ratio: if total_attempted > 0 {
+                total_dropped as f64 / total_attempted as f64
+            } else {
+                0.0
+            },
+            scheduling_delay_mean_ms: if total_requests > 0 {
+                (self.total_aggregate.scheduling_delay_sum_ns() as f64 / total_requests as f64)
+                    / 1_000_000.0
+            } else {
+                0.0
+            },
+            scheduling_delay_max_ms: self.total_aggregate.scheduling_delay_max_ns() as f64
+                / 1_000_000.0,
+            delayed_request_ratio: if total_requests > 0 {
+                self.total_aggregate.scheduling_delay_count_over_1ms() as f64
+                    / total_requests as f64
+            } else {
+                0.0
+            },
+            rate_achievement: 1.0, // not meaningful for final result
+            assessment: if total_dropped > 0
+                || self.total_aggregate.scheduling_delay_count_over_1ms() as f64
+                    / total_requests.max(1) as f64
+                    > 0.10
+            {
+                SaturationAssessment::ClientSaturated
+            } else {
+                SaturationAssessment::Healthy
+            },
+        };
+
         TestResult {
-            total_requests: self.total_aggregate.total_requests(),
+            total_requests,
             total_errors: self.total_aggregate.total_errors(),
             duration: elapsed,
             latency_p50: Duration::from_nanos(hist.value_at_quantile(0.50)),
             latency_p90: Duration::from_nanos(hist.value_at_quantile(0.90)),
             latency_p99: Duration::from_nanos(hist.value_at_quantile(0.99)),
             latency_max: Duration::from_nanos(hist.max()),
-            request_rate: self.total_aggregate.total_requests() as f64 / elapsed.as_secs_f64(),
-            error_rate: if self.total_aggregate.total_requests() > 0 {
-                self.total_aggregate.total_errors() as f64
-                    / self.total_aggregate.total_requests() as f64
+            request_rate: total_requests as f64 / elapsed.as_secs_f64(),
+            error_rate: if total_requests > 0 {
+                self.total_aggregate.total_errors() as f64 / total_requests as f64
             } else {
                 0.0
             },
+            saturation,
         }
     }
 }

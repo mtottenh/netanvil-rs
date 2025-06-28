@@ -18,6 +18,14 @@ pub struct MetricsSnapshot {
     pub window_start: Instant,
     /// Window end time
     pub window_end: Instant,
+    /// Sum of scheduling delays (intended→actual gap) in nanoseconds.
+    /// Used to compute mean delay for saturation detection.
+    pub scheduling_delay_sum_ns: u64,
+    /// Maximum scheduling delay in this window (nanoseconds).
+    pub scheduling_delay_max_ns: u64,
+    /// Number of requests with scheduling delay > 1ms.
+    /// Indicates systematic client-side backlog.
+    pub scheduling_delay_count_over_1ms: u64,
 }
 
 /// Derived metrics summary for the RateController.
@@ -46,4 +54,40 @@ pub struct MetricsSummary {
 pub struct RateDecision {
     pub target_rps: f64,
     pub next_update_interval: Duration,
+}
+
+/// Client-side saturation assessment.
+///
+/// Distinguishes between client bottleneck (can't generate fast enough),
+/// server bottleneck (can't handle the load), or both.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SaturationInfo {
+    /// Requests the timer thread dropped this window (fire channel full).
+    pub backpressure_drops: u64,
+    /// Fraction of total attempted dispatches that were dropped (0.0-1.0).
+    pub backpressure_ratio: f64,
+    /// Mean scheduling delay in milliseconds (intended_time → actual_time gap).
+    pub scheduling_delay_mean_ms: f64,
+    /// Max scheduling delay in milliseconds this window.
+    pub scheduling_delay_max_ms: f64,
+    /// Fraction of requests with scheduling delay > 1ms.
+    pub delayed_request_ratio: f64,
+    /// Ratio of achieved RPS to target RPS (1.0 = hitting target exactly).
+    pub rate_achievement: f64,
+    /// Overall assessment.
+    pub assessment: SaturationAssessment,
+}
+
+/// Classification of where the bottleneck is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SaturationAssessment {
+    /// All signals healthy — generating at target rate, no backpressure.
+    #[default]
+    Healthy,
+    /// Client can't generate fast enough — add more cores or nodes.
+    ClientSaturated,
+    /// Server can't handle the load — latency/errors rising.
+    ServerSaturated,
+    /// Both client and server are struggling.
+    BothSaturated,
 }

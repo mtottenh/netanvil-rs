@@ -2,6 +2,13 @@ use std::time::Duration;
 
 use netanvil_types::{MetricsSummary, RateController, RateDecision, TargetMetric};
 
+/// Resolved PID gains (kp, ki, kd) for use with PID controllers.
+pub struct PidGainValues {
+    pub kp: f64,
+    pub ki: f64,
+    pub kd: f64,
+}
+
 /// PID rate controller that adjusts request rate to maintain a target metric.
 ///
 /// The controller uses a standard PID algorithm:
@@ -29,9 +36,7 @@ impl PidRateController {
         initial_rps: f64,
         min_rps: f64,
         max_rps: f64,
-        kp: f64,
-        ki: f64,
-        kd: f64,
+        gains: PidGainValues,
     ) -> Self {
         Self {
             target_metric,
@@ -39,9 +44,9 @@ impl PidRateController {
             current_rps: initial_rps,
             min_rps,
             max_rps,
-            kp,
-            ki,
-            kd,
+            kp: gains.kp,
+            ki: gains.ki,
+            kd: gains.kd,
             integral: 0.0,
             last_error: 0.0,
         }

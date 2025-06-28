@@ -9,7 +9,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use netanvil_core::io_worker::io_worker_loop;
+use netanvil_core::io_worker::{io_worker_loop, IoWorkerConfig};
 use netanvil_core::timer_thread::{self, FIRE_CHANNEL_CAPACITY};
 use netanvil_core::{ConstantRateScheduler, NoopTransformer, SimpleGenerator};
 use netanvil_metrics::HdrMetricsCollector;
@@ -104,20 +104,21 @@ fn spawn_full_architecture(
             .spawn(move || {
                 let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
                 rt.block_on(async {
-                    let generator =
-                        SimpleGenerator::get(vec!["http://mock.test/".into()]);
+                    let generator = SimpleGenerator::get(vec!["http://mock.test/".into()]);
                     let executor = MockExecutor::new();
                     let collector = HdrMetricsCollector::new(0);
 
                     io_worker_loop(
-                        fire_rx,
+                        IoWorkerConfig {
+                            fire_rx,
+                            metrics_tx,
+                            core_id,
+                            metrics_interval,
+                        },
                         generator,
                         Rc::new(NoopTransformer),
                         Rc::new(executor),
                         Rc::new(collector),
-                        metrics_tx,
-                        core_id,
-                        metrics_interval,
                     )
                     .await;
                 });
@@ -131,7 +132,12 @@ fn spawn_full_architecture(
     let timer_join = std::thread::Builder::new()
         .name("test-timer".into())
         .spawn(move || {
-            timer_thread::timer_loop(schedulers, fire_txs, cmd_rx);
+            timer_thread::timer_loop(
+                schedulers,
+                fire_txs,
+                cmd_rx,
+                timer_thread::TimerStats::new(),
+            );
         })
         .unwrap();
 
@@ -213,8 +219,12 @@ fn timer_plus_workers_rate_change_mid_test() {
 #[test]
 fn timer_plus_workers_stop_command() {
     // Long duration (60s) but stop after 500ms — verify clean shutdown.
-    let (cmd_tx, metrics_rxs, timer_join, worker_joins) =
-        spawn_full_architecture(2, 100.0, Duration::from_secs(60), Duration::from_millis(100));
+    let (cmd_tx, metrics_rxs, timer_join, worker_joins) = spawn_full_architecture(
+        2,
+        100.0,
+        Duration::from_secs(60),
+        Duration::from_millis(100),
+    );
 
     // Stop after 500ms
     std::thread::spawn(move || {
@@ -238,7 +248,10 @@ fn timer_plus_workers_stop_command() {
     let total = collect_total_requests(&metrics_rxs);
 
     // Should have some requests (~50 per worker in 500ms at 100 RPS)
-    assert!(total > 30, "expected some requests before stop, got {total}");
+    assert!(
+        total > 30,
+        "expected some requests before stop, got {total}"
+    );
     assert!(
         total < 500,
         "too many requests for 500ms at 200 total RPS: {total}"
@@ -332,9 +345,7 @@ fn timer_plus_workers_coordinated_omission_tracking() {
 
     // Send from another thread so the worker can process between messages
     std::thread::spawn(move || {
-        fire_tx
-            .send(ScheduledRequest::Fire(intended_time))
-            .unwrap();
+        fire_tx.send(ScheduledRequest::Fire(intended_time)).unwrap();
         // Give the worker time to process and spawn the task
         std::thread::sleep(Duration::from_millis(200));
         fire_tx.send(ScheduledRequest::Stop).unwrap();
@@ -346,11 +357,7 @@ fn timer_plus_workers_coordinated_omission_tracking() {
     }
 
     impl RequestExecutor for ContextCapture {
-        async fn execute(
-            &self,
-            _spec: &RequestSpec,
-            context: &RequestContext,
-        ) -> ExecutionResult {
+        async fn execute(&self, _spec: &RequestSpec, context: &RequestContext) -> ExecutionResult {
             self.contexts
                 .borrow_mut()
                 .push((context.intended_time, context.actual_time));
@@ -379,14 +386,16 @@ fn timer_plus_workers_coordinated_omission_tracking() {
         let collector = HdrMetricsCollector::new(0);
 
         io_worker_loop(
-            fire_rx,
+            IoWorkerConfig {
+                fire_rx,
+                metrics_tx,
+                core_id: 0,
+                metrics_interval: Duration::from_secs(10),
+            },
             generator,
             Rc::new(NoopTransformer),
             exec_rc.clone(),
             Rc::new(collector),
-            metrics_tx,
-            0,
-            Duration::from_secs(10),
         )
         .await;
 

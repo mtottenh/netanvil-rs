@@ -5,9 +5,9 @@
 
 use std::time::{Duration, Instant};
 
+use netanvil_core::timer_thread::{self, FIRE_CHANNEL_CAPACITY};
 use netanvil_core::ConstantRateScheduler;
 use netanvil_core::PoissonScheduler;
-use netanvil_core::timer_thread::{self, FIRE_CHANNEL_CAPACITY};
 use netanvil_types::{RequestScheduler, ScheduledRequest, TimerCommand};
 
 /// Helper: run the timer loop in a background thread, return the handle
@@ -34,7 +34,12 @@ fn spawn_timer(
     let thread = std::thread::Builder::new()
         .name("test-timer".into())
         .spawn(move || {
-            timer_thread::timer_loop(schedulers, fire_txs, cmd_rx);
+            timer_thread::timer_loop(
+                schedulers,
+                fire_txs,
+                cmd_rx,
+                timer_thread::TimerStats::new(),
+            );
         })
         .unwrap();
 
@@ -45,9 +50,11 @@ fn spawn_timer(
 fn timer_dispatches_at_correct_rate() {
     // 1 worker, 1000 RPS for 1 second → ~1000 Fire messages.
     let start = Instant::now();
-    let schedulers: Vec<Box<dyn RequestScheduler>> = vec![Box::new(
-        ConstantRateScheduler::new(1000.0, start, Some(Duration::from_secs(1))),
-    )];
+    let schedulers: Vec<Box<dyn RequestScheduler>> = vec![Box::new(ConstantRateScheduler::new(
+        1000.0,
+        start,
+        Some(Duration::from_secs(1)),
+    ))];
 
     let (_cmd_tx, fire_rxs, thread) = spawn_timer(schedulers, 1, FIRE_CHANNEL_CAPACITY);
 
@@ -75,9 +82,11 @@ fn timer_dispatches_at_high_rate() {
     // 1 worker, 5K RPS for 500ms → ~2500 Fire messages.
     // A drain thread reads from the channel to prevent backpressure.
     let start = Instant::now();
-    let schedulers: Vec<Box<dyn RequestScheduler>> = vec![Box::new(
-        ConstantRateScheduler::new(5_000.0, start, Some(Duration::from_millis(500))),
-    )];
+    let schedulers: Vec<Box<dyn RequestScheduler>> = vec![Box::new(ConstantRateScheduler::new(
+        5_000.0,
+        start,
+        Some(Duration::from_millis(500)),
+    ))];
 
     let (_cmd_tx, fire_rxs, thread) = spawn_timer(schedulers, 1, FIRE_CHANNEL_CAPACITY);
 
@@ -113,9 +122,11 @@ fn timer_rate_update_propagates_to_schedulers() {
     // Start at 100 RPS, after 500ms update to 400 RPS, run for 1s total.
     // Expected: ~50 (first 500ms at 100) + ~200 (last 500ms at 400) = ~250
     let start = Instant::now();
-    let schedulers: Vec<Box<dyn RequestScheduler>> = vec![Box::new(
-        ConstantRateScheduler::new(100.0, start, Some(Duration::from_secs(1))),
-    )];
+    let schedulers: Vec<Box<dyn RequestScheduler>> = vec![Box::new(ConstantRateScheduler::new(
+        100.0,
+        start,
+        Some(Duration::from_secs(1)),
+    ))];
 
     let (cmd_tx, fire_rxs, thread) = spawn_timer(schedulers, 1, FIRE_CHANNEL_CAPACITY);
 
@@ -163,9 +174,7 @@ fn timer_target_update_forwarded_to_all_workers() {
     // Send target update, then stop
     std::thread::sleep(Duration::from_millis(100));
     cmd_tx
-        .send(TimerCommand::UpdateTargets(vec![
-            "http://new.test/".into(),
-        ]))
+        .send(TimerCommand::UpdateTargets(vec!["http://new.test/".into()]))
         .unwrap();
     std::thread::sleep(Duration::from_millis(100));
     cmd_tx.send(TimerCommand::Stop).unwrap();
@@ -284,9 +293,11 @@ fn timer_backpressure_detection() {
     // Use a tiny channel capacity, moderate rate → timer should experience
     // backpressure (try_send failures) and continue without blocking.
     let start = Instant::now();
-    let schedulers: Vec<Box<dyn RequestScheduler>> = vec![Box::new(
-        ConstantRateScheduler::new(500.0, start, Some(Duration::from_millis(200))),
-    )];
+    let schedulers: Vec<Box<dyn RequestScheduler>> = vec![Box::new(ConstantRateScheduler::new(
+        500.0,
+        start,
+        Some(Duration::from_millis(200)),
+    ))];
 
     // Channel capacity of 2: guaranteed to overflow at 500 RPS
     let (cmd_tx, fire_rxs, thread) = spawn_timer(schedulers, 1, 2);
@@ -364,9 +375,11 @@ fn timer_precision_intended_times_are_accurate() {
     // Verify that the intended_time in Fire messages matches what the
     // scheduler would produce (monotonically increasing, correctly spaced).
     let start = Instant::now();
-    let schedulers: Vec<Box<dyn RequestScheduler>> = vec![Box::new(
-        ConstantRateScheduler::new(100.0, start, Some(Duration::from_millis(500))),
-    )];
+    let schedulers: Vec<Box<dyn RequestScheduler>> = vec![Box::new(ConstantRateScheduler::new(
+        100.0,
+        start,
+        Some(Duration::from_millis(500)),
+    ))];
 
     let (_cmd_tx, fire_rxs, thread) = spawn_timer(schedulers, 1, FIRE_CHANNEL_CAPACITY);
 
@@ -411,9 +424,12 @@ fn timer_precision_intended_times_are_accurate() {
 fn timer_with_poisson_scheduler_produces_correct_count() {
     // Verify timer thread works with Poisson scheduler (exponential inter-arrivals).
     let start = Instant::now();
-    let schedulers: Vec<Box<dyn RequestScheduler>> = vec![Box::new(
-        PoissonScheduler::with_seed(500.0, start, Some(Duration::from_secs(1)), 42),
-    )];
+    let schedulers: Vec<Box<dyn RequestScheduler>> = vec![Box::new(PoissonScheduler::with_seed(
+        500.0,
+        start,
+        Some(Duration::from_secs(1)),
+        42,
+    ))];
 
     let (_cmd_tx, fire_rxs, thread) = spawn_timer(schedulers, 1, FIRE_CHANNEL_CAPACITY);
 

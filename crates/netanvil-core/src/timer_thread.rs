@@ -8,14 +8,46 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use netanvil_types::{RequestScheduler, ScheduledRequest, TimerCommand};
+
+/// Shared counters for timer thread activity.
+///
+/// Uses `Arc<AtomicU64>` so the coordinator can read these without any
+/// channel overhead — critical because under saturation (when these
+/// counters matter most) channels may themselves be full.
+#[derive(Debug, Clone)]
+pub struct TimerStats {
+    /// Total fire events successfully dispatched to workers.
+    pub dispatched: Arc<AtomicU64>,
+    /// Total fire events dropped due to backpressure (channel full).
+    pub dropped: Arc<AtomicU64>,
+}
+
+impl Default for TimerStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TimerStats {
+    pub fn new() -> Self {
+        Self {
+            dispatched: Arc::new(AtomicU64::new(0)),
+            dropped: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
 
 /// Handle for the coordinator to communicate with the timer thread.
 pub struct TimerThreadHandle {
     pub command_tx: flume::Sender<TimerCommand>,
     pub thread: Option<std::thread::JoinHandle<()>>,
+    /// Shared atomic counters — coordinator reads these each tick.
+    pub stats: TimerStats,
 }
 
 /// Default capacity for bounded fire channels (timer → I/O worker).
@@ -35,11 +67,10 @@ pub fn timer_loop(
     mut schedulers: Vec<Box<dyn RequestScheduler>>,
     fire_txs: Vec<flume::Sender<ScheduledRequest>>,
     cmd_rx: flume::Receiver<TimerCommand>,
+    stats: TimerStats,
 ) {
     let num_workers = schedulers.len();
     let mut heap: BinaryHeap<Reverse<(Instant, usize)>> = BinaryHeap::new();
-    let mut total_dispatched: u64 = 0;
-    let mut total_dropped: u64 = 0;
 
     tracing::info!(num_workers, "timer thread starting, seeding heap");
 
@@ -49,7 +80,10 @@ pub fn timer_loop(
             heap.push(Reverse((t, i)));
             tracing::trace!(worker = i, "seeded heap with first event");
         } else {
-            tracing::debug!(worker = i, "scheduler returned None on seed — already exhausted");
+            tracing::debug!(
+                worker = i,
+                "scheduler returned None on seed — already exhausted"
+            );
         }
     }
 
@@ -82,7 +116,13 @@ pub fn timer_loop(
                     }
                 }
                 TimerCommand::Stop => {
-                    tracing::info!(total_dispatched, total_dropped, "stop command received, shutting down");
+                    let total_dispatched = stats.dispatched.load(Ordering::Relaxed);
+                    let total_dropped = stats.dropped.load(Ordering::Relaxed);
+                    tracing::info!(
+                        total_dispatched,
+                        total_dropped,
+                        "stop command received, shutting down"
+                    );
                     // Use try_send for Stop to avoid deadlock if channel is full
                     // (e.g., backpressure scenario). Workers also exit when the
                     // sender is dropped, so dropping fire_txs guarantees shutdown.
@@ -96,7 +136,13 @@ pub fn timer_loop(
 
         // Get next event
         let Some(Reverse((intended_time, worker_id))) = heap.pop() else {
-            tracing::info!(total_dispatched, total_dropped, "heap empty — all schedulers exhausted");
+            let total_dispatched = stats.dispatched.load(Ordering::Relaxed);
+            let total_dropped = stats.dropped.load(Ordering::Relaxed);
+            tracing::info!(
+                total_dispatched,
+                total_dropped,
+                "heap empty — all schedulers exhausted"
+            );
             break;
         };
 
@@ -106,22 +152,30 @@ pub fn timer_loop(
         // Dispatch to worker via bounded channel
         match fire_txs[worker_id].try_send(ScheduledRequest::Fire(intended_time)) {
             Ok(()) => {
-                total_dispatched += 1;
-                if total_dispatched % 1000 == 0 {
-                    tracing::debug!(total_dispatched, total_dropped, heap_size = heap.len(), "dispatch progress");
+                let count = stats.dispatched.fetch_add(1, Ordering::Relaxed) + 1;
+                if count % 1000 == 0 {
+                    tracing::debug!(
+                        total_dispatched = count,
+                        total_dropped = stats.dropped.load(Ordering::Relaxed),
+                        heap_size = heap.len(),
+                        "dispatch progress"
+                    );
                 }
             }
             Err(flume::TrySendError::Full(_)) => {
-                total_dropped += 1;
+                let dropped = stats.dropped.fetch_add(1, Ordering::Relaxed) + 1;
                 tracing::warn!(
                     worker = worker_id,
-                    total_dropped,
+                    total_dropped = dropped,
                     "backpressure: request dropped at {:?}",
                     intended_time
                 );
             }
             Err(flume::TrySendError::Disconnected(_)) => {
-                tracing::warn!(worker = worker_id, "worker channel disconnected, skipping scheduler");
+                tracing::warn!(
+                    worker = worker_id,
+                    "worker channel disconnected, skipping scheduler"
+                );
                 continue;
             }
         }

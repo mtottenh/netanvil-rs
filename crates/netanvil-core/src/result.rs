@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use netanvil_types::SaturationInfo;
 use serde::Serialize;
 
 /// Final test results returned after a load test completes.
@@ -22,6 +23,8 @@ pub struct TestResult {
     pub latency_max: Duration,
     pub request_rate: f64,
     pub error_rate: f64,
+    /// Client/server saturation assessment over the entire test.
+    pub saturation: SaturationInfo,
 }
 
 fn ser_duration_secs<S: serde::Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {

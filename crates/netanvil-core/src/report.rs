@@ -36,6 +36,48 @@ impl fmt::Display for Report<'_> {
         writeln!(f, "    p90:           {:>10.2?}", r.latency_p90)?;
         writeln!(f, "    p99:           {:>10.2?}", r.latency_p99)?;
         writeln!(f, "    max:           {:>10.2?}", r.latency_max)?;
+
+        // Show saturation info if any signals were detected
+        let s = &r.saturation;
+        if s.backpressure_drops > 0
+            || s.scheduling_delay_mean_ms > 1.0
+            || s.delayed_request_ratio > 0.01
+        {
+            writeln!(f)?;
+            writeln!(f, "  Client saturation:")?;
+            if s.backpressure_drops > 0 {
+                writeln!(
+                    f,
+                    "    Backpressure:  {:>10} dropped ({:.1}%)",
+                    s.backpressure_drops,
+                    s.backpressure_ratio * 100.0
+                )?;
+            }
+            writeln!(
+                f,
+                "    Sched delay:   {:>10.2}ms mean, {:.2}ms max",
+                s.scheduling_delay_mean_ms, s.scheduling_delay_max_ms
+            )?;
+            writeln!(
+                f,
+                "    Delayed (>1ms):{:>10.1}% of requests",
+                s.delayed_request_ratio * 100.0
+            )?;
+            use netanvil_types::SaturationAssessment;
+            match s.assessment {
+                SaturationAssessment::ClientSaturated => {
+                    writeln!(
+                        f,
+                        "    Assessment:    CLIENT SATURATED — add more cores or nodes"
+                    )?;
+                }
+                SaturationAssessment::BothSaturated => {
+                    writeln!(f, "    Assessment:    CLIENT+SERVER SATURATED")?;
+                }
+                _ => {}
+            }
+        }
+
         write!(f, "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}")
     }
 }
@@ -64,7 +106,17 @@ impl fmt::Display for ProgressLine<'_> {
             p99 = p99_ms,
             total = u.total_requests,
             errors = u.total_errors,
-        )
+        )?;
+
+        // Show saturation warning inline when detected
+        use netanvil_types::SaturationAssessment;
+        match u.saturation.assessment {
+            SaturationAssessment::ClientSaturated => write!(f, "  [CLIENT SATURATED]")?,
+            SaturationAssessment::ServerSaturated => write!(f, "  [SERVER SATURATED]")?,
+            SaturationAssessment::BothSaturated => write!(f, "  [CLIENT+SERVER SATURATED]")?,
+            SaturationAssessment::Healthy => {}
+        }
+        Ok(())
     }
 }
 

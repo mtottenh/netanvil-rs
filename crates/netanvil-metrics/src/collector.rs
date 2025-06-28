@@ -20,6 +20,11 @@ pub struct HdrMetricsCollector {
     /// HTTP status codes >= this threshold count as errors.
     /// 0 means only transport errors count (error field set).
     error_status_threshold: u16,
+    // Scheduling delay tracking for saturation detection.
+    // These are per-window, reset on snapshot().
+    scheduling_delay_sum_ns: Cell<u64>,
+    scheduling_delay_max_ns: Cell<u64>,
+    scheduling_delay_count_over_1ms: Cell<u64>,
 }
 
 impl HdrMetricsCollector {
@@ -40,6 +45,9 @@ impl HdrMetricsCollector {
             bytes_received: Cell::new(0),
             window_start: Cell::new(Instant::now()),
             error_status_threshold,
+            scheduling_delay_sum_ns: Cell::new(0),
+            scheduling_delay_max_ns: Cell::new(0),
+            scheduling_delay_count_over_1ms: Cell::new(0),
         }
     }
 }
@@ -53,7 +61,7 @@ impl MetricsCollector for HdrMetricsCollector {
             || (self.error_status_threshold > 0
                 && result
                     .status
-                    .map_or(false, |s| s >= self.error_status_threshold));
+                    .is_some_and(|s| s >= self.error_status_threshold));
 
         if is_error {
             self.total_errors.set(self.total_errors.get() + 1);
@@ -66,15 +74,29 @@ impl MetricsCollector for HdrMetricsCollector {
         let latency_ns = result.timing.total.as_nanos() as u64;
         let _ = self.histogram.borrow_mut().record(latency_ns.max(1));
 
+        // Track scheduling delay for saturation detection.
+        let queue_delay = result
+            .actual_time
+            .saturating_duration_since(result.intended_time);
+        let delay_ns = queue_delay.as_nanos() as u64;
+
+        self.scheduling_delay_sum_ns
+            .set(self.scheduling_delay_sum_ns.get() + delay_ns);
+        if delay_ns > self.scheduling_delay_max_ns.get() {
+            self.scheduling_delay_max_ns.set(delay_ns);
+        }
+        if delay_ns > 1_000_000 {
+            // > 1ms
+            self.scheduling_delay_count_over_1ms
+                .set(self.scheduling_delay_count_over_1ms.get() + 1);
+        }
+
         // Coordinated omission correction: if the request was delayed
         // (actual_time significantly after intended_time), also record
         // the corrected latency so the histogram reflects what a user
         // at the intended time would have experienced.
-        let queue_delay = result
-            .actual_time
-            .saturating_duration_since(result.intended_time);
         if queue_delay.as_micros() > 100 {
-            let corrected_ns = latency_ns + queue_delay.as_nanos() as u64;
+            let corrected_ns = latency_ns + delay_ns;
             let _ = self.histogram.borrow_mut().record(corrected_ns.max(1));
         }
     }
@@ -92,6 +114,9 @@ impl MetricsCollector for HdrMetricsCollector {
             bytes_received: self.bytes_received.get(),
             window_start: self.window_start.get(),
             window_end: now,
+            scheduling_delay_sum_ns: self.scheduling_delay_sum_ns.get(),
+            scheduling_delay_max_ns: self.scheduling_delay_max_ns.get(),
+            scheduling_delay_count_over_1ms: self.scheduling_delay_count_over_1ms.get(),
         };
 
         // Reset for next window
@@ -102,6 +127,9 @@ impl MetricsCollector for HdrMetricsCollector {
         self.bytes_sent.set(0);
         self.bytes_received.set(0);
         self.window_start.set(now);
+        self.scheduling_delay_sum_ns.set(0);
+        self.scheduling_delay_max_ns.set(0);
+        self.scheduling_delay_count_over_1ms.set(0);
 
         snapshot
     }
@@ -110,7 +138,7 @@ impl MetricsCollector for HdrMetricsCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use netanvil_types::{TimingBreakdown, ExecutionError};
+    use netanvil_types::{ExecutionError, TimingBreakdown};
     use std::time::Duration;
 
     fn make_result(latency: Duration, error: Option<ExecutionError>) -> ExecutionResult {
@@ -123,7 +151,11 @@ mod tests {
                 total: latency,
                 ..Default::default()
             },
-            status: if error.is_none() { Some(200) } else { Some(500) },
+            status: if error.is_none() {
+                Some(200)
+            } else {
+                Some(500)
+            },
             response_size: 1024,
             error,
         }

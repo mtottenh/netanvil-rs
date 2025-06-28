@@ -19,6 +19,10 @@ pub struct AggregateMetrics {
     window_start: Option<Instant>,
     window_end: Option<Instant>,
     source_count: usize,
+    // Scheduling delay aggregates (composable: sum/max/sum)
+    scheduling_delay_sum_ns: u64,
+    scheduling_delay_max_ns: u64,
+    scheduling_delay_count_over_1ms: u64,
 }
 
 impl AggregateMetrics {
@@ -33,9 +37,20 @@ impl AggregateMetrics {
             window_start: None,
             window_end: None,
             source_count: 0,
+            scheduling_delay_sum_ns: 0,
+            scheduling_delay_max_ns: 0,
+            scheduling_delay_count_over_1ms: 0,
         }
     }
+}
 
+impl Default for AggregateMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AggregateMetrics {
     /// Merge a per-core snapshot into this aggregate.
     pub fn merge(&mut self, snapshot: &MetricsSnapshot) {
         if let Ok(hist) = decode_histogram(&snapshot.latency_histogram_bytes) {
@@ -57,6 +72,13 @@ impl AggregateMetrics {
         });
 
         self.source_count += 1;
+
+        // Scheduling delay: sum sums, max maxes, count sums
+        self.scheduling_delay_sum_ns += snapshot.scheduling_delay_sum_ns;
+        self.scheduling_delay_max_ns = self
+            .scheduling_delay_max_ns
+            .max(snapshot.scheduling_delay_max_ns);
+        self.scheduling_delay_count_over_1ms += snapshot.scheduling_delay_count_over_1ms;
     }
 
     /// Reset for the next aggregation window.
@@ -69,6 +91,9 @@ impl AggregateMetrics {
         self.window_start = None;
         self.window_end = None;
         self.source_count = 0;
+        self.scheduling_delay_sum_ns = 0;
+        self.scheduling_delay_max_ns = 0;
+        self.scheduling_delay_count_over_1ms = 0;
     }
 
     /// Compute derived metrics for the RateController.
@@ -113,6 +138,18 @@ impl AggregateMetrics {
     pub fn source_count(&self) -> usize {
         self.source_count
     }
+
+    pub fn scheduling_delay_sum_ns(&self) -> u64 {
+        self.scheduling_delay_sum_ns
+    }
+
+    pub fn scheduling_delay_max_ns(&self) -> u64 {
+        self.scheduling_delay_max_ns
+    }
+
+    pub fn scheduling_delay_count_over_1ms(&self) -> u64 {
+        self.scheduling_delay_count_over_1ms
+    }
 }
 
 #[cfg(test)]
@@ -121,8 +158,7 @@ mod tests {
     use crate::encoding::encode_histogram;
 
     fn make_snapshot(latencies_ms: &[u64], errors: u64) -> MetricsSnapshot {
-        let mut hist =
-            Histogram::<u64>::new_with_bounds(1, 60_000_000_000, 3).unwrap();
+        let mut hist = Histogram::<u64>::new_with_bounds(1, 60_000_000_000, 3).unwrap();
         for &lat_ms in latencies_ms {
             hist.record(lat_ms * 1_000_000).unwrap();
         }
@@ -136,6 +172,9 @@ mod tests {
             bytes_received: latencies_ms.len() as u64 * 1024,
             window_start: now,
             window_end: now + Duration::from_secs(1),
+            scheduling_delay_sum_ns: 0,
+            scheduling_delay_max_ns: 0,
+            scheduling_delay_count_over_1ms: 0,
         }
     }
 

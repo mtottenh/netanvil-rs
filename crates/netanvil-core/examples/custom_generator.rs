@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use netanvil_core::TestBuilder;
 use netanvil_http::HttpExecutor;
-use netanvil_types::{RateConfig, RequestContext, RequestGenerator, RequestSpec, TestConfig};
+use netanvil_types::{HttpRequestSpec, RateConfig, RequestContext, RequestGenerator, TestConfig};
 
 // ---------------------------------------------------------------------------
 // Custom generator: simulates an API client making varied POST requests
@@ -65,7 +65,9 @@ impl ApiWorkloadGenerator {
 }
 
 impl RequestGenerator for ApiWorkloadGenerator {
-    fn generate(&mut self, ctx: &RequestContext) -> RequestSpec {
+    type Spec = HttpRequestSpec;
+
+    fn generate(&mut self, ctx: &RequestContext) -> HttpRequestSpec {
         let user_id = self.user_id_base + (self.counter % 1000);
         let request_num = self.counter;
         self.counter += 1;
@@ -84,7 +86,7 @@ impl RequestGenerator for ApiWorkloadGenerator {
             ctx.intended_time.elapsed().as_nanos(),
         );
 
-        RequestSpec {
+        HttpRequestSpec {
             method: http::Method::POST,
             url,
             headers: vec![
@@ -148,7 +150,7 @@ fn main() {
     )
     .generator_factory(move |core_id| {
         Box::new(ApiWorkloadGenerator::new(target_url.clone(), core_id))
-            as Box<dyn RequestGenerator>
+            as Box<dyn RequestGenerator<Spec = HttpRequestSpec>>
     })
     .on_progress(|update| {
         eprint!(

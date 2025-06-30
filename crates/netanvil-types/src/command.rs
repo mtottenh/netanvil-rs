@@ -6,7 +6,7 @@ pub enum WorkerCommand {
     /// Replace the target URL list mid-test.
     UpdateTargets(Vec<String>),
     /// Replace the header list mid-test.
-    UpdateHeaders(Vec<(String, String)>),
+    UpdateMetadata(Vec<(String, String)>),
     /// Gracefully stop the worker.
     Stop,
 }
@@ -23,7 +23,7 @@ pub enum TimerCommand {
     /// Forward target URL updates to I/O workers.
     UpdateTargets(Vec<String>),
     /// Forward header updates to I/O workers.
-    UpdateHeaders(Vec<(String, String)>),
+    UpdateMetadata(Vec<(String, String)>),
     /// Gracefully stop all I/O workers and the timer thread.
     Stop,
 }
@@ -39,7 +39,7 @@ pub enum ScheduledRequest {
     /// Replace the target URL list.
     UpdateTargets(Vec<String>),
     /// Replace the header list.
-    UpdateHeaders(Vec<(String, String)>),
+    UpdateMetadata(Vec<(String, String)>),
     /// Gracefully stop this worker.
     Stop,
 }

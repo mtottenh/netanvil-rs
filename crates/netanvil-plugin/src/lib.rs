@@ -19,7 +19,7 @@
 //! # Shared types
 //!
 //! The `types` and `error` modules are public so that Lua crates can reuse
-//! `PluginRequestContext`, `PluginRequestSpec`, and `PluginError`.
+//! `PluginRequestContext`, `PluginHttpRequestSpec`, and `PluginError`.
 
 pub mod error;
 pub mod hybrid;

@@ -14,8 +14,8 @@ use netanvil_core::timer_thread::{self, FIRE_CHANNEL_CAPACITY};
 use netanvil_core::{ConstantRateScheduler, NoopTransformer, SimpleGenerator};
 use netanvil_metrics::HdrMetricsCollector;
 use netanvil_types::{
-    ExecutionResult, MetricsSnapshot, RequestContext, RequestExecutor, RequestScheduler,
-    RequestSpec, ScheduledRequest, TimerCommand, TimingBreakdown,
+    ExecutionResult, HttpRequestSpec, MetricsSnapshot, RequestContext, RequestExecutor,
+    RequestScheduler, ScheduledRequest, TimerCommand, TimingBreakdown,
 };
 
 // ---------------------------------------------------------------------------
@@ -35,7 +35,9 @@ impl MockExecutor {
 }
 
 impl RequestExecutor for MockExecutor {
-    async fn execute(&self, _spec: &RequestSpec, context: &RequestContext) -> ExecutionResult {
+    type Spec = HttpRequestSpec;
+
+    async fn execute(&self, _spec: &HttpRequestSpec, context: &RequestContext) -> ExecutionResult {
         self.call_count.set(self.call_count.get() + 1);
         ExecutionResult {
             request_id: context.request_id,
@@ -357,7 +359,13 @@ fn timer_plus_workers_coordinated_omission_tracking() {
     }
 
     impl RequestExecutor for ContextCapture {
-        async fn execute(&self, _spec: &RequestSpec, context: &RequestContext) -> ExecutionResult {
+        type Spec = HttpRequestSpec;
+
+        async fn execute(
+            &self,
+            _spec: &HttpRequestSpec,
+            context: &RequestContext,
+        ) -> ExecutionResult {
             self.contexts
                 .borrow_mut()
                 .push((context.intended_time, context.actual_time));

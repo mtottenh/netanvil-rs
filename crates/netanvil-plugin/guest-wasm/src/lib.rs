@@ -1,29 +1,37 @@
 //! WASM guest module implementing RequestGenerator.
 //!
 //! This is compiled to wasm32-wasip1 and loaded by WasmGenerator at runtime.
-//! Communication with the host uses JSON serialization over linear memory.
 //!
-//! Protocol:
-//! 1. Host writes JSON RequestContext to guest memory at the input buffer
-//! 2. Host calls `generate(input_ptr, input_len)` -> output_len
-//! 3. Host reads JSON RequestSpec from guest memory at the output buffer
+//! ## Binary protocol
+//!
+//! Context is received as a 24-byte `#[repr(C)]` struct (`RawContext`) — the
+//! host writes it directly into WASM linear memory, and the guest reads it
+//! via pointer cast (zero deserialization).
+//!
+//! The spec output is encoded with `postcard` (compact serde binary format),
+//! which the host reads directly from linear memory without intermediate
+//! allocation.
 //!
 //! The guest maintains internal state (counter, targets) across calls.
 
 use serde::{Deserialize, Serialize};
 
-/// Mirrors netanvil_types::RequestContext (minus Instant fields which aren't serializable)
-#[derive(Deserialize)]
-struct RequestContext {
+/// Fixed-layout context received from the host.
+/// Must match the host's `RawContext` layout exactly.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawContext {
     request_id: u64,
-    core_id: usize,
-    is_sampled: bool,
-    session_id: Option<u64>,
+    core_id: u32,
+    flags: u8,
+    _pad: [u8; 3],
+    session_id: u64,
 }
+const _: () = assert!(core::mem::size_of::<RawContext>() == 24);
 
-/// Mirrors netanvil_types::RequestSpec
-#[derive(Serialize)]
-struct RequestSpec {
+/// Mirrors netanvil_types::HttpRequestSpec (serializable via postcard).
+#[derive(Serialize, Deserialize)]
+struct HttpRequestSpec {
     method: String,
     url: String,
     headers: Vec<(String, String)>,
@@ -43,19 +51,19 @@ static mut INITIALIZED: bool = false;
 const INPUT_BUF_SIZE: usize = 65536;
 static mut INPUT_BUF: [u8; INPUT_BUF_SIZE] = [0u8; INPUT_BUF_SIZE];
 
-/// Returns pointer to the input buffer where the host should write JSON.
+/// Returns pointer to the input buffer where the host writes data.
 #[no_mangle]
 pub extern "C" fn get_input_buf_ptr() -> *mut u8 {
     unsafe { INPUT_BUF.as_mut_ptr() }
 }
 
-/// Initialize the generator with a JSON array of target URLs.
-/// Host writes JSON to input buffer, then calls this with the length.
+/// Initialize the generator with a postcard-encoded array of target URLs.
+/// Host writes encoded data to input buffer, then calls this with the length.
 #[no_mangle]
 pub extern "C" fn init(input_len: u32) -> u32 {
     unsafe {
         let input = &INPUT_BUF[..input_len as usize];
-        match serde_json::from_slice::<Vec<String>>(input) {
+        match postcard::from_bytes::<Vec<String>>(input) {
             Ok(targets) => {
                 TARGETS = targets;
                 COUNTER = 0;
@@ -67,10 +75,10 @@ pub extern "C" fn init(input_len: u32) -> u32 {
     }
 }
 
-/// Generate a request. Host writes JSON RequestContext to input buffer,
-/// calls this function, then reads the output.
+/// Generate a request. Host writes 24-byte RawContext to input buffer,
+/// calls this function, then reads postcard output.
 ///
-/// Returns: length of JSON output (read from get_output_buf_ptr)
+/// Returns: length of postcard output (read from get_output_buf_ptr)
 #[no_mangle]
 pub extern "C" fn generate(input_len: u32) -> u32 {
     unsafe {
@@ -78,36 +86,39 @@ pub extern "C" fn generate(input_len: u32) -> u32 {
             return 0;
         }
 
-        let input = &INPUT_BUF[..input_len as usize];
-        let ctx: RequestContext = match serde_json::from_slice(input) {
-            Ok(c) => c,
-            Err(_) => return 0,
-        };
+        // Read binary context directly (zero deserialization).
+        if (input_len as usize) < core::mem::size_of::<RawContext>() {
+            return 0;
+        }
+        let raw = &*(INPUT_BUF.as_ptr() as *const RawContext);
+        let request_id = raw.request_id;
+        let core_id = raw.core_id;
 
         let target_idx = (COUNTER as usize) % TARGETS.len();
         let url = format!(
             "{}?seq={}&core={}",
-            TARGETS[target_idx], COUNTER, ctx.core_id
+            TARGETS[target_idx], COUNTER, core_id
         );
 
         let body = format!(
             r#"{{"request_id":{},"seq":{},"core_id":{}}}"#,
-            ctx.request_id, COUNTER, ctx.core_id
+            request_id, COUNTER, core_id
         );
 
         COUNTER += 1;
 
-        let spec = RequestSpec {
+        let spec = HttpRequestSpec {
             method: "GET".to_string(),
             url,
             headers: vec![
                 ("Content-Type".to_string(), "application/json".to_string()),
-                ("X-Request-ID".to_string(), format!("{}", ctx.request_id)),
+                ("X-Request-ID".to_string(), format!("{}", request_id)),
             ],
             body: Some(body.into_bytes()),
         };
 
-        OUTPUT_BUF = serde_json::to_vec(&spec).unwrap_or_default();
+        // Encode with postcard (was: serde_json::to_vec).
+        OUTPUT_BUF = postcard::to_allocvec(&spec).unwrap_or_default();
         OUTPUT_BUF.len() as u32
     }
 }
@@ -118,12 +129,12 @@ pub extern "C" fn get_output_buf_ptr() -> *const u8 {
     unsafe { OUTPUT_BUF.as_ptr() }
 }
 
-/// Update targets mid-test. Same protocol as init.
+/// Update targets mid-test. Receives postcard-encoded target list.
 #[no_mangle]
 pub extern "C" fn update_targets(input_len: u32) -> u32 {
     unsafe {
         let input = &INPUT_BUF[..input_len as usize];
-        match serde_json::from_slice::<Vec<String>>(input) {
+        match postcard::from_bytes::<Vec<String>>(input) {
             Ok(targets) if !targets.is_empty() => {
                 TARGETS = targets;
                 COUNTER = 0;

@@ -19,12 +19,19 @@ pub type SignalSourceFn = Box<dyn FnMut() -> Vec<(String, f64)>>;
 /// A closure invoked each coordinator tick with live progress.
 pub type ProgressCallback = Box<dyn FnMut(&coordinator::ProgressUpdate)>;
 
-/// A factory closure that creates a [`netanvil_types::RequestGenerator`] per core.
-pub type GeneratorFactory = Box<dyn Fn(usize) -> Box<dyn netanvil_types::RequestGenerator> + Send>;
+/// A factory closure that creates a [`netanvil_types::RequestGenerator`] per core (generic).
+pub type GenericGeneratorFactory<S> =
+    Box<dyn Fn(usize) -> Box<dyn netanvil_types::RequestGenerator<Spec = S>> + Send>;
 
-/// A factory closure that creates a [`netanvil_types::RequestTransformer`] per core.
-pub type TransformerFactory =
-    Box<dyn Fn(usize) -> Box<dyn netanvil_types::RequestTransformer> + Send>;
+/// A factory closure that creates a [`netanvil_types::RequestTransformer`] per core (generic).
+pub type GenericTransformerFactory<S> =
+    Box<dyn Fn(usize) -> Box<dyn netanvil_types::RequestTransformer<Spec = S>> + Send>;
+
+/// HTTP-specific generator factory (backward compatible alias).
+pub type GeneratorFactory = GenericGeneratorFactory<netanvil_types::HttpRequestSpec>;
+
+/// HTTP-specific transformer factory (backward compatible alias).
+pub type TransformerFactory = GenericTransformerFactory<netanvil_types::HttpRequestSpec>;
 
 pub use controller::{
     AutotuneParams, AutotuningPidController, CompositePidController, PidGainValues,
@@ -32,7 +39,9 @@ pub use controller::{
 };
 pub use coordinator::Coordinator;
 pub use coordinator::ProgressUpdate;
-pub use engine::{run_test, run_test_with_api, run_test_with_progress, TestBuilder};
+pub use engine::{
+    run_test, run_test_with_api, run_test_with_progress, GenericTestBuilder, TestBuilder,
+};
 pub use generator::SimpleGenerator;
 pub use handle::IoWorkerHandle;
 pub use io_worker::{io_worker_loop, IoWorkerConfig};

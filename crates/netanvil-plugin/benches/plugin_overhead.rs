@@ -61,7 +61,9 @@ impl NativeGenerator {
 }
 
 impl RequestGenerator for NativeGenerator {
-    fn generate(&mut self, ctx: &RequestContext) -> netanvil_types::RequestSpec {
+    type Spec = netanvil_types::HttpRequestSpec;
+
+    fn generate(&mut self, ctx: &RequestContext) -> netanvil_types::HttpRequestSpec {
         let idx = (self.counter as usize) % self.targets.len();
         let url = format!(
             "{}?seq={}&core={}",
@@ -72,7 +74,7 @@ impl RequestGenerator for NativeGenerator {
             ctx.request_id, self.counter, ctx.core_id
         );
         self.counter += 1;
-        netanvil_types::RequestSpec {
+        netanvil_types::HttpRequestSpec {
             method: http::Method::GET,
             url,
             headers: vec![

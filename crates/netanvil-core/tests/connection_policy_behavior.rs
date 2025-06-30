@@ -5,7 +5,7 @@
 
 use netanvil_core::{ConnectionPolicyTransformer, NoopTransformer};
 use netanvil_types::{
-    ConnectionPolicy, CountDistribution, RequestContext, RequestSpec, RequestTransformer,
+    ConnectionPolicy, CountDistribution, HttpRequestSpec, RequestContext, RequestTransformer,
 };
 use std::time::Instant;
 
@@ -21,8 +21,8 @@ fn make_context() -> RequestContext {
     }
 }
 
-fn make_spec() -> RequestSpec {
-    RequestSpec {
+fn make_spec() -> HttpRequestSpec {
+    HttpRequestSpec {
         method: http::Method::GET,
         url: "http://test.local/".into(),
         headers: vec![],
@@ -30,7 +30,7 @@ fn make_spec() -> RequestSpec {
     }
 }
 
-fn has_connection_close(spec: &RequestSpec) -> bool {
+fn has_connection_close(spec: &HttpRequestSpec) -> bool {
     spec.headers
         .iter()
         .any(|(k, v)| k.eq_ignore_ascii_case("connection") && v.eq_ignore_ascii_case("close"))
@@ -279,7 +279,7 @@ fn connection_policy_preserves_inner_transformer_headers() {
 }
 
 #[test]
-fn connection_policy_forwards_update_headers_to_inner() {
+fn connection_policy_forwards_update_metadata_to_inner() {
     use netanvil_core::HeaderTransformer;
 
     let inner = Box::new(HeaderTransformer::new(vec![(
@@ -289,7 +289,7 @@ fn connection_policy_forwards_update_headers_to_inner() {
 
     let transformer = ConnectionPolicyTransformer::new(inner, ConnectionPolicy::AlwaysNew);
 
-    transformer.update_headers(vec![("X-New".into(), "updated".into())]);
+    transformer.update_metadata(vec![("X-New".into(), "updated".into())]);
 
     let ctx = make_context();
     let spec = transformer.transform(make_spec(), &ctx);

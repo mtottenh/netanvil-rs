@@ -40,8 +40,8 @@ pub async fn io_worker_loop<G, T, E, M>(
     metrics: Rc<M>,
 ) where
     G: RequestGenerator,
-    T: RequestTransformer + 'static,
-    E: RequestExecutor + 'static,
+    T: RequestTransformer<Spec = G::Spec> + 'static,
+    E: RequestExecutor<Spec = G::Spec> + 'static,
     M: MetricsCollector + 'static,
 {
     let IoWorkerConfig {
@@ -163,8 +163,8 @@ fn handle_message<G, T, E, M>(
 ) -> bool
 where
     G: RequestGenerator,
-    T: RequestTransformer + 'static,
-    E: RequestExecutor + 'static,
+    T: RequestTransformer<Spec = G::Spec> + 'static,
+    E: RequestExecutor<Spec = G::Spec> + 'static,
     M: MetricsCollector + 'static,
 {
     match msg {
@@ -196,8 +196,8 @@ where
             generator.update_targets(targets);
             true
         }
-        ScheduledRequest::UpdateHeaders(headers) => {
-            transformer.update_headers(headers);
+        ScheduledRequest::UpdateMetadata(headers) => {
+            transformer.update_metadata(headers);
             true
         }
         ScheduledRequest::Stop => false,

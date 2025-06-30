@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use netanvil_core::run_test;
 use netanvil_types::{
-    ConnectionConfig, ExecutionResult, RateConfig, RequestContext, RequestExecutor, RequestSpec,
-    TestConfig, TimingBreakdown,
+    ConnectionConfig, ExecutionResult, HttpRequestSpec, RateConfig, RequestContext,
+    RequestExecutor, TestConfig, TimingBreakdown,
 };
 
 // ---------------------------------------------------------------------------
@@ -27,7 +27,9 @@ impl MockExecutor {
 }
 
 impl RequestExecutor for MockExecutor {
-    async fn execute(&self, _spec: &RequestSpec, context: &RequestContext) -> ExecutionResult {
+    type Spec = HttpRequestSpec;
+
+    async fn execute(&self, _spec: &HttpRequestSpec, context: &RequestContext) -> ExecutionResult {
         if self.latency > Duration::from_millis(1) {
             compio::time::sleep(self.latency).await;
         }
@@ -53,7 +55,9 @@ impl RequestExecutor for MockExecutor {
 struct ErrorExecutor;
 
 impl RequestExecutor for ErrorExecutor {
-    async fn execute(&self, _spec: &RequestSpec, context: &RequestContext) -> ExecutionResult {
+    type Spec = HttpRequestSpec;
+
+    async fn execute(&self, _spec: &HttpRequestSpec, context: &RequestContext) -> ExecutionResult {
         ExecutionResult {
             request_id: context.request_id,
             intended_time: context.intended_time,

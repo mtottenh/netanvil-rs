@@ -23,10 +23,12 @@ pub use metrics::{
     MetricsSnapshot, MetricsSummary, RateDecision, SaturationAssessment, SaturationInfo,
 };
 pub use node::{NodeId, NodeInfo, NodeState};
-pub use request::{ExecutionError, ExecutionResult, RequestContext, RequestSpec, TimingBreakdown};
+pub use request::{
+    ExecutionError, ExecutionResult, HttpRequestSpec, ProtocolSpec, RequestContext, TimingBreakdown,
+};
 pub use traits::{
-    MetricsCollector, RateController, RequestExecutor, RequestGenerator, RequestScheduler,
-    RequestTransformer,
+    HttpGenerator, HttpTransformer, MetricsCollector, RateController, RequestExecutor,
+    RequestGenerator, RequestScheduler, RequestTransformer,
 };
 
 #[cfg(test)]
@@ -53,7 +55,7 @@ mod tests {
 
     #[test]
     fn request_spec_clone() {
-        let spec = RequestSpec {
+        let spec = HttpRequestSpec {
             method: http::Method::POST,
             url: "http://example.com".to_string(),
             headers: vec![("Content-Type".to_string(), "application/json".to_string())],
@@ -108,7 +110,7 @@ mod tests {
     }
 
     // Compile test: other hot-path traits remain !Send (Rc-based sharing on I/O workers).
-    fn _assert_rc_generator_compiles(g: Rc<dyn RequestGenerator>) {
+    fn _assert_rc_generator_compiles(g: Rc<HttpGenerator>) {
         let _ = g;
     }
 

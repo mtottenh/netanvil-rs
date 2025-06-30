@@ -266,7 +266,7 @@ impl Coordinator {
                 TimerCommand::UpdateRate(rps)
             }
             WorkerCommand::UpdateTargets(targets) => TimerCommand::UpdateTargets(targets),
-            WorkerCommand::UpdateHeaders(headers) => TimerCommand::UpdateHeaders(headers),
+            WorkerCommand::UpdateMetadata(headers) => TimerCommand::UpdateMetadata(headers),
             WorkerCommand::Stop => {
                 self.stopped = true;
                 TimerCommand::Stop

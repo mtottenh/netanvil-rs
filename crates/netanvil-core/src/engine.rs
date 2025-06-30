@@ -3,8 +3,8 @@ use std::time::Instant;
 
 use netanvil_metrics::HdrMetricsCollector;
 use netanvil_types::{
-    ConnectionPolicy, RateConfig, RequestExecutor, RequestGenerator, RequestScheduler,
-    RequestTransformer, SchedulerConfig, TestConfig,
+    ConnectionPolicy, RateConfig, RequestExecutor, RequestGenerator,
+    RequestScheduler, RequestTransformer, SchedulerConfig, TestConfig,
 };
 
 use crate::controller::{
@@ -30,7 +30,7 @@ use crate::transformer::{ConnectionPolicyTransformer, HeaderTransformer, NoopTra
 /// For custom generators or transformers, use [`TestBuilder`].
 pub fn run_test<E, F>(config: TestConfig, executor_factory: F) -> netanvil_types::Result<TestResult>
 where
-    E: RequestExecutor + 'static,
+    E: RequestExecutor<Spec = netanvil_types::HttpRequestSpec> + 'static,
     F: Fn() -> E + Send + 'static,
 {
     TestBuilder::new(config, executor_factory).run()
@@ -43,7 +43,7 @@ pub fn run_test_with_progress<E, F, P>(
     on_progress: P,
 ) -> netanvil_types::Result<TestResult>
 where
-    E: RequestExecutor + 'static,
+    E: RequestExecutor<Spec = netanvil_types::HttpRequestSpec> + 'static,
     F: Fn() -> E + Send + 'static,
     P: FnMut(&crate::coordinator::ProgressUpdate) + 'static,
 {
@@ -63,7 +63,7 @@ pub fn run_test_with_api<E, F, P>(
     external_command_rx: flume::Receiver<netanvil_types::WorkerCommand>,
 ) -> netanvil_types::Result<TestResult>
 where
-    E: RequestExecutor + 'static,
+    E: RequestExecutor<Spec = netanvil_types::HttpRequestSpec> + 'static,
     F: Fn() -> E + Send + 'static,
     P: FnMut(&crate::coordinator::ProgressUpdate) + 'static,
 {
@@ -107,9 +107,9 @@ where
 /// struct CacheBustGenerator { base_url: String, counter: u64 }
 ///
 /// impl RequestGenerator for CacheBustGenerator {
-///     fn generate(&mut self, _ctx: &RequestContext) -> RequestSpec {
+///     fn generate(&mut self, _ctx: &RequestContext) -> HttpRequestSpec {
 ///         self.counter += 1;
-///         RequestSpec {
+///         HttpRequestSpec {
 ///             method: http::Method::GET,
 ///             url: format!("{}?_cb={}", self.base_url, self.counter),
 ///             headers: vec![],
@@ -133,7 +133,7 @@ where
 /// ```
 pub struct TestBuilder<E, F>
 where
-    E: RequestExecutor + 'static,
+    E: RequestExecutor<Spec = netanvil_types::HttpRequestSpec> + 'static,
     F: Fn() -> E + Send + 'static,
 {
     config: TestConfig,
@@ -147,7 +147,7 @@ where
 
 impl<E, F> TestBuilder<E, F>
 where
-    E: RequestExecutor + 'static,
+    E: RequestExecutor<Spec = netanvil_types::HttpRequestSpec> + 'static,
     F: Fn() -> E + Send + 'static,
 {
     /// Create a new test builder with the given configuration and executor factory.
@@ -172,7 +172,9 @@ where
     /// If not set, uses `SimpleGenerator` from the config's `targets` and `method`.
     pub fn generator_factory(
         mut self,
-        factory: impl Fn(usize) -> Box<dyn RequestGenerator> + Send + 'static,
+        factory: impl Fn(usize) -> Box<dyn RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
+            + Send
+            + 'static,
     ) -> Self {
         self.generator_factory = Some(Box::new(factory));
         self
@@ -185,7 +187,9 @@ where
     /// is not `KeepAlive`.
     pub fn transformer_factory(
         mut self,
-        factory: impl Fn(usize) -> Box<dyn RequestTransformer> + Send + 'static,
+        factory: impl Fn(usize) -> Box<dyn RequestTransformer<Spec = netanvil_types::HttpRequestSpec>>
+            + Send
+            + 'static,
     ) -> Self {
         self.transformer_factory = Some(Box::new(factory));
         self
@@ -229,14 +233,180 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// GenericTestBuilder: for non-HTTP protocols (TCP, UDP, QUIC, etc.)
+// ---------------------------------------------------------------------------
+
+/// Builder for configuring and running a load test with any protocol.
+///
+/// Unlike [`TestBuilder`] (which provides HTTP-specific defaults), this builder
+/// **requires** generator and transformer factories in the constructor.
+/// Use this for non-HTTP protocols where no default generator exists.
+///
+/// # Example
+///
+/// ```ignore
+/// use netanvil_core::GenericTestBuilder;
+/// use netanvil_tcp::{TcpExecutor, SimpleTcpGenerator, TcpNoopTransformer, TcpFraming};
+///
+/// let gen_factory = Box::new(move |_core_id| {
+///     Box::new(SimpleTcpGenerator::new(targets.clone(), payload.clone(), TcpFraming::Raw, true))
+///         as Box<dyn RequestGenerator<Spec = TcpRequestSpec>>
+/// });
+/// let trans_factory = Box::new(|_| {
+///     Box::new(TcpNoopTransformer) as Box<dyn RequestTransformer<Spec = TcpRequestSpec>>
+/// });
+///
+/// let result = GenericTestBuilder::new(config, || TcpExecutor::new(), gen_factory, trans_factory)
+///     .run()
+///     .unwrap();
+/// ```
+pub struct GenericTestBuilder<E, F>
+where
+    E: RequestExecutor + 'static,
+    F: Fn() -> E + Send + 'static,
+{
+    config: TestConfig,
+    executor_factory: F,
+    generator_factory: crate::GenericGeneratorFactory<E::Spec>,
+    transformer_factory: crate::GenericTransformerFactory<E::Spec>,
+    on_progress: Option<crate::ProgressCallback>,
+    external_command_rx: Option<flume::Receiver<netanvil_types::WorkerCommand>>,
+    pushed_signal_source: Option<crate::SignalSourceFn>,
+}
+
+impl<E, F> GenericTestBuilder<E, F>
+where
+    E: RequestExecutor + 'static,
+    F: Fn() -> E + Send + 'static,
+{
+    /// Create a new generic test builder. Generator and transformer factories are required.
+    pub fn new(
+        config: TestConfig,
+        executor_factory: F,
+        generator_factory: crate::GenericGeneratorFactory<E::Spec>,
+        transformer_factory: crate::GenericTransformerFactory<E::Spec>,
+    ) -> Self {
+        Self {
+            config,
+            executor_factory,
+            generator_factory,
+            transformer_factory,
+            on_progress: None,
+            external_command_rx: None,
+            pushed_signal_source: None,
+        }
+    }
+
+    /// Set a progress callback invoked each coordinator tick (~10-100Hz).
+    pub fn on_progress(
+        mut self,
+        callback: impl FnMut(&crate::coordinator::ProgressUpdate) + 'static,
+    ) -> Self {
+        self.on_progress = Some(Box::new(callback));
+        self
+    }
+
+    /// Set an external command channel for mid-test control (HTTP API, etc.).
+    pub fn external_commands(mut self, rx: flume::Receiver<netanvil_types::WorkerCommand>) -> Self {
+        self.external_command_rx = Some(rx);
+        self
+    }
+
+    /// Set a push-based signal source. Read each coordinator tick.
+    pub fn pushed_signal_source(mut self, f: impl FnMut() -> Vec<(String, f64)> + 'static) -> Self {
+        self.pushed_signal_source = Some(Box::new(f));
+        self
+    }
+
+    /// Build and run the test. Blocks until completion.
+    pub fn run(self) -> netanvil_types::Result<TestResult> {
+        run_test_core(
+            self.config,
+            self.executor_factory,
+            self.generator_factory,
+            self.transformer_factory,
+            self.on_progress,
+            self.external_command_rx,
+            self.pushed_signal_source,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Internal implementation
 // ---------------------------------------------------------------------------
 
+/// HTTP-specific entry point — fills in default generator/transformer, then delegates.
 fn run_test_impl<E, F>(
     config: TestConfig,
     executor_factory: F,
     generator_factory: Option<crate::GeneratorFactory>,
     transformer_factory: Option<crate::TransformerFactory>,
+    on_progress: Option<crate::ProgressCallback>,
+    external_command_rx: Option<flume::Receiver<netanvil_types::WorkerCommand>>,
+    pushed_signal_source: Option<crate::SignalSourceFn>,
+) -> netanvil_types::Result<TestResult>
+where
+    E: RequestExecutor<Spec = netanvil_types::HttpRequestSpec> + 'static,
+    F: Fn() -> E + Send + 'static,
+{
+    // Fill in HTTP-specific defaults for generator
+    let gen_factory: crate::GeneratorFactory = match generator_factory {
+        Some(f) => f,
+        None => {
+            let targets = config.targets.clone();
+            let method_str = config.method.clone();
+            Box::new(move |_core_id| {
+                let method: http::Method = method_str.parse().unwrap_or(http::Method::GET);
+                Box::new(SimpleGenerator::new(targets.clone(), method))
+                    as Box<dyn RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
+            })
+        }
+    };
+
+    // Fill in HTTP-specific defaults for transformer
+    let trans_factory: crate::TransformerFactory = match transformer_factory {
+        Some(f) => f,
+        None => {
+            let headers = config.headers.clone();
+            let conn_policy = config.connections.connection_policy.clone();
+            Box::new(move |_core_id| {
+                let base: Box<dyn RequestTransformer<Spec = netanvil_types::HttpRequestSpec>> =
+                    if headers.is_empty() {
+                        Box::new(NoopTransformer)
+                    } else {
+                        Box::new(HeaderTransformer::new(headers.clone()))
+                    };
+
+                match &conn_policy {
+                    ConnectionPolicy::KeepAlive => base,
+                    policy => Box::new(ConnectionPolicyTransformer::new(base, policy.clone())),
+                }
+            })
+        }
+    };
+
+    run_test_core(
+        config,
+        executor_factory,
+        gen_factory,
+        trans_factory,
+        on_progress,
+        external_command_rx,
+        pushed_signal_source,
+    )
+}
+
+/// Protocol-agnostic engine core. Orchestrates workers, timer, and coordinator.
+///
+/// All factories are required (non-optional). The HTTP-specific `run_test_impl`
+/// fills in defaults before calling this. Non-HTTP protocols (TCP, UDP, QUIC)
+/// call this directly via `GenericTestBuilder`.
+fn run_test_core<E, F>(
+    config: TestConfig,
+    executor_factory: F,
+    generator_factory: crate::GenericGeneratorFactory<E::Spec>,
+    transformer_factory: crate::GenericTransformerFactory<E::Spec>,
     on_progress: Option<crate::ProgressCallback>,
     external_command_rx: Option<flume::Receiver<netanvil_types::WorkerCommand>>,
     pushed_signal_source: Option<crate::SignalSourceFn>,
@@ -301,12 +471,10 @@ where
     // The pointers are valid for the lifetime of all worker threads because
     // we join them before returning.
     let executor_factory_ptr = &executor_factory as *const F as usize;
-    let generator_factory_ptr = &generator_factory
-        as *const Option<Box<dyn Fn(usize) -> Box<dyn RequestGenerator> + Send>>
-        as usize;
-    let transformer_factory_ptr = &transformer_factory
-        as *const Option<Box<dyn Fn(usize) -> Box<dyn RequestTransformer> + Send>>
-        as usize;
+    let generator_factory_ptr =
+        &generator_factory as *const crate::GenericGeneratorFactory<E::Spec> as usize;
+    let transformer_factory_ptr =
+        &transformer_factory as *const crate::GenericTransformerFactory<E::Spec> as usize;
 
     for core_id in 0..num_cores {
         let (metrics_tx, metrics_rx) = flume::unbounded();
@@ -325,45 +493,16 @@ where
                 // SAFETY: pointers valid because parent joins all threads before returning.
                 let executor_factory = unsafe { &*(executor_factory_ptr as *const F) };
                 let generator_factory = unsafe {
-                    &*(generator_factory_ptr
-                        as *const Option<Box<dyn Fn(usize) -> Box<dyn RequestGenerator> + Send>>)
+                    &*(generator_factory_ptr as *const crate::GenericGeneratorFactory<E::Spec>)
                 };
                 let transformer_factory = unsafe {
-                    &*(transformer_factory_ptr
-                        as *const Option<Box<dyn Fn(usize) -> Box<dyn RequestTransformer> + Send>>)
+                    &*(transformer_factory_ptr as *const crate::GenericTransformerFactory<E::Spec>)
                 };
 
                 let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
                 rt.block_on(async {
-                    // Generator: user-supplied or default SimpleGenerator
-                    let generator: Box<dyn RequestGenerator> = match generator_factory {
-                        Some(factory) => factory(core_id),
-                        None => {
-                            let method: http::Method =
-                                config.method.parse().unwrap_or(http::Method::GET);
-                            Box::new(SimpleGenerator::new(config.targets.clone(), method))
-                        }
-                    };
-
-                    // Transformer: user-supplied or default from config
-                    let transformer: Box<dyn RequestTransformer> = match transformer_factory {
-                        Some(factory) => factory(core_id),
-                        None => {
-                            let base: Box<dyn RequestTransformer> = if config.headers.is_empty() {
-                                Box::new(NoopTransformer)
-                            } else {
-                                Box::new(HeaderTransformer::new(config.headers.clone()))
-                            };
-
-                            match &config.connections.connection_policy {
-                                ConnectionPolicy::KeepAlive => base,
-                                policy => {
-                                    Box::new(ConnectionPolicyTransformer::new(base, policy.clone()))
-                                }
-                            }
-                        }
-                    };
-
+                    let generator = generator_factory(core_id);
+                    let transformer = transformer_factory(core_id);
                     let executor = executor_factory();
                     let collector = HdrMetricsCollector::new(config.error_status_threshold);
 

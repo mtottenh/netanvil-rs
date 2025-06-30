@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use netanvil_types::{RequestContext, RequestGenerator, RequestSpec};
+use netanvil_types::{HttpRequestSpec, RequestContext, RequestGenerator};
 
 /// Configuration produced by a plugin at setup time.
 ///
@@ -98,7 +98,9 @@ impl HybridGenerator {
 }
 
 impl RequestGenerator for HybridGenerator {
-    fn generate(&mut self, context: &RequestContext) -> RequestSpec {
+    type Spec = HttpRequestSpec;
+
+    fn generate(&mut self, context: &RequestContext) -> HttpRequestSpec {
         let idx = self.select_pattern();
         let pattern = &self.config.url_patterns[idx].pattern;
         let url = self.expand(pattern, context);
@@ -111,7 +113,7 @@ impl RequestGenerator for HybridGenerator {
 
         self.counter += 1;
 
-        RequestSpec {
+        HttpRequestSpec {
             method: self.method.clone(),
             url,
             headers: self.config.headers.clone(),

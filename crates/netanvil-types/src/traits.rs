@@ -2,11 +2,15 @@ use std::future::Future;
 use std::time::Instant;
 
 use crate::metrics::{MetricsSnapshot, MetricsSummary, RateDecision};
-use crate::request::{ExecutionResult, RequestContext, RequestSpec};
+use crate::request::{ExecutionResult, HttpRequestSpec, ProtocolSpec, RequestContext};
 
 // ---------------------------------------------------------------------------
 // Hot-path traits: per-core, !Send, called at high frequency.
 // No Send/Sync bounds. No supertrait requirements.
+//
+// Generator, Transformer, and Executor are generic over a protocol-specific
+// Spec type via an associated type. For HTTP, Spec = HttpRequestSpec.
+// Future protocols (TCP, UDP, gRPC) define their own spec types.
 // ---------------------------------------------------------------------------
 
 /// Computes when to fire the next request.
@@ -20,11 +24,13 @@ pub trait RequestScheduler: Send {
     fn update_rate(&mut self, rps: f64);
 }
 
-/// Creates request specifications from context.
+/// Creates protocol-specific request specifications from context.
 ///
-/// Implementations: SimpleGenerator, TemplatedGenerator
+/// Implementations: SimpleGenerator, HybridGenerator, WasmGenerator, LuaJitGenerator
 pub trait RequestGenerator {
-    fn generate(&mut self, context: &RequestContext) -> RequestSpec;
+    type Spec: ProtocolSpec;
+
+    fn generate(&mut self, context: &RequestContext) -> Self::Spec;
 
     /// Replace the target URLs mid-test. Default: no-op.
     fn update_targets(&mut self, _targets: Vec<String>) {}
@@ -33,14 +39,17 @@ pub trait RequestGenerator {
 /// Modifies requests before execution.
 ///
 /// Uses `&self` for `transform` (called from Rc-shared context).
-/// Uses `&self` for `update_headers` (interior mutability via RefCell).
+/// Uses `&self` for `update_metadata` (interior mutability via RefCell).
 ///
-/// Implementations: NoopTransformer, HeaderTransformer
+/// Implementations: NoopTransformer, HeaderTransformer, ConnectionPolicyTransformer
 pub trait RequestTransformer {
-    fn transform(&self, spec: RequestSpec, context: &RequestContext) -> RequestSpec;
+    type Spec: ProtocolSpec;
 
-    /// Replace the header list mid-test. Default: no-op.
-    fn update_headers(&self, _headers: Vec<(String, String)>) {}
+    fn transform(&self, spec: Self::Spec, context: &RequestContext) -> Self::Spec;
+
+    /// Replace protocol-specific metadata mid-test.
+    /// For HTTP: headers as key-value pairs. Default: no-op.
+    fn update_metadata(&self, _metadata: Vec<(String, String)>) {}
 }
 
 /// Executes requests against the target system.
@@ -50,9 +59,11 @@ pub trait RequestTransformer {
 ///
 /// Implementations: HttpExecutor (netanvil-http)
 pub trait RequestExecutor {
+    type Spec: ProtocolSpec;
+
     fn execute(
         &self,
-        spec: &RequestSpec,
+        spec: &Self::Spec,
         context: &RequestContext,
     ) -> impl Future<Output = ExecutionResult>;
 }
@@ -82,8 +93,9 @@ impl RequestScheduler for Box<dyn RequestScheduler> {
     }
 }
 
-impl RequestGenerator for Box<dyn RequestGenerator> {
-    fn generate(&mut self, context: &RequestContext) -> RequestSpec {
+impl<G: RequestGenerator + ?Sized> RequestGenerator for Box<G> {
+    type Spec = G::Spec;
+    fn generate(&mut self, context: &RequestContext) -> Self::Spec {
         (**self).generate(context)
     }
     fn update_targets(&mut self, targets: Vec<String>) {
@@ -91,14 +103,25 @@ impl RequestGenerator for Box<dyn RequestGenerator> {
     }
 }
 
-impl RequestTransformer for Box<dyn RequestTransformer> {
-    fn transform(&self, spec: RequestSpec, context: &RequestContext) -> RequestSpec {
+impl<T: RequestTransformer + ?Sized> RequestTransformer for Box<T> {
+    type Spec = T::Spec;
+    fn transform(&self, spec: Self::Spec, context: &RequestContext) -> Self::Spec {
         (**self).transform(spec, context)
     }
-    fn update_headers(&self, headers: Vec<(String, String)>) {
-        (**self).update_headers(headers)
+    fn update_metadata(&self, metadata: Vec<(String, String)>) {
+        (**self).update_metadata(metadata)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Convenience type aliases for HTTP-specific trait objects.
+// ---------------------------------------------------------------------------
+
+/// HTTP request generator (trait object).
+pub type HttpGenerator = dyn RequestGenerator<Spec = HttpRequestSpec>;
+
+/// HTTP request transformer (trait object).
+pub type HttpTransformer = dyn RequestTransformer<Spec = HttpRequestSpec>;
 
 // ---------------------------------------------------------------------------
 // Control-plane trait: runs in coordinator, called at ~10-100Hz.

@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 
 use netanvil_types::{
-    ConnectionPolicy, CountDistribution, RequestContext, RequestSpec, RequestTransformer,
+    ConnectionPolicy, CountDistribution, HttpRequestSpec, RequestContext, RequestTransformer,
 };
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
@@ -11,7 +11,9 @@ use rand_distr::{Distribution, Normal};
 pub struct NoopTransformer;
 
 impl RequestTransformer for NoopTransformer {
-    fn transform(&self, spec: RequestSpec, _context: &RequestContext) -> RequestSpec {
+    type Spec = HttpRequestSpec;
+
+    fn transform(&self, spec: HttpRequestSpec, _context: &RequestContext) -> HttpRequestSpec {
         spec
     }
 }
@@ -19,7 +21,7 @@ impl RequestTransformer for NoopTransformer {
 /// Transformer that adds configured headers to every request.
 ///
 /// Uses `RefCell` for interior mutability so headers can be updated
-/// mid-test via `update_headers(&self, ...)` while the transformer
+/// mid-test via `update_metadata(&self, ...)` while the transformer
 /// is `Rc`-shared with spawned tasks.
 pub struct HeaderTransformer {
     headers: RefCell<Vec<(String, String)>>,
@@ -34,12 +36,14 @@ impl HeaderTransformer {
 }
 
 impl RequestTransformer for HeaderTransformer {
-    fn transform(&self, mut spec: RequestSpec, _context: &RequestContext) -> RequestSpec {
+    type Spec = HttpRequestSpec;
+
+    fn transform(&self, mut spec: HttpRequestSpec, _context: &RequestContext) -> HttpRequestSpec {
         spec.headers.extend(self.headers.borrow().iter().cloned());
         spec
     }
 
-    fn update_headers(&self, headers: Vec<(String, String)>) {
+    fn update_metadata(&self, headers: Vec<(String, String)>) {
         *self.headers.borrow_mut() = headers;
     }
 }
@@ -54,7 +58,7 @@ impl RequestTransformer for HeaderTransformer {
 /// distribution, counts requests, and sends `Connection: close` when the
 /// limit is reached, then resamples for the next "connection".
 pub struct ConnectionPolicyTransformer {
-    inner: Box<dyn RequestTransformer>,
+    inner: Box<dyn RequestTransformer<Spec = HttpRequestSpec>>,
     policy: ConnectionPolicy,
     rng: RefCell<SmallRng>,
     /// Requests sent on the current simulated connection.
@@ -64,7 +68,10 @@ pub struct ConnectionPolicyTransformer {
 }
 
 impl ConnectionPolicyTransformer {
-    pub fn new(inner: Box<dyn RequestTransformer>, policy: ConnectionPolicy) -> Self {
+    pub fn new(
+        inner: Box<dyn RequestTransformer<Spec = HttpRequestSpec>>,
+        policy: ConnectionPolicy,
+    ) -> Self {
         let mut rng = SmallRng::from_entropy();
         // Sample the initial connection lifetime
         let initial_lifetime = match &policy {
@@ -101,7 +108,9 @@ fn sample_count(dist: &CountDistribution, rng: &mut SmallRng) -> u32 {
 }
 
 impl RequestTransformer for ConnectionPolicyTransformer {
-    fn transform(&self, spec: RequestSpec, context: &RequestContext) -> RequestSpec {
+    type Spec = HttpRequestSpec;
+
+    fn transform(&self, spec: HttpRequestSpec, context: &RequestContext) -> HttpRequestSpec {
         // Apply inner transformer first (headers, auth, etc.)
         let mut spec = self.inner.transform(spec, context);
 
@@ -142,7 +151,7 @@ impl RequestTransformer for ConnectionPolicyTransformer {
         spec
     }
 
-    fn update_headers(&self, headers: Vec<(String, String)>) {
-        self.inner.update_headers(headers);
+    fn update_metadata(&self, headers: Vec<(String, String)>) {
+        self.inner.update_metadata(headers);
     }
 }

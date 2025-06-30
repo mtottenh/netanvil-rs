@@ -1,6 +1,6 @@
 //! Serializable mirror types for crossing the plugin boundary.
 //!
-//! These types mirror netanvil_types::RequestContext and RequestSpec but are
+//! These types mirror netanvil_types::RequestContext and HttpRequestSpec but are
 //! fully serializable (no Instant fields). The plugin runtimes convert
 //! between these and the real types at the boundary.
 
@@ -16,18 +16,18 @@ pub struct PluginRequestContext {
     pub session_id: Option<u64>,
 }
 
-/// Serializable version of RequestSpec returned by plugins.
+/// Serializable version of HttpRequestSpec returned by plugins.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginRequestSpec {
+pub struct PluginHttpRequestSpec {
     pub method: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Option<Vec<u8>>,
 }
 
-impl PluginRequestSpec {
-    /// Convert to the real RequestSpec type.
-    pub fn into_request_spec(self) -> netanvil_types::RequestSpec {
+impl PluginHttpRequestSpec {
+    /// Convert to the real HttpRequestSpec type.
+    pub fn into_http_request_spec(self) -> netanvil_types::HttpRequestSpec {
         let method = match self.method.to_uppercase().as_str() {
             "GET" => http::Method::GET,
             "POST" => http::Method::POST,
@@ -38,7 +38,7 @@ impl PluginRequestSpec {
             "OPTIONS" => http::Method::OPTIONS,
             other => http::Method::from_bytes(other.as_bytes()).unwrap_or(http::Method::GET),
         };
-        netanvil_types::RequestSpec {
+        netanvil_types::HttpRequestSpec {
             method,
             url: self.url,
             headers: self.headers,
@@ -55,5 +55,59 @@ impl From<&netanvil_types::RequestContext> for PluginRequestContext {
             is_sampled: ctx.is_sampled,
             session_id: ctx.session_id,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Binary protocol types for zero-copy plugin communication.
+// ---------------------------------------------------------------------------
+
+/// Fixed-layout context for zero-copy passing to WASM plugin runtimes.
+///
+/// Layout is deterministic on all targets (`repr(C)`, explicit padding).
+/// The host writes this directly into WASM linear memory; the guest reads
+/// it via pointer cast. No serialization overhead.
+///
+/// Flags byte: bit 0 = `is_sampled`, bit 1 = `has_session_id`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawContext {
+    pub request_id: u64, // offset 0
+    pub core_id: u32,    // offset 8
+    pub flags: u8,       // offset 12
+    pub _pad: [u8; 3],   // offset 13 — align session_id
+    pub session_id: u64, // offset 16
+}
+// Total: 24 bytes
+
+const _: () = assert!(std::mem::size_of::<RawContext>() == 24);
+
+impl RawContext {
+    pub fn from_context(ctx: &netanvil_types::RequestContext) -> Self {
+        let mut flags = 0u8;
+        if ctx.is_sampled {
+            flags |= 0x01;
+        }
+        let session_id = match ctx.session_id {
+            Some(id) => {
+                flags |= 0x02;
+                id
+            }
+            None => 0,
+        };
+        Self {
+            request_id: ctx.request_id,
+            core_id: ctx.core_id as u32,
+            flags,
+            _pad: [0; 3],
+            session_id,
+        }
+    }
+
+    /// View as raw bytes for direct memory copy.
+    pub fn as_bytes(&self) -> &[u8; 24] {
+        // Safety: RawContext is repr(C) with no uninitialized padding
+        // (_pad is explicitly zeroed in from_context).
+        unsafe { &*(self as *const Self as *const [u8; 24]) }
     }
 }

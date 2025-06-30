@@ -47,8 +47,8 @@ pub fn handle_put_targets(request: tiny_http::Request, command_tx: &flume::Sende
 }
 
 pub fn handle_put_headers(request: tiny_http::Request, command_tx: &flume::Sender<WorkerCommand>) {
-    read_json_then_respond::<UpdateHeadersRequest>(request, |body, req| {
-        let _ = command_tx.send(WorkerCommand::UpdateHeaders(body.headers));
+    read_json_then_respond::<UpdateMetadataRequest>(request, |body, req| {
+        let _ = command_tx.send(WorkerCommand::UpdateMetadata(body.headers));
         respond_json(req, 200, &ApiResponse::success());
     });
 }

@@ -12,7 +12,7 @@ use netanvil_core::io_worker::{io_worker_loop, IoWorkerConfig};
 use netanvil_core::{HeaderTransformer, NoopTransformer, SimpleGenerator};
 use netanvil_metrics::HdrMetricsCollector;
 use netanvil_types::{
-    ExecutionResult, RequestContext, RequestExecutor, RequestSpec, ScheduledRequest,
+    ExecutionResult, HttpRequestSpec, RequestContext, RequestExecutor, ScheduledRequest,
     TimingBreakdown,
 };
 
@@ -33,7 +33,9 @@ impl MockExecutor {
 }
 
 impl RequestExecutor for MockExecutor {
-    async fn execute(&self, _spec: &RequestSpec, context: &RequestContext) -> ExecutionResult {
+    type Spec = HttpRequestSpec;
+
+    async fn execute(&self, _spec: &HttpRequestSpec, context: &RequestContext) -> ExecutionResult {
         self.call_count.set(self.call_count.get() + 1);
         ExecutionResult {
             request_id: context.request_id,
@@ -51,15 +53,15 @@ impl RequestExecutor for MockExecutor {
 }
 
 // ---------------------------------------------------------------------------
-// Capturing executor: records the RequestSpec of each call
+// Capturing executor: records the HttpRequestSpec of each call
 // ---------------------------------------------------------------------------
 
 struct CapturingExecutor {
-    captured: Rc<RefCell<Vec<RequestSpec>>>,
+    captured: Rc<RefCell<Vec<HttpRequestSpec>>>,
 }
 
 impl CapturingExecutor {
-    fn new() -> (Self, Rc<RefCell<Vec<RequestSpec>>>) {
+    fn new() -> (Self, Rc<RefCell<Vec<HttpRequestSpec>>>) {
         let captured = Rc::new(RefCell::new(Vec::new()));
         (
             Self {
@@ -71,7 +73,9 @@ impl CapturingExecutor {
 }
 
 impl RequestExecutor for CapturingExecutor {
-    async fn execute(&self, spec: &RequestSpec, context: &RequestContext) -> ExecutionResult {
+    type Spec = HttpRequestSpec;
+
+    async fn execute(&self, spec: &HttpRequestSpec, context: &RequestContext) -> ExecutionResult {
         self.captured.borrow_mut().push(spec.clone());
         ExecutionResult {
             request_id: context.request_id,
@@ -310,7 +314,7 @@ fn io_worker_handles_target_update() {
     );
 
     // Verify new targets round-robin
-    let new_specs: Vec<&RequestSpec> = specs
+    let new_specs: Vec<&HttpRequestSpec> = specs
         .iter()
         .filter(|s| s.url.contains("new-target.test"))
         .collect();
@@ -326,7 +330,7 @@ fn io_worker_handles_target_update() {
 
 #[test]
 fn io_worker_handles_header_update() {
-    // Verify UpdateHeaders propagates to the transformer.
+    // Verify UpdateMetadata propagates to the transformer.
     let (fire_tx, fire_rx) = flume::bounded::<ScheduledRequest>(256);
     let (metrics_tx, _metrics_rx) = flume::unbounded();
 
@@ -339,7 +343,7 @@ fn io_worker_handles_header_update() {
 
     // Update headers
     fire_tx
-        .send(ScheduledRequest::UpdateHeaders(vec![
+        .send(ScheduledRequest::UpdateMetadata(vec![
             ("X-New-Header".into(), "new-value".into()),
             ("Authorization".into(), "Bearer token123".into()),
         ]))

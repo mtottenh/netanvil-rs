@@ -1,4 +1,4 @@
-use netanvil_types::{RequestContext, RequestGenerator, RequestSpec};
+use netanvil_types::{HttpRequestSpec, RequestContext, RequestGenerator};
 
 /// Simple request generator that round-robins through configured URLs.
 pub struct SimpleGenerator {
@@ -23,10 +23,12 @@ impl SimpleGenerator {
 }
 
 impl RequestGenerator for SimpleGenerator {
-    fn generate(&mut self, _context: &RequestContext) -> RequestSpec {
+    type Spec = HttpRequestSpec;
+
+    fn generate(&mut self, _context: &RequestContext) -> HttpRequestSpec {
         let url = self.targets[self.index % self.targets.len()].clone();
         self.index += 1;
-        RequestSpec {
+        HttpRequestSpec {
             method: self.method.clone(),
             url,
             headers: Vec::new(),

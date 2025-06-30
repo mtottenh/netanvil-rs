@@ -109,10 +109,10 @@ pub fn timer_loop(
                         let _ = ch.send(ScheduledRequest::UpdateTargets(targets.clone()));
                     }
                 }
-                TimerCommand::UpdateHeaders(headers) => {
+                TimerCommand::UpdateMetadata(headers) => {
                     tracing::debug!(count = headers.len(), "forwarding header update to workers");
                     for ch in &fire_txs {
-                        let _ = ch.send(ScheduledRequest::UpdateHeaders(headers.clone()));
+                        let _ = ch.send(ScheduledRequest::UpdateMetadata(headers.clone()));
                     }
                 }
                 TimerCommand::Stop => {

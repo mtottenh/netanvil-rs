@@ -12,7 +12,7 @@
 use rhai::{Dynamic, Engine, Map, Scope, AST};
 
 use crate::error::{PluginError, Result};
-use crate::types::{PluginRequestContext, PluginRequestSpec};
+use crate::types::{PluginHttpRequestSpec, PluginRequestContext};
 
 /// A RequestGenerator backed by a Rhai script.
 ///
@@ -61,7 +61,7 @@ impl RhaiGenerator {
         map
     }
 
-    fn map_to_spec(&self, map: Map) -> Result<PluginRequestSpec> {
+    fn map_to_spec(&self, map: Map) -> Result<PluginHttpRequestSpec> {
         let method = map
             .get("method")
             .and_then(|v| v.clone().into_string().ok())
@@ -99,7 +99,7 @@ impl RhaiGenerator {
             .and_then(|v| v.clone().into_string().ok())
             .map(|s| s.into_bytes());
 
-        Ok(PluginRequestSpec {
+        Ok(PluginHttpRequestSpec {
             method,
             url,
             headers,
@@ -109,7 +109,12 @@ impl RhaiGenerator {
 }
 
 impl netanvil_types::RequestGenerator for RhaiGenerator {
-    fn generate(&mut self, context: &netanvil_types::RequestContext) -> netanvil_types::RequestSpec {
+    type Spec = netanvil_types::HttpRequestSpec;
+
+    fn generate(
+        &mut self,
+        context: &netanvil_types::RequestContext,
+    ) -> netanvil_types::HttpRequestSpec {
         let plugin_ctx = PluginRequestContext::from(context);
         let ctx_map = self.ctx_to_map(&plugin_ctx);
 
@@ -123,7 +128,7 @@ impl netanvil_types::RequestGenerator for RhaiGenerator {
             .map_to_spec(result_map)
             .expect("Rhai generate() returned invalid map");
 
-        spec.into_request_spec()
+        spec.into_http_request_spec()
     }
 
     fn update_targets(&mut self, targets: Vec<String>) {

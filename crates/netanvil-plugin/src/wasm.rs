@@ -1,10 +1,16 @@
 //! WASM plugin runtime using wasmtime.
 //!
 //! Loads a .wasm module compiled from Rust (or any language targeting wasm32-wasip1)
-//! and calls its `generate()` function on each request. Data is marshaled as JSON
-//! through WASM linear memory.
+//! and calls its `generate()` function on each request.
 //!
-//! # Instance-per-core
+//! ## Binary protocol
+//!
+//! Context is passed as a 24-byte `#[repr(C)]` struct (`RawContext`) — zero
+//! serialization overhead. The spec output is encoded with `postcard` (compact
+//! serde binary format) and read directly from WASM linear memory without
+//! intermediate allocation.
+//!
+//! ## Instance-per-core
 //!
 //! Each `WasmGenerator` owns its own `Store` and `Instance`. Since our workers
 //! are `!Send`, this is safe — one instance per core, no sharing needed.
@@ -15,7 +21,7 @@ use wasmtime_wasi::preview1::WasiP1Ctx;
 use wasmtime_wasi::WasiCtxBuilder;
 
 use crate::error::{PluginError, Result};
-use crate::types::{PluginRequestContext, PluginRequestSpec};
+use crate::types::{PluginHttpRequestSpec, RawContext};
 
 /// A RequestGenerator backed by a WASM module.
 ///
@@ -32,8 +38,6 @@ pub struct WasmGenerator {
     fn_get_input_ptr: TypedFunc<(), i32>,
     fn_get_output_ptr: TypedFunc<(), i32>,
     fn_update_targets: TypedFunc<i32, i32>,
-    /// Pre-allocated buffer for serialized context to avoid per-call allocation.
-    ctx_buf: Vec<u8>,
 }
 
 impl WasmGenerator {
@@ -83,14 +87,14 @@ impl WasmGenerator {
             fn_get_input_ptr,
             fn_get_output_ptr,
             fn_update_targets,
-            ctx_buf: Vec::with_capacity(256),
         };
 
-        // Initialize the WASM module with targets
-        let targets_json = serde_json::to_vec(targets)?;
-        gen.write_to_guest(&targets_json)?;
+        // Initialize the WASM module with targets (postcard-encoded).
+        let targets_bytes = postcard::to_allocvec(targets)
+            .map_err(|e| PluginError::Wasm(format!("targets encode: {e}")))?;
+        gen.write_to_guest(&targets_bytes)?;
         let rc = fn_init
-            .call(&mut gen.store, targets_json.len() as i32)
+            .call(&mut gen.store, targets_bytes.len() as i32)
             .map_err(|e| PluginError::Wasm(format!("init call: {e}")))?;
         if rc != 0 {
             return Err(PluginError::Init("WASM init returned error".into()));
@@ -117,62 +121,58 @@ impl WasmGenerator {
 }
 
 impl netanvil_types::RequestGenerator for WasmGenerator {
-    fn generate(&mut self, context: &netanvil_types::RequestContext) -> netanvil_types::RequestSpec {
-        // Serialize context to JSON
-        let plugin_ctx = PluginRequestContext::from(context);
-        self.ctx_buf.clear();
-        serde_json::to_writer(&mut self.ctx_buf, &plugin_ctx)
-            .expect("context serialization cannot fail");
+    type Spec = netanvil_types::HttpRequestSpec;
 
-        // Write context JSON to guest input buffer
+    fn generate(
+        &mut self,
+        context: &netanvil_types::RequestContext,
+    ) -> netanvil_types::HttpRequestSpec {
+        // Write 24-byte repr(C) context directly into guest memory (zero serialization).
+        let raw = RawContext::from_context(context);
         let input_ptr = self
             .fn_get_input_ptr
             .call(&mut self.store, ())
             .expect("get_input_buf_ptr trap") as usize;
+        self.memory.data_mut(&mut self.store)[input_ptr..input_ptr + 24]
+            .copy_from_slice(raw.as_bytes());
 
-        let ctx_len = self.ctx_buf.len();
-        self.memory.data_mut(&mut self.store)[input_ptr..input_ptr + ctx_len]
-            .copy_from_slice(&self.ctx_buf);
-
-        // Call generate(ctx_len) -> output_len
+        // Call generate(24) -> output_len
         let output_len = self
             .fn_generate
-            .call(&mut self.store, ctx_len as i32)
+            .call(&mut self.store, 24)
             .expect("generate trap");
 
         if output_len <= 0 {
             return fallback_spec();
         }
 
-        // Read output JSON from guest output buffer
+        // Read postcard-encoded spec directly from guest memory (no .to_vec() allocation).
         let output_ptr = self
             .fn_get_output_ptr
             .call(&mut self.store, ())
             .expect("get_output_buf_ptr trap") as usize;
         let output_len = output_len as usize;
+        let output_slice = &self.memory.data(&self.store)[output_ptr..output_ptr + output_len];
 
-        let output_bytes =
-            self.memory.data(&self.store)[output_ptr..output_ptr + output_len].to_vec();
-
-        match serde_json::from_slice::<PluginRequestSpec>(&output_bytes) {
-            Ok(spec) => spec.into_request_spec(),
+        match postcard::from_bytes::<PluginHttpRequestSpec>(output_slice) {
+            Ok(spec) => spec.into_http_request_spec(),
             Err(_) => fallback_spec(),
         }
     }
 
     fn update_targets(&mut self, targets: Vec<String>) {
-        if let Ok(json) = serde_json::to_vec(&targets) {
-            if self.write_to_guest(&json).is_ok() {
+        if let Ok(bytes) = postcard::to_allocvec(&targets) {
+            if self.write_to_guest(&bytes).is_ok() {
                 let _ = self
                     .fn_update_targets
-                    .call(&mut self.store, json.len() as i32);
+                    .call(&mut self.store, bytes.len() as i32);
             }
         }
     }
 }
 
-fn fallback_spec() -> netanvil_types::RequestSpec {
-    netanvil_types::RequestSpec {
+fn fallback_spec() -> netanvil_types::HttpRequestSpec {
+    netanvil_types::HttpRequestSpec {
         method: http::Method::GET,
         url: "http://error.invalid".into(),
         headers: vec![],

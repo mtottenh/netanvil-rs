@@ -198,7 +198,7 @@ fn timer_target_update_forwarded_to_all_workers() {
 
 #[test]
 fn timer_header_update_forwarded_to_all_workers() {
-    // 2 workers — send UpdateHeaders, verify both receive it.
+    // 2 workers — send UpdateMetadata, verify both receive it.
     let start = Instant::now();
     let schedulers: Vec<Box<dyn RequestScheduler>> = vec![
         Box::new(ConstantRateScheduler::new(
@@ -217,7 +217,7 @@ fn timer_header_update_forwarded_to_all_workers() {
 
     std::thread::sleep(Duration::from_millis(100));
     cmd_tx
-        .send(TimerCommand::UpdateHeaders(vec![(
+        .send(TimerCommand::UpdateMetadata(vec![(
             "X-Test".into(),
             "value".into(),
         )]))
@@ -230,13 +230,13 @@ fn timer_header_update_forwarded_to_all_workers() {
     for (i, rx) in fire_rxs.iter().enumerate() {
         let mut found_update = false;
         while let Ok(msg) = rx.try_recv() {
-            if matches!(msg, ScheduledRequest::UpdateHeaders(_)) {
+            if matches!(msg, ScheduledRequest::UpdateMetadata(_)) {
                 found_update = true;
             }
         }
         assert!(
             found_update,
-            "worker {i} did not receive UpdateHeaders message"
+            "worker {i} did not receive UpdateMetadata message"
         );
     }
 }

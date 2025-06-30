@@ -36,6 +36,12 @@ pub struct TestConfig {
     /// JSON field name to extract from the external metrics response.
     /// E.g. "load" extracts the numeric value from `{"load": 82.5}`.
     pub external_metrics_field: Option<String>,
+    /// Optional bandwidth limit in bits per second for modem speed simulation.
+    /// When set, the HTTP executor throttles TCP reads to this rate and tunes
+    /// per-socket receive buffers to create real TCP-level backpressure.
+    /// Example values: 56_000 (56kbps modem), 1_000_000 (1 Mbps), 10_000_000 (10 Mbps).
+    #[serde(default)]
+    pub bandwidth_limit_bps: Option<u64>,
     /// Optional plugin configuration for custom request generation.
     /// When set, the test uses the plugin's generator instead of the default
     /// `SimpleGenerator`. In distributed mode, the leader embeds the plugin
@@ -95,6 +101,7 @@ impl Default for TestConfig {
             error_status_threshold: 400,
             external_metrics_url: None,
             external_metrics_field: None,
+            bandwidth_limit_bps: None,
             plugin: None,
         }
     }

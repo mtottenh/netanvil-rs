@@ -1,5 +1,19 @@
 use std::time::{Duration, Instant};
 
+// ---------------------------------------------------------------------------
+// Protocol-generic spec bound
+// ---------------------------------------------------------------------------
+
+/// Marker trait for protocol-specific request specifications.
+///
+/// Every protocol (HTTP, gRPC, raw TCP, etc.) defines its own spec type
+/// that implements this trait. The pipeline traits (`RequestGenerator`,
+/// `RequestTransformer`, `RequestExecutor`) are generic over any
+/// `ProtocolSpec` via an associated type.
+pub trait ProtocolSpec: std::fmt::Debug + Clone + 'static {}
+
+impl ProtocolSpec for HttpRequestSpec {}
+
 /// Context for a single request, created by the worker scheduling loop.
 #[derive(Debug, Clone)]
 pub struct RequestContext {
@@ -18,8 +32,9 @@ pub struct RequestContext {
 }
 
 /// What to send. Produced by RequestGenerator, modified by RequestTransformer.
+/// HTTP-specific: carries method, URL, headers, and optional body.
 #[derive(Debug, Clone)]
-pub struct RequestSpec {
+pub struct HttpRequestSpec {
     pub method: http::Method,
     pub url: String,
     pub headers: Vec<(String, String)>,
@@ -63,6 +78,9 @@ pub enum ExecutionError {
 
     #[error("TLS error: {0}")]
     Tls(String),
+
+    #[error("protocol error: {0}")]
+    Protocol(String),
 
     #[error("{0}")]
     Other(String),

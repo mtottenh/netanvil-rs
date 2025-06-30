@@ -174,7 +174,7 @@ pub struct UpdateTargetsRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct UpdateHeadersRequest {
+pub struct UpdateMetadataRequest {
     pub headers: Vec<(String, String)>,
 }
 

@@ -344,7 +344,7 @@ fn simple_generator_round_robins_urls() {
 #[test]
 fn header_transformer_appends_headers() {
     use netanvil_core::{HeaderTransformer, NoopTransformer};
-    use netanvil_types::{RequestContext, RequestSpec, RequestTransformer};
+    use netanvil_types::{HttpRequestSpec, RequestContext, RequestTransformer};
     use std::time::Instant;
 
     let now = Instant::now();
@@ -357,7 +357,7 @@ fn header_transformer_appends_headers() {
         session_id: None,
     };
 
-    let spec = RequestSpec {
+    let spec = HttpRequestSpec {
         method: http::Method::GET,
         url: "http://example.com".into(),
         headers: vec![("Accept".into(), "text/html".into())],

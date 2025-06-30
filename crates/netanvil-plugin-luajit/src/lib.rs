@@ -9,7 +9,7 @@ use mlua::prelude::*;
 
 use netanvil_plugin::error::{PluginError, Result};
 use netanvil_plugin::hybrid::{GeneratorConfig, WeightedPattern};
-use netanvil_plugin::types::{PluginRequestContext, PluginRequestSpec};
+use netanvil_plugin::types::{PluginHttpRequestSpec, PluginRequestContext};
 
 /// A RequestGenerator backed by LuaJIT.
 ///
@@ -22,6 +22,8 @@ use netanvil_plugin::types::{PluginRequestContext, PluginRequestSpec};
 /// - `update_targets(targets)` — called to update targets mid-test
 pub struct LuaJitGenerator {
     lua: Lua,
+    /// Persistent context table — reused every call to avoid GC allocation.
+    ctx_table: LuaTable,
 }
 
 impl LuaJitGenerator {
@@ -43,22 +45,45 @@ impl LuaJitGenerator {
                 .map_err(|e| PluginError::Lua(format!("init() call: {e}")))?;
         }
 
-        Ok(Self { lua })
+        // Pre-allocate the context table once — mutated per call instead of reallocated.
+        let ctx_table = lua
+            .create_table()
+            .map_err(|e| PluginError::Lua(format!("create ctx table: {e}")))?;
+        ctx_table
+            .set("request_id", 0u64)
+            .map_err(|e| PluginError::Lua(format!("init ctx table: {e}")))?;
+        ctx_table
+            .set("core_id", 0usize)
+            .map_err(|e| PluginError::Lua(format!("init ctx table: {e}")))?;
+        ctx_table
+            .set("is_sampled", false)
+            .map_err(|e| PluginError::Lua(format!("init ctx table: {e}")))?;
+        ctx_table
+            .set("session_id", LuaNil)
+            .map_err(|e| PluginError::Lua(format!("init ctx table: {e}")))?;
+
+        Ok(Self { lua, ctx_table })
     }
 
-    fn ctx_to_table(&self, ctx: &PluginRequestContext) -> LuaResult<LuaTable> {
-        let table = self.lua.create_table()?;
-        table.set("request_id", ctx.request_id)?;
-        table.set("core_id", ctx.core_id)?;
-        table.set("is_sampled", ctx.is_sampled)?;
+    /// Update the persistent context table with new values (no allocation).
+    fn update_ctx_table(&self, ctx: &PluginRequestContext) {
+        self.ctx_table
+            .set("request_id", ctx.request_id)
+            .expect("ctx table set failed");
+        self.ctx_table
+            .set("core_id", ctx.core_id)
+            .expect("ctx table set failed");
+        self.ctx_table
+            .set("is_sampled", ctx.is_sampled)
+            .expect("ctx table set failed");
         match ctx.session_id {
-            Some(id) => table.set("session_id", id)?,
-            None => table.set("session_id", LuaNil)?,
+            Some(id) => self.ctx_table.set("session_id", id),
+            None => self.ctx_table.set("session_id", LuaNil),
         }
-        Ok(table)
+        .expect("ctx table set failed");
     }
 
-    fn table_to_spec(&self, table: LuaTable) -> LuaResult<PluginRequestSpec> {
+    fn table_to_spec(&self, table: LuaTable) -> LuaResult<PluginHttpRequestSpec> {
         let method: String = table.get("method")?;
         let url: String = table.get("url")?;
 
@@ -81,7 +106,7 @@ impl LuaJitGenerator {
             _ => None,
         };
 
-        Ok(PluginRequestSpec {
+        Ok(PluginHttpRequestSpec {
             method,
             url,
             headers,
@@ -91,12 +116,16 @@ impl LuaJitGenerator {
 }
 
 impl netanvil_types::RequestGenerator for LuaJitGenerator {
-    fn generate(&mut self, context: &netanvil_types::RequestContext) -> netanvil_types::RequestSpec {
+    type Spec = netanvil_types::HttpRequestSpec;
+
+    fn generate(
+        &mut self,
+        context: &netanvil_types::RequestContext,
+    ) -> netanvil_types::HttpRequestSpec {
         let plugin_ctx = PluginRequestContext::from(context);
 
-        let ctx_table = self
-            .ctx_to_table(&plugin_ctx)
-            .expect("failed to create Lua context table");
+        // Reuse persistent table — avoids GC allocation per call.
+        self.update_ctx_table(&plugin_ctx);
 
         let generate_fn: LuaFunction = self
             .lua
@@ -105,14 +134,14 @@ impl netanvil_types::RequestGenerator for LuaJitGenerator {
             .expect("Lua script must define generate()");
 
         let result_table: LuaTable = generate_fn
-            .call(ctx_table)
+            .call(self.ctx_table.clone())
             .expect("Lua generate() call failed");
 
         let spec = self
             .table_to_spec(result_table)
             .expect("Lua generate() returned invalid table");
 
-        spec.into_request_spec()
+        spec.into_http_request_spec()
     }
 
     fn update_targets(&mut self, targets: Vec<String>) {

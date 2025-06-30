@@ -247,7 +247,7 @@ impl AgentServer {
                     }
                     let r: R =
                         serde_json::from_slice(body).map_err(|e| format!("bad JSON: {e}"))?;
-                    tx.send(WorkerCommand::UpdateHeaders(r.headers))
+                    tx.send(WorkerCommand::UpdateMetadata(r.headers))
                         .map_err(|e| format!("send: {e}"))?;
                     Ok(())
                 }),
@@ -423,7 +423,7 @@ fn build_plugin_factory(
                 .map_err(|e| format!("hybrid config: {e}"))?;
             Ok(Box::new(move |_core_id| {
                 Box::new(netanvil_plugin::HybridGenerator::new(config.clone()))
-                    as Box<dyn RequestGenerator>
+                    as Box<dyn RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
             }))
         }
         PluginType::Lua => {
@@ -434,7 +434,7 @@ fn build_plugin_factory(
                 Box::new(
                     netanvil_plugin_luajit::LuaJitGenerator::new(&script, &targets)
                         .expect("LuaJIT init failed"),
-                ) as Box<dyn RequestGenerator>
+                ) as Box<dyn RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
             }))
         }
         PluginType::Wasm => {
@@ -445,7 +445,7 @@ fn build_plugin_factory(
                 Box::new(
                     netanvil_plugin::WasmGenerator::new(&engine, &module, &targets)
                         .expect("WASM init failed"),
-                ) as Box<dyn RequestGenerator>
+                ) as Box<dyn RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
             }))
         }
     }

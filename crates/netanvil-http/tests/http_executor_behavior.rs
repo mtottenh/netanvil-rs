@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use netanvil_http::HttpExecutor;
-use netanvil_types::{RequestContext, RequestExecutor, RequestSpec};
+use netanvil_types::{HttpRequestSpec, RequestContext, RequestExecutor};
 
 // ---------------------------------------------------------------------------
 // Test server: axum on a background tokio thread
@@ -81,7 +81,7 @@ fn get_request_returns_200_with_body() {
 
     rt.block_on(async {
         let executor = HttpExecutor::new();
-        let spec = RequestSpec {
+        let spec = HttpRequestSpec {
             method: http::Method::GET,
             url: format!("http://{}/", addr),
             headers: vec![],
@@ -116,7 +116,7 @@ fn post_request_sends_body() {
     rt.block_on(async {
         let executor = HttpExecutor::new();
         let payload = b"hello world".to_vec();
-        let spec = RequestSpec {
+        let spec = HttpRequestSpec {
             method: http::Method::POST,
             url: format!("http://{}/echo", addr),
             headers: vec![("Content-Type".into(), "text/plain".into())],
@@ -139,7 +139,7 @@ fn server_error_is_captured_in_status() {
 
     rt.block_on(async {
         let executor = HttpExecutor::new();
-        let spec = RequestSpec {
+        let spec = HttpRequestSpec {
             method: http::Method::GET,
             url: format!("http://{}/status/500", addr),
             headers: vec![],
@@ -162,7 +162,7 @@ fn timeout_produces_timeout_error() {
     rt.block_on(async {
         // 200ms timeout, server delays 5s
         let executor = HttpExecutor::with_timeout(Duration::from_millis(200));
-        let spec = RequestSpec {
+        let spec = HttpRequestSpec {
             method: http::Method::GET,
             url: format!("http://{}/slow", addr),
             headers: vec![],
@@ -193,7 +193,7 @@ fn connection_refused_produces_connect_error() {
 
     rt.block_on(async {
         let executor = HttpExecutor::with_timeout(Duration::from_secs(2));
-        let spec = RequestSpec {
+        let spec = HttpRequestSpec {
             method: http::Method::GET,
             // Port 1 is almost certainly not listening
             url: "http://127.0.0.1:1/".into(),
@@ -215,7 +215,7 @@ fn custom_headers_are_sent() {
 
     rt.block_on(async {
         let executor = HttpExecutor::new();
-        let spec = RequestSpec {
+        let spec = HttpRequestSpec {
             method: http::Method::GET,
             url: format!("http://{}/", addr),
             headers: vec![
@@ -241,7 +241,7 @@ fn timing_breakdown_is_plausible_for_delayed_response() {
 
     rt.block_on(async {
         let executor = HttpExecutor::new();
-        let spec = RequestSpec {
+        let spec = HttpRequestSpec {
             method: http::Method::GET,
             url: format!("http://{}/delay/100", addr),
             headers: vec![],
@@ -269,7 +269,7 @@ fn multiple_sequential_requests_reuse_connection() {
 
     rt.block_on(async {
         let executor = HttpExecutor::new();
-        let spec = RequestSpec {
+        let spec = HttpRequestSpec {
             method: http::Method::GET,
             url: format!("http://{}/", addr),
             headers: vec![],

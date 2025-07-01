@@ -10,7 +10,17 @@ description = "HTTP executor for load testing using compio and cyper"
 netanvil-types = { workspace = true }
 compio = { workspace = true }
 cyper = { workspace = true }
+cyper-core = "0.8"
+compio-tls = { version = "0.9", features = ["native-tls"] }
 http = { workspace = true }
+hyper = "1"
+hyper-util = { version = "0.1", features = ["client-legacy"] }
+tower-service = "0.3"
+send_wrapper = { version = "0.6", features = ["futures"] }
+futures-util = "0.3"
+http-body-util = "0.1"
+bytes = "1"
+libc = "0.2"
 tracing = { workspace = true }
 
 [dev-dependencies]

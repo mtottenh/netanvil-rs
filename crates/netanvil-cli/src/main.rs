@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use netanvil_api::{AgentServer, ControlServer, SharedState};
-use netanvil_core::{report::ProgressLine, TestBuilder};
+use netanvil_core::{report::ProgressLine, GenericTestBuilder, TestBuilder};
 use netanvil_distributed::{
     DistributedCoordinator, HttpMetricsFetcher, HttpNodeCommander, HttpSignalPoller,
     MtlsMetricsFetcher, MtlsNodeCommander, MtlsStaticDiscovery, StaticDiscovery,
@@ -15,6 +15,7 @@ use netanvil_types::{
     TargetMetric, TestConfig,
 };
 
+mod compat;
 mod output;
 
 #[derive(Parser)]
@@ -147,6 +148,37 @@ enum Commands {
         /// rate changes, target updates, and live metrics via curl.
         #[arg(long)]
         api_port: Option<u16>,
+
+        /// Bandwidth limit for modem speed simulation. Throttles TCP reads to
+        /// create real server-side backpressure. Accepts human-friendly values:
+        /// "56k" (56 kbps), "384k", "1m" (1 Mbps), "10m", or raw bps "56000".
+        #[arg(long)]
+        bandwidth: Option<String>,
+
+        // ── TCP/UDP-specific flags ──
+        /// Payload as UTF-8 string (for tcp:// and udp:// protocols)
+        #[arg(long)]
+        payload: Option<String>,
+
+        /// Payload as hex-encoded bytes (for tcp:// and udp:// protocols)
+        #[arg(long)]
+        payload_hex: Option<String>,
+
+        /// Payload from file (for tcp:// and udp:// protocols)
+        #[arg(long)]
+        payload_file: Option<String>,
+
+        /// TCP framing mode: "raw", "length-prefix:1|2|4", "delimiter", "fixed:N"
+        #[arg(long, default_value = "raw")]
+        framing: String,
+
+        /// Delimiter bytes for TCP delimiter framing (default: "\r\n")
+        #[arg(long, default_value = r"\r\n")]
+        delimiter: String,
+
+        /// Don't wait for a response (fire-and-forget mode for TCP/UDP)
+        #[arg(long)]
+        no_response: bool,
     },
 
     /// Run as a remotely controllable agent node
@@ -283,6 +315,66 @@ enum Commands {
         #[arg(long)]
         tls_key: Option<String>,
     },
+}
+
+/// Run in legacy compatibility mode.
+fn REDACTED_FN(args: Vec<String>) -> Result<()> {
+    let compat_result = compat::run_compat(args)?;
+    let config = compat_result.test_config;
+    let quiet = compat_result.quiet;
+
+    if !quiet {
+        eprintln!(
+            "netanvil-rs compat mode: {} target(s), {:.1} RPS, {:?} duration, {} cores",
+            config.targets.len(),
+            match &config.rate {
+                RateConfig::Static { rps } => *rps,
+                RateConfig::Step { steps } => steps.first().map(|s| s.1).unwrap_or(0.0),
+                _ => 0.0,
+            },
+            config.duration,
+            if config.num_cores == 0 {
+                "auto".to_string()
+            } else {
+                config.num_cores.to_string()
+            },
+        );
+    }
+
+    let request_timeout = config.connections.request_timeout;
+    let targets = config.targets.clone();
+
+    let mut builder = TestBuilder::new(config, move || HttpExecutor::with_timeout(request_timeout));
+
+    if !quiet {
+        builder = builder.on_progress(|update| {
+            eprint!("\r{}", netanvil_core::report::ProgressLine::new(update));
+        });
+    }
+
+    // Set up plugin generator from generated Lua script
+    if let Some(plugin_config) = compat_result.plugin_config {
+        let script = String::from_utf8(plugin_config.source)
+            .map_err(|_| anyhow::anyhow!("generated Lua script is not valid UTF-8"))?;
+        let targets_for_factory = targets.clone();
+        builder = builder.generator_factory(Box::new(move |_core_id| {
+            Box::new(
+                netanvil_plugin_luajit::LuaJitGenerator::new(&script, &targets_for_factory)
+                    .expect("LuaJIT generator init failed"),
+            )
+                as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
+        }));
+    }
+
+    let result = builder.run().context("load test failed")?;
+    if !quiet {
+        eprintln!();
+    }
+
+    let output_format = output::OutputFormat::Text;
+    output::print_results(&result, output_format);
+
+    Ok(())
 }
 
 fn parse_duration(s: &str) -> Result<Duration> {
@@ -438,6 +530,61 @@ fn parse_count_distribution(s: &str) -> Result<CountDistribution> {
     }
 }
 
+/// Parse a human-friendly bandwidth string into bits per second.
+///
+/// Accepts:
+/// - "56k" or "56K" → 56,000 bps
+/// - "1m" or "1M" → 1,000,000 bps
+/// - "10m" → 10,000,000 bps
+/// - "1g" or "1G" → 1,000,000,000 bps
+/// - "56000" → 56,000 bps (raw number)
+/// - "1.5m" → 1,500,000 bps (fractional)
+fn parse_bandwidth(s: &str) -> Result<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        anyhow::bail!("empty bandwidth string");
+    }
+
+    let (num_str, multiplier) = if let Some(n) = s.strip_suffix(['k', 'K']) {
+        (n, 1_000u64)
+    } else if let Some(n) = s.strip_suffix("kbps") {
+        (n, 1_000u64)
+    } else if let Some(n) = s.strip_suffix(['m', 'M']) {
+        (n, 1_000_000u64)
+    } else if let Some(n) = s.strip_suffix("mbps") {
+        (n, 1_000_000u64)
+    } else if let Some(n) = s.strip_suffix(['g', 'G']) {
+        (n, 1_000_000_000u64)
+    } else if let Some(n) = s.strip_suffix("gbps") {
+        (n, 1_000_000_000u64)
+    } else {
+        (s, 1u64)
+    };
+
+    let num: f64 = num_str
+        .trim()
+        .parse()
+        .context(format!("invalid bandwidth number: '{num_str}'"))?;
+    let bps = (num * multiplier as f64) as u64;
+    if bps == 0 {
+        anyhow::bail!("bandwidth must be > 0");
+    }
+    Ok(bps)
+}
+
+/// Format bandwidth in human-readable form.
+fn format_bandwidth(bps: u64) -> String {
+    if bps >= 1_000_000_000 {
+        format!("{:.1} Gbps", bps as f64 / 1_000_000_000.0)
+    } else if bps >= 1_000_000 {
+        format!("{:.1} Mbps", bps as f64 / 1_000_000.0)
+    } else if bps >= 1_000 {
+        format!("{:.0} kbps", bps as f64 / 1_000.0)
+    } else {
+        format!("{bps} bps")
+    }
+}
+
 /// Detect plugin type from file extension or explicit --plugin-type flag.
 fn detect_plugin_type(path: &str, explicit: &str) -> Result<PluginType> {
     if explicit != "auto" {
@@ -479,7 +626,7 @@ fn build_plugin_factory(
                 .map_err(|e| anyhow::anyhow!("hybrid config error: {e}"))?;
             Ok(Box::new(move |_core_id| {
                 Box::new(netanvil_plugin::HybridGenerator::new(config.clone()))
-                    as Box<dyn netanvil_types::RequestGenerator>
+                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
             }))
         }
         PluginType::Lua => {
@@ -490,7 +637,8 @@ fn build_plugin_factory(
                 Box::new(
                     netanvil_plugin_luajit::LuaJitGenerator::new(&script, &targets)
                         .expect("LuaJIT generator init failed"),
-                ) as Box<dyn netanvil_types::RequestGenerator>
+                )
+                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
             }))
         }
         PluginType::Wasm => {
@@ -503,7 +651,8 @@ fn build_plugin_factory(
                 Box::new(
                     netanvil_plugin::WasmGenerator::new(&engine, &module, &targets)
                         .expect("WASM generator init failed"),
-                ) as Box<dyn netanvil_types::RequestGenerator>
+                )
+                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
             }))
         }
     }
@@ -607,6 +756,25 @@ fn main() -> Result<()> {
         )
         .init();
 
+    // Binary name detection: if invoked as "netanvil" or "redacted_client", enter compat mode.
+    let args: Vec<String> = std::env::args().collect();
+    let bin_name = std::path::Path::new(&args[0])
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("netanvil-rs");
+
+    if bin_name == "netanvil" || bin_name == "redacted_client" {
+        return REDACTED_FN(args);
+    }
+
+    // Check for explicit "compat" subcommand before clap parsing
+    if args.len() > 1 && args[1] == "compat" {
+        // Pass remaining args as if they were the full argv for legacy parsing
+        let mut compat_args = vec![args[0].clone()];
+        compat_args.extend(args[2..].iter().cloned());
+        return REDACTED_FN(compat_args);
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -638,9 +806,21 @@ fn main() -> Result<()> {
             conn_lifetime,
             output,
             api_port,
+            bandwidth,
+            payload,
+            payload_hex,
+            payload_file,
+            framing,
+            delimiter,
+            no_response,
         } => {
             let duration = parse_duration(&duration).context("invalid --duration")?;
             let timeout = parse_duration(&timeout).context("invalid --timeout")?;
+            let bandwidth_bps = bandwidth
+                .as_deref()
+                .map(parse_bandwidth)
+                .transpose()
+                .context("invalid --bandwidth")?;
             let autotune_dur = parse_duration(&pid_autotune_duration)
                 .context("invalid --pid-autotune-duration")?;
             let scheduler = parse_scheduler(&scheduler).context("invalid --scheduler")?;
@@ -671,7 +851,7 @@ fn main() -> Result<()> {
                 conn_lifetime.as_deref(),
             )?;
 
-            let config = TestConfig {
+            let mut config = TestConfig {
                 targets: url,
                 method,
                 duration,
@@ -687,6 +867,7 @@ fn main() -> Result<()> {
                 metrics_interval: Duration::from_millis(500),
                 control_interval: Duration::from_millis(100),
                 error_status_threshold: error_threshold,
+                bandwidth_limit_bps: bandwidth_bps,
                 ..Default::default()
             };
 
@@ -713,8 +894,12 @@ fn main() -> Result<()> {
                 ),
             };
 
+            let bw_desc = match bandwidth_bps {
+                Some(bps) => format!(", bandwidth: {}", format_bandwidth(bps)),
+                None => String::new(),
+            };
             eprintln!(
-                "Running load test: {} target(s), {rate_desc}, {:?} duration, {} cores",
+                "Running load test: {} target(s), {rate_desc}, {:?} duration, {} cores{bw_desc}",
                 config.targets.len(),
                 duration,
                 if cores == 0 {
@@ -724,60 +909,153 @@ fn main() -> Result<()> {
                 },
             );
 
-            // Build plugin generator factory if --plugin is specified
-            let plugin_factory = if let Some(ref plugin_path) = plugin {
-                let ptype = detect_plugin_type(plugin_path, &plugin_type)?;
-                let factory = build_plugin_factory(plugin_path, ptype, &config.targets)?;
-                tracing::info!(
-                    plugin = %plugin_path,
-                    plugin_type = ?ptype,
-                    "loaded plugin generator"
-                );
-                Some(factory)
-            } else {
-                None
-            };
-
             let request_timeout = timeout;
-            let result = if let Some(port) = api_port {
-                // API mode: spawn control server, wire up shared state
-                let shared_state = SharedState::new();
-                let (ext_cmd_tx, ext_cmd_rx) = flume::unbounded();
+            let protocol = detect_protocol(&config.targets);
 
-                let server = ControlServer::new(port, shared_state.clone(), ext_cmd_tx)
-                    .context(format!("failed to start API server on port {port}"))?;
-                let _server_handle = server.spawn();
-                tracing::info!(port, "control API listening");
+            let result = match protocol {
+                DetectedProtocol::Tcp => {
+                    let tcp_payload = resolve_payload(&payload, &payload_hex, &payload_file)
+                        .context("invalid TCP payload")?;
+                    let tcp_framing =
+                        parse_tcp_framing(&framing, &delimiter).context("invalid --framing")?;
+                    let targets = parse_socket_targets(&config.targets, "tcp://")
+                        .context("invalid TCP target address")?;
+                    let expect_response = !no_response;
 
-                let progress_state = shared_state.clone();
-                let signal_state = shared_state.clone();
-                let mut builder =
-                    TestBuilder::new(config, move || HttpExecutor::with_timeout(request_timeout))
-                        .on_progress(move |update| {
-                            progress_state.update_from_progress(update);
-                            eprint!("\r{}", ProgressLine::new(update));
-                        })
-                        .external_commands(ext_cmd_rx)
-                        .pushed_signal_source(move || signal_state.drain_pushed_signals());
+                    eprintln!("  protocol: TCP, {} byte payload, framing: {framing}, response: {expect_response}",
+                        tcp_payload.len());
 
-                if let Some(factory) = plugin_factory {
-                    builder = builder.generator_factory(factory);
+                    config.error_status_threshold = 0; // no HTTP status for TCP
+
+                    let gen_factory: netanvil_core::GenericGeneratorFactory<
+                        netanvil_tcp::TcpRequestSpec,
+                    > = Box::new(move |_core_id| {
+                        Box::new(netanvil_tcp::SimpleTcpGenerator::new(
+                            targets.clone(),
+                            tcp_payload.clone(),
+                            tcp_framing.clone(),
+                            expect_response,
+                        ))
+                    });
+                    let trans_factory: netanvil_core::GenericTransformerFactory<
+                        netanvil_tcp::TcpRequestSpec,
+                    > = Box::new(|_| Box::new(netanvil_tcp::TcpNoopTransformer));
+
+                    GenericTestBuilder::new(
+                        config,
+                        move || netanvil_tcp::TcpExecutor::with_timeout(request_timeout),
+                        gen_factory,
+                        trans_factory,
+                    )
+                    .on_progress(|update| {
+                        eprint!("\r{}", ProgressLine::new(update));
+                    })
+                    .run()
+                    .context("TCP load test failed")?
                 }
 
-                builder.run().context("load test failed")?
-            } else {
-                let mut builder =
-                    TestBuilder::new(config, move || HttpExecutor::with_timeout(request_timeout))
-                        .on_progress(|update| {
-                            eprint!("\r{}", ProgressLine::new(update));
-                        });
+                DetectedProtocol::Udp => {
+                    let udp_payload = resolve_payload(&payload, &payload_hex, &payload_file)
+                        .context("invalid UDP payload")?;
+                    let targets = parse_socket_targets(&config.targets, "udp://")
+                        .context("invalid UDP target address")?;
+                    let expect_response = !no_response;
 
-                if let Some(factory) = plugin_factory {
-                    builder = builder.generator_factory(factory);
+                    eprintln!(
+                        "  protocol: UDP, {} byte payload, response: {expect_response}",
+                        udp_payload.len()
+                    );
+
+                    config.error_status_threshold = 0; // no HTTP status for UDP
+
+                    let gen_factory: netanvil_core::GenericGeneratorFactory<
+                        netanvil_udp::UdpRequestSpec,
+                    > = Box::new(move |_core_id| {
+                        Box::new(netanvil_udp::SimpleUdpGenerator::new(
+                            targets.clone(),
+                            udp_payload.clone(),
+                            expect_response,
+                        ))
+                    });
+                    let trans_factory: netanvil_core::GenericTransformerFactory<
+                        netanvil_udp::UdpRequestSpec,
+                    > = Box::new(|_| Box::new(netanvil_udp::UdpNoopTransformer));
+
+                    GenericTestBuilder::new(
+                        config,
+                        move || netanvil_udp::UdpExecutor::with_timeout(request_timeout),
+                        gen_factory,
+                        trans_factory,
+                    )
+                    .on_progress(|update| {
+                        eprint!("\r{}", ProgressLine::new(update));
+                    })
+                    .run()
+                    .context("UDP load test failed")?
                 }
 
-                builder.run().context("load test failed")?
+                DetectedProtocol::Http => {
+                    // Build executor factory — with or without bandwidth throttling
+                    let make_executor = move || -> HttpExecutor {
+                        match bandwidth_bps {
+                            Some(bps) => HttpExecutor::with_bandwidth_limit(bps, request_timeout),
+                            None => HttpExecutor::with_timeout(request_timeout),
+                        }
+                    };
+
+                    // Build plugin generator factory if --plugin is specified
+                    let plugin_factory = if let Some(ref plugin_path) = plugin {
+                        let ptype = detect_plugin_type(plugin_path, &plugin_type)?;
+                        let factory = build_plugin_factory(plugin_path, ptype, &config.targets)?;
+                        tracing::info!(
+                            plugin = %plugin_path,
+                            plugin_type = ?ptype,
+                            "loaded plugin generator"
+                        );
+                        Some(factory)
+                    } else {
+                        None
+                    };
+
+                    if let Some(port) = api_port {
+                        let shared_state = SharedState::new();
+                        let (ext_cmd_tx, ext_cmd_rx) = flume::unbounded();
+
+                        let server = ControlServer::new(port, shared_state.clone(), ext_cmd_tx)
+                            .context(format!("failed to start API server on port {port}"))?;
+                        let _server_handle = server.spawn();
+                        tracing::info!(port, "control API listening");
+
+                        let progress_state = shared_state.clone();
+                        let signal_state = shared_state.clone();
+                        let mut builder = TestBuilder::new(config, make_executor)
+                            .on_progress(move |update| {
+                                progress_state.update_from_progress(update);
+                                eprint!("\r{}", ProgressLine::new(update));
+                            })
+                            .external_commands(ext_cmd_rx)
+                            .pushed_signal_source(move || signal_state.drain_pushed_signals());
+
+                        if let Some(factory) = plugin_factory {
+                            builder = builder.generator_factory(factory);
+                        }
+
+                        builder.run().context("load test failed")?
+                    } else {
+                        let mut builder =
+                            TestBuilder::new(config, make_executor).on_progress(|update| {
+                                eprint!("\r{}", ProgressLine::new(update));
+                            });
+
+                        if let Some(factory) = plugin_factory {
+                            builder = builder.generator_factory(factory);
+                        }
+
+                        builder.run().context("load test failed")?
+                    }
+                }
             };
+
             eprintln!(); // newline after progress
 
             let output_format =
@@ -907,6 +1185,7 @@ fn main() -> Result<()> {
                 error_status_threshold: error_threshold,
                 external_metrics_url: external_metrics_url.clone(),
                 external_metrics_field: external_metrics_field.clone(),
+                bandwidth_limit_bps: None,
                 plugin: plugin_config,
             };
 
@@ -1075,6 +1354,100 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Multi-protocol support
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DetectedProtocol {
+    Http,
+    Tcp,
+    Udp,
+}
+
+fn detect_protocol(urls: &[String]) -> DetectedProtocol {
+    let first = urls.first().map(|s| s.as_str()).unwrap_or("http://");
+    if first.starts_with("tcp://") {
+        DetectedProtocol::Tcp
+    } else if first.starts_with("udp://") {
+        DetectedProtocol::Udp
+    } else {
+        DetectedProtocol::Http
+    }
+}
+
+/// Parse tcp:// or udp:// URLs to SocketAddr, resolving DNS if needed.
+fn parse_socket_targets(urls: &[String], scheme: &str) -> Result<Vec<std::net::SocketAddr>> {
+    urls.iter()
+        .map(|u| {
+            let addr_str = u
+                .strip_prefix(scheme)
+                .ok_or_else(|| anyhow::anyhow!("URL {u} does not start with {scheme}"))?;
+            use std::net::ToSocketAddrs;
+            addr_str
+                .to_socket_addrs()
+                .context(format!("failed to resolve {addr_str}"))?
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("no addresses found for {addr_str}"))
+        })
+        .collect()
+}
+
+/// Resolve payload from --payload, --payload-hex, or --payload-file flags.
+fn resolve_payload(
+    text: &Option<String>,
+    hex: &Option<String>,
+    file: &Option<String>,
+) -> Result<Vec<u8>> {
+    if let Some(t) = text {
+        // Unescape common sequences
+        let unescaped = t
+            .replace("\\r", "\r")
+            .replace("\\n", "\n")
+            .replace("\\t", "\t");
+        Ok(unescaped.into_bytes())
+    } else if let Some(h) = hex {
+        let clean: String = h.chars().filter(|c| !c.is_whitespace()).collect();
+        (0..clean.len())
+            .step_by(2)
+            .map(|i| {
+                u8::from_str_radix(&clean[i..i + 2], 16)
+                    .context(format!("invalid hex at position {i}"))
+            })
+            .collect()
+    } else if let Some(path) = file {
+        std::fs::read(path).context(format!("failed to read payload file: {path}"))
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+/// Parse --framing flag into TcpFraming.
+fn parse_tcp_framing(s: &str, delimiter: &str) -> Result<netanvil_tcp::TcpFraming> {
+    if s == "raw" {
+        Ok(netanvil_tcp::TcpFraming::Raw)
+    } else if let Some(rest) = s.strip_prefix("length-prefix:") {
+        let width: u8 = rest
+            .parse()
+            .context("length-prefix width must be 1, 2, or 4")?;
+        if !matches!(width, 1 | 2 | 4) {
+            anyhow::bail!("length-prefix width must be 1, 2, or 4, got {width}");
+        }
+        Ok(netanvil_tcp::TcpFraming::LengthPrefixed { width })
+    } else if s == "delimiter" {
+        let bytes = delimiter
+            .replace("\\r", "\r")
+            .replace("\\n", "\n")
+            .into_bytes();
+        Ok(netanvil_tcp::TcpFraming::Delimiter(bytes))
+    } else if let Some(rest) = s.strip_prefix("fixed:") {
+        let size: usize = rest.parse().context("fixed size must be a number")?;
+        Ok(netanvil_tcp::TcpFraming::FixedSize(size))
+    } else {
+        anyhow::bail!("unknown framing: {s}. Expected: raw, length-prefix:N, delimiter, fixed:N")
+    }
 }
 
 #[cfg(test)]

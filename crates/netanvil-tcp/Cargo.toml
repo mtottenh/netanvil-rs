@@ -1,0 +1,18 @@
+[package]
+name = "netanvil-tcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "TCP request-response executor for netanvil-rs load testing"
+
+[dependencies]
+netanvil-types = { workspace = true }
+compio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+netanvil-test-servers = { workspace = true }
+netanvil-core = { workspace = true }
+netanvil-types = { workspace = true }
+netanvil-metrics = { workspace = true }

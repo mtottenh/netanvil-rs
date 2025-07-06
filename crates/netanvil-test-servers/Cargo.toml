@@ -1,0 +1,23 @@
+[package]
+name = "netanvil-test-servers"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Compio-based test servers (TCP echo, UDP echo) for netanvil-rs integration testing"
+
+[dependencies]
+compio = { workspace = true }
+flume = { workspace = true }
+tracing = { workspace = true }
+clap = { workspace = true }
+tracing-subscriber = { workspace = true }
+core_affinity = { workspace = true }
+
+[[bin]]
+name = "tcp-echo"
+path = "src/bin/tcp_echo.rs"
+
+[[bin]]
+name = "udp-echo"
+path = "src/bin/udp_echo.rs"

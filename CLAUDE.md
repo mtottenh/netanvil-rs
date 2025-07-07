@@ -25,60 +25,71 @@ cargo run --bin netanvil-cli -- [args] # Run CLI
 
 - Hot-path code is `!Send`. Use `Rc<RefCell<...>>` for per-core state, NOT `Arc<Mutex<...>>`.
 - Cross-core communication via `flume` channels only.
-- Each worker core runs its own compio runtime with its own io_uring instance.
-- HTTP uses hyper via cyper-core bridge (not tokio).
+- Each I/O worker core runs its own compio runtime with its own io_uring instance.
+- HTTP uses hyper via cyper bridge (not tokio).
 
-### System Structure
+### System Structure (N:M Timer Thread Model)
 
 ```
-Coordinator (own thread, synchronous ~10-100Hz loop)
-  ├── RateController (static, PID, step, external)
+Coordinator (main thread, synchronous ~10-100Hz loop)
+  ├── Box<dyn RateController> (static, PID, step, composite PID)
   ├── AggregateMetrics (merged from per-core snapshots)
-  └── WorkerHandles (flume channels to each core)
+  ├── SaturationDetection (backpressure, scheduling delays)
+  └── TimerThreadHandle + IoWorkerHandles
 
-Worker (per-core, compio runtime, !Send)
-  ├── RequestScheduler (computes next send time)
-  ├── RequestGenerator (creates RequestSpec)
-  ├── RequestTransformer (modifies RequestSpec)
+Timer Thread (core 0, synchronous spin-loop, ~1us precision)
+  ├── Scheduler[0..N] (one per I/O worker, min-heap dispatch)
+  └── Bounded fire channels → I/O workers
+
+I/O Worker (per-core, compio runtime, !Send)
+  ├── RequestGenerator (creates HttpRequestSpec — native or plugin)
+  ├── RequestTransformer (modifies HttpRequestSpec, Rc-shared)
   ├── RequestExecutor (HTTP client, Rc-shared with spawned tasks)
   └── MetricsCollector (HDR histogram, Rc-shared with spawned tasks)
 ```
 
-### Crate Structure (5 crates)
+### Crate Structure (10 crates)
 
-- `netanvil-types` — Traits + data types. Zero dependencies.
-- `netanvil-core` — Worker, Coordinator, schedulers, rate controllers. Depends on compio.
-- `netanvil-http` — HTTP executor (cyper-core + hyper). Depends on compio.
+- `netanvil-types` — Traits + data types. Zero runtime dependencies.
 - `netanvil-metrics` — HDR histogram metrics collector. Depends on hdrhistogram.
+- `netanvil-core` — Engine, Coordinator, timer thread, I/O workers, rate controllers. Depends on compio.
+- `netanvil-http` — HTTP executor (cyper + hyper). Depends on compio.
+- `netanvil-api` — Control API server (standalone + agent mode). Depends on tiny_http.
+- `netanvil-distributed` — Distributed coordinator (HTTP-based multi-node). Depends on netanvil-api.
+- `netanvil-plugin` — Plugin system (WASM, Rhai, Hybrid Lua). Depends on wasmtime, rhai, mlua.
+- `netanvil-plugin-luajit` — LuaJIT per-request generator. Depends on mlua/luajit.
+- `netanvil-plugin-lua54` — Lua 5.4 per-request generator. Depends on mlua/lua54. Not in default-members (link conflict with LuaJIT).
 - `netanvil-cli` — CLI entry point. Depends on clap.
 
 ### Core Traits (in netanvil-types)
 
-Hot-path traits (per-core, `!Send`):
-- `RequestScheduler` — `fn next_request_time(&mut self) -> Option<Instant>`
-- `RequestGenerator` — `fn generate(&mut self, ctx) -> RequestSpec`
-- `RequestTransformer` — `fn transform(&self, spec, ctx) -> RequestSpec`
-- `RequestExecutor` — `async fn execute(&self, spec, ctx) -> ExecutionResult`
+Hot-path traits (per-core, `!Send` except RequestScheduler):
+- `RequestScheduler: Send` — `fn next_request_time(&mut self) -> Option<Instant>` (Send for timer thread)
+- `RequestGenerator` — `fn generate(&mut self, ctx) -> HttpRequestSpec`
+- `RequestTransformer` — `fn transform(&self, spec, ctx) -> HttpRequestSpec`
+- `RequestExecutor` — `fn execute(&self, spec, ctx) -> impl Future<Output = ExecutionResult>`
 - `MetricsCollector` — `fn record(&self, result)` + `fn snapshot(&self) -> MetricsSnapshot`
 
 Control-plane trait:
-- `RateController` — `fn update(&mut self, metrics) -> RateDecision`
+- `RateController` — `fn update(&mut self, summary: &MetricsSummary) -> RateDecision`
 
 ### Key Design Principles
 
 1. **Shared-nothing workers.** All hot-path state is duplicated per core.
-2. **No `Send + Sync` on hot-path traits.** Thread-per-core means `Rc`, not `Arc`.
-3. **Profiling via decorators,** not supertraits. Wrap `RequestExecutor` with `ProfilingExecutor<E>`.
+2. **N:M timer thread model.** Dedicated timer thread (spin-loop) owns schedulers; I/O workers are pure executors.
+3. **No `Send + Sync` on hot-path traits** (except `RequestScheduler` for timer thread). Thread-per-core means `Rc`, not `Arc`.
 4. **Coordinated omission prevention.** Every `RequestContext` has `intended_time` and `actual_time`.
-5. **Composable metrics.** `AggregateMetrics::merge()` is associative+commutative — works for both local core aggregation and future distributed node aggregation.
+5. **Composable metrics.** `AggregateMetrics::merge()` is associative+commutative — works for both local core aggregation and distributed node aggregation.
+6. **Plugin transparency.** Plugin generators implement `RequestGenerator` — I/O workers don't know or care if generation is native or scripted.
 
 ### Extension Pattern
 
 Every advanced feature is a new trait implementation or a decorator:
-- PID control → `impl RateController`
-- Session simulation → `impl RequestGenerator`
+- PID/composite PID control → `impl RateController`
+- Plugin generators → `impl RequestGenerator` (WASM, Lua, Hybrid, Rhai)
+- Connection policies → `impl RequestTransformer` (`ConnectionPolicyTransformer`)
 - eBPF profiling → decorator wrapping `RequestExecutor`
-- Distributed mode → `DistributedCoordinator` wrapping `Coordinator` (future crate)
+- Distributed mode → `DistributedCoordinator` (HTTP-based, in netanvil-distributed)
 
 ### Testing
 

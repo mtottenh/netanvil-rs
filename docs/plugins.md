@@ -24,8 +24,8 @@ auto-detected from the file extension (`.lua` defaults to per-request Lua,
 
 | Capability                        | Hybrid       | Lua (LuaJIT)  | WASM (wasmtime) |
 |-----------------------------------|--------------|----------------|-----------------|
-| Per-call overhead                 | ~576ns       | ~2.1us         | ~2.7us          |
-| Max RPS/core                      | 50K+         | ~40K           | ~35K            |
+| Per-call overhead                 | ~576ns       | ~2.1us         | ~878ns          |
+| Max RPS/core                      | 50K+         | ~40K           | ~100K+          |
 | Conditional logic per request     | No           | Yes            | Yes             |
 | Stateful across requests          | Counter only | Yes (globals)  | Yes (globals)   |
 | Dynamic HTTP method per request   | No           | Yes            | Yes             |
@@ -273,8 +273,8 @@ Everything Lua can do, plus:
 
 - **Harder development workflow**: write code, compile to `.wasm`, then load
 - **Debugging is harder**: no `print()` equivalent without WASI stdout wiring
-- **JSON marshaling overhead**: ~2.7us per call, mostly from serialization
-- **Binary size**: the WASM module includes its own allocator and serde code
+- **Binary protocol overhead**: ~878ns per call (postcard encoding + WASM call transitions)
+- **Binary size**: ~40KB for a minimal plugin (includes allocator and postcard)
 
 ### Example: HMAC-Signed Requests with Bloom Filter Dedup
 
@@ -298,16 +298,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-#[derive(Deserialize)]
-struct RequestContext {
+/// 24-byte context received from the host via shared memory.
+/// Must match the host's RawContext layout exactly.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawContext {
     request_id: u64,
-    core_id: usize,
-    is_sampled: bool,
-    session_id: Option<u64>,
+    core_id: u32,
+    flags: u8,       // bit 0: is_sampled, bit 1: has_session_id
+    _pad: [u8; 3],
+    session_id: u64,
 }
+const _: () = assert!(core::mem::size_of::<RawContext>() == 24);
 
 #[derive(Serialize)]
-struct RequestSpec {
+struct HttpRequestSpec {
     method: String,
     url: String,
     headers: Vec<(String, String)>,
@@ -401,7 +406,7 @@ pub extern "C" fn get_output_buf_ptr() -> *const u8 {
 pub extern "C" fn init(input_len: u32) -> u32 {
     unsafe {
         let input = &INPUT_BUF[..input_len as usize];
-        match serde_json::from_slice::<Vec<String>>(input) {
+        match postcard::from_bytes::<Vec<String>>(input) {
             Ok(targets) => {
                 TARGETS = targets;
                 COUNTER = 0;
@@ -423,11 +428,11 @@ pub extern "C" fn generate(input_len: u32) -> u32 {
             return 0;
         }
 
-        let input = &INPUT_BUF[..input_len as usize];
-        let ctx: RequestContext = match serde_json::from_slice(input) {
-            Ok(c) => c,
-            Err(_) => return 0,
-        };
+        // Read 24-byte binary context directly (zero deserialization).
+        if (input_len as usize) < core::mem::size_of::<RawContext>() {
+            return 0;
+        }
+        let ctx = &*(INPUT_BUF.as_ptr() as *const RawContext);
 
         COUNTER += 1;
         let counter = COUNTER;
@@ -502,14 +507,14 @@ pub extern "C" fn generate(input_len: u32) -> u32 {
             headers.push(("Content-Length".to_string(), body.len().to_string()));
         }
 
-        let spec = RequestSpec {
+        let spec = HttpRequestSpec {
             method: method.to_string(),
             url,
             headers,
             body: body_str.map(|s| s.into_bytes()),
         };
 
-        OUTPUT_BUF = serde_json::to_vec(&spec).unwrap_or_default();
+        OUTPUT_BUF = postcard::to_allocvec(&spec).unwrap_or_default();
         OUTPUT_BUF.len() as u32
     }
 }
@@ -518,7 +523,7 @@ pub extern "C" fn generate(input_len: u32) -> u32 {
 pub extern "C" fn update_targets(input_len: u32) -> u32 {
     unsafe {
         let input = &INPUT_BUF[..input_len as usize];
-        match serde_json::from_slice::<Vec<String>>(input) {
+        match postcard::from_bytes::<Vec<String>>(input) {
             Ok(targets) if !targets.is_empty() => { TARGETS = targets; 0 }
             _ => 1,
         }
@@ -559,6 +564,77 @@ Phase: spike (requests 5000+)
 - Written in Rust with full access to `std` and crate ecosystem
 - Sandboxed: the plugin cannot access the host filesystem or network
 
+### Building a WASM Plugin from Scratch
+
+A minimal template is provided at `examples/wasm-plugin/`. To create your own:
+
+**1. Create a new crate:**
+
+```bash
+cargo new --lib my-plugin
+cd my-plugin
+```
+
+**2. Configure `Cargo.toml`:**
+
+```toml
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+```
+
+**3. Implement the required exports in `src/lib.rs`:**
+
+Your module must export five C-ABI functions: `get_input_buf_ptr`,
+`get_output_buf_ptr`, `init`, `generate`, and `update_targets`. See the
+template at `examples/wasm-plugin/src/lib.rs` for the full implementation.
+
+The key function is `generate()`:
+
+```rust
+#[no_mangle]
+pub extern "C" fn generate(input_len: u32) -> u32 {
+    unsafe {
+        // Read 24-byte binary context (zero deserialization).
+        let ctx = &*(INPUT_BUF.as_ptr() as *const RawContext);
+
+        // Build your request spec.
+        let spec = HttpRequestSpec {
+            method: "GET".to_string(),
+            url: format!("{}?id={}", TARGETS[0], ctx.request_id),
+            headers: vec![],
+            body: None,
+        };
+
+        // Encode with postcard and return length.
+        OUTPUT_BUF = postcard::to_allocvec(&spec).unwrap_or_default();
+        OUTPUT_BUF.len() as u32
+    }
+}
+```
+
+**4. Build:**
+
+```bash
+rustup target add wasm32-wasip1   # one-time setup
+cargo build --target wasm32-wasip1 --release
+```
+
+**5. Run:**
+
+```bash
+netanvil-cli test --url http://your-target:8080 \
+  --plugin target/wasm32-wasip1/release/my_plugin.wasm \
+  --rps 1000 --duration 30s
+```
+
 ---
 
 ## Choosing a Plugin Type
@@ -598,13 +674,13 @@ Benchmarked with `cargo bench -p netanvil-plugin`:
 
 | Plugin type | Per-call overhead | Relative to native | Budget used (20us) |
 |-------------|-------------------|--------------------|---------------------|
-| Native Rust | 221ns             | 1x                 | 1.1%                |
-| Hybrid      | 576ns             | 2.6x               | 2.9%                |
-| LuaJIT      | 2.1us             | 9.6x               | 10.5%               |
-| WASM        | 2.7us             | 12.4x              | 13.5%               |
-| Lua 5.4     | 2.9us             | 13.3x              | 14.5%               |
+| Native Rust | 203ns             | 1x                 | 1.0%                |
+| Hybrid      | 603ns             | 3.0x               | 3.0%                |
+| WASM        | 878ns             | 4.3x               | 4.4%                |
+| LuaJIT      | 2.06us            | 10.1x              | 10.3%               |
+| Rhai        | 4.2us             | 20.7x              | 21.0%               |
 
-All plugin types leave >85% of the per-request budget for actual HTTP execution.
+All plugin types leave >79% of the per-request budget for actual HTTP execution.
 
 ## Plugin API Reference
 
@@ -647,13 +723,30 @@ function update_targets(new)   -- called when targets change mid-test
 Must export these C-ABI functions:
 
 ```
-get_input_buf_ptr() -> i32     -- returns pointer to input buffer
-get_output_buf_ptr() -> i32    -- returns pointer to output buffer
-init(input_len: i32) -> i32    -- initialize with JSON targets, returns 0 on success
-generate(input_len: i32) -> i32 -- generate request, returns output JSON length
-update_targets(input_len: i32) -> i32  -- update targets mid-test
+get_input_buf_ptr() -> i32           -- pointer to input buffer (host writes here)
+get_output_buf_ptr() -> i32          -- pointer to output buffer (host reads here)
+init(input_len: i32) -> i32          -- initialize with postcard-encoded targets
+generate(input_len: i32) -> i32      -- generate request, returns output byte length
+update_targets(input_len: i32) -> i32 -- update targets with postcard-encoded list
 ```
 
-**Protocol:** Host writes JSON to the input buffer, calls the function with the
-byte length, then reads JSON from the output buffer. See `guest-wasm/` for a
-complete Rust example.
+**Binary protocol:**
+
+- **Context** (host -> guest): 24-byte `#[repr(C)]` struct written directly to the
+  input buffer. Read via pointer cast — zero deserialization.
+
+  | Offset | Type   | Field        | Description                              |
+  |--------|--------|--------------|------------------------------------------|
+  | 0      | u64    | request_id   | Unique request ID (partitioned by core)  |
+  | 8      | u32    | core_id      | Which core is executing (0-based)        |
+  | 12     | u8     | flags        | Bit 0: is_sampled, Bit 1: has_session_id |
+  | 13     | [u8;3] | _pad         | Alignment padding                        |
+  | 16     | u64    | session_id   | Valid only if flags bit 1 is set         |
+
+- **Spec output** (guest -> host): `postcard`-encoded struct with fields
+  `{method, url, headers, body}`. The host reads directly from guest memory.
+
+- **Target lists** (init/update_targets): `postcard`-encoded `Vec<String>`.
+
+See `examples/wasm-plugin/` for a minimal template, or `crates/netanvil-plugin/guest-wasm/`
+for the reference implementation.

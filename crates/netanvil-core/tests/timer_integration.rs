@@ -48,6 +48,7 @@ impl RequestExecutor for MockExecutor {
                 ..Default::default()
             },
             status: Some(200),
+            bytes_sent: 0,
             response_size: 256,
             error: None,
         }
@@ -116,6 +117,7 @@ fn spawn_full_architecture(
                             metrics_tx,
                             core_id,
                             metrics_interval,
+                            graceful_shutdown: true,
                         },
                         generator,
                         Rc::new(NoopTransformer),
@@ -378,6 +380,7 @@ fn timer_plus_workers_coordinated_omission_tracking() {
                     ..Default::default()
                 },
                 status: Some(200),
+                bytes_sent: 0,
                 response_size: 64,
                 error: None,
             }
@@ -399,6 +402,7 @@ fn timer_plus_workers_coordinated_omission_tracking() {
                 metrics_tx,
                 core_id: 0,
                 metrics_interval: Duration::from_secs(10),
+                graceful_shutdown: true,
             },
             generator,
             Rc::new(NoopTransformer),

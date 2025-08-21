@@ -257,6 +257,10 @@ where
             latency_p90_ns: (p90 * 1_000_000.0) as u64,
             latency_p99_ns: (p99 * 1_000_000.0) as u64,
             window_duration: self.config.control_interval,
+            bytes_sent: 0,
+            bytes_received: 0,
+            throughput_send_bps: 0.0,
+            throughput_recv_bps: 0.0,
             external_signals: Vec::new(),
         }
     }

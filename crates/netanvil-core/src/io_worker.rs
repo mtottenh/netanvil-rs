@@ -20,6 +20,8 @@ pub struct IoWorkerConfig {
     pub metrics_tx: flume::Sender<MetricsSnapshot>,
     pub core_id: usize,
     pub metrics_interval: Duration,
+    /// Whether to yield for in-flight requests on shutdown.
+    pub graceful_shutdown: bool,
 }
 
 /// Run the I/O worker loop.
@@ -49,6 +51,7 @@ pub async fn io_worker_loop<G, T, E, M>(
         metrics_tx,
         core_id,
         metrics_interval,
+        graceful_shutdown,
     } = config;
     let mut request_seq: u64 = 0;
     let mut last_report = Instant::now();
@@ -135,8 +138,11 @@ pub async fn io_worker_loop<G, T, E, M>(
 
     // Give spawned tasks a chance to complete before taking the final snapshot.
     // Without this yield, the metrics won't include requests still in-flight.
-    tracing::debug!(core_id, "yielding to let spawned tasks complete");
-    compio::time::sleep(Duration::from_millis(50)).await;
+    // Skip this when graceful_shutdown is false (-nowait mode).
+    if graceful_shutdown {
+        tracing::debug!(core_id, "yielding to let spawned tasks complete");
+        compio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     // Send final snapshot
     let snapshot = metrics.snapshot();

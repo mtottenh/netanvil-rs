@@ -15,7 +15,8 @@ pub mod traits;
 pub use command::{ScheduledRequest, TimerCommand, WorkerCommand};
 pub use config::{
     ConnectionConfig, ConnectionPolicy, CountDistribution, PidConstraint, PidGains, PidTarget,
-    PluginConfig, PluginType, RateConfig, SchedulerConfig, TargetMetric, TestConfig, TlsConfig,
+    PluginConfig, PluginType, ProtocolConfig, RateConfig, SchedulerConfig, TargetMetric,
+    TestConfig, TlsConfig,
 };
 pub use distributed::{MetricsFetcher, NodeCommander, NodeDiscovery, RemoteMetrics};
 pub use error::{NetAnvilError, Result};

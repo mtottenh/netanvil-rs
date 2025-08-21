@@ -37,6 +37,28 @@ impl fmt::Display for Report<'_> {
         writeln!(f, "    p99:           {:>10.2?}", r.latency_p99)?;
         writeln!(f, "    max:           {:>10.2?}", r.latency_max)?;
 
+        // Show throughput if any bytes were transferred
+        if r.total_bytes_sent > 0 || r.total_bytes_received > 0 {
+            writeln!(f)?;
+            writeln!(f, "  Throughput:")?;
+            if r.total_bytes_sent > 0 {
+                writeln!(
+                    f,
+                    "    Send:          {:>10.1} Mbps ({:.1} MB)",
+                    r.throughput_send_mbps,
+                    r.total_bytes_sent as f64 / 1_000_000.0
+                )?;
+            }
+            if r.total_bytes_received > 0 {
+                writeln!(
+                    f,
+                    "    Receive:       {:>10.1} Mbps ({:.1} MB)",
+                    r.throughput_recv_mbps,
+                    r.total_bytes_received as f64 / 1_000_000.0
+                )?;
+            }
+        }
+
         // Show saturation info if any signals were detected
         let s = &r.saturation;
         if s.backpressure_drops > 0
@@ -96,17 +118,34 @@ impl<'a> ProgressLine<'a> {
 impl fmt::Display for ProgressLine<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let u = self.update;
-        let p99_ms = u.window.latency_p99_ns as f64 / 1_000_000.0;
         let remaining = format_duration_short(u.remaining);
 
-        write!(
-            f,
-            "[{remaining:>6} remaining]  {rps:>8.1} req/s  |  p99 {p99:>7.1}ms  |  total {total:>8}  errors {errors}",
-            rps = u.current_rps,
-            p99 = p99_ms,
-            total = u.total_requests,
-            errors = u.total_errors,
-        )?;
+        // If significant bytes are flowing, show throughput alongside RPS
+        let secs = u.elapsed.as_secs_f64().max(0.001);
+        let send_mbps = u.total_bytes_sent as f64 * 8.0 / secs / 1_000_000.0;
+        let recv_mbps = u.total_bytes_received as f64 * 8.0 / secs / 1_000_000.0;
+        let has_throughput = send_mbps > 0.1 || recv_mbps > 0.1;
+
+        if has_throughput {
+            write!(
+                f,
+                "[{remaining:>6} remaining]  {rps:>8.1} ops/s  |  {send:>7.1} Mbps send  |  total {total:>8}  errors {errors}",
+                rps = u.current_rps,
+                send = send_mbps,
+                total = u.total_requests,
+                errors = u.total_errors,
+            )?;
+        } else {
+            let p99_ms = u.window.latency_p99_ns as f64 / 1_000_000.0;
+            write!(
+                f,
+                "[{remaining:>6} remaining]  {rps:>8.1} req/s  |  p99 {p99:>7.1}ms  |  total {total:>8}  errors {errors}",
+                rps = u.current_rps,
+                p99 = p99_ms,
+                total = u.total_requests,
+                errors = u.total_errors,
+            )?;
+        }
 
         // Show saturation warning inline when detected
         use netanvil_types::SaturationAssessment;

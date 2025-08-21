@@ -89,6 +89,8 @@ impl RequestExecutor for HttpExecutor {
         })
         .await;
 
+        let bytes_sent = spec.body.as_ref().map_or(0, |b| b.len() as u64);
+
         match result {
             Ok(Ok((status, response_size, timing))) => ExecutionResult {
                 request_id: context.request_id,
@@ -96,6 +98,7 @@ impl RequestExecutor for HttpExecutor {
                 actual_time: context.actual_time,
                 timing,
                 status: Some(status),
+                bytes_sent,
                 response_size,
                 error: None,
             },
@@ -108,6 +111,7 @@ impl RequestExecutor for HttpExecutor {
                     ..Default::default()
                 },
                 status: None,
+                bytes_sent: 0,
                 response_size: 0,
                 error: Some(err),
             },
@@ -120,6 +124,7 @@ impl RequestExecutor for HttpExecutor {
                     ..Default::default()
                 },
                 status: None,
+                bytes_sent: 0,
                 response_size: 0,
                 error: Some(ExecutionError::Timeout),
             },

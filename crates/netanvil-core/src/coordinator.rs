@@ -27,6 +27,10 @@ pub struct ProgressUpdate {
     pub latency_buckets: Vec<(f64, u64)>,
     /// Client/server saturation assessment for this tick.
     pub saturation: SaturationInfo,
+    /// Total bytes sent across all cores (cumulative).
+    pub total_bytes_sent: u64,
+    /// Total bytes received across all cores (cumulative).
+    pub total_bytes_received: u64,
 }
 
 /// Standard Prometheus latency bucket boundaries in nanoseconds.
@@ -91,6 +95,16 @@ pub struct Coordinator {
     /// Last-seen timer stats values (for computing per-tick deltas).
     last_timer_dispatched: u64,
     last_timer_dropped: u64,
+    /// Stop after this many total requests.
+    max_requests: Option<u64>,
+    /// Stop if cumulative errors exceed this.
+    autostop_threshold: Option<u64>,
+    /// Stop if cumulative refused connections exceed this.
+    refusestop_threshold: Option<u64>,
+    /// Warmup period — metrics merged into total_aggregate only after warmup ends.
+    warmup_duration: Option<Duration>,
+    /// Whether warmup has completed.
+    warmup_complete: bool,
 }
 
 impl Coordinator {
@@ -117,7 +131,32 @@ impl Coordinator {
             pushed_signal_source: None,
             last_timer_dispatched: 0,
             last_timer_dropped: 0,
+            max_requests: None,
+            autostop_threshold: None,
+            refusestop_threshold: None,
+            warmup_duration: None,
+            warmup_complete: false,
         }
+    }
+
+    /// Configure request count limit.
+    pub fn max_requests(&mut self, n: u64) {
+        self.max_requests = Some(n);
+    }
+
+    /// Configure auto-stop on error count threshold.
+    pub fn autostop_threshold(&mut self, n: u64) {
+        self.autostop_threshold = Some(n);
+    }
+
+    /// Configure auto-stop on refused connection count threshold.
+    pub fn refusestop_threshold(&mut self, n: u64) {
+        self.refusestop_threshold = Some(n);
+    }
+
+    /// Configure warmup duration (metrics excluded until warmup ends).
+    pub fn warmup_duration(&mut self, d: Duration) {
+        self.warmup_duration = Some(d);
     }
 
     /// Set a callback that receives live progress updates each tick.
@@ -191,7 +230,24 @@ impl Coordinator {
         for worker in &self.io_workers {
             while let Ok(snapshot) = worker.metrics_rx.try_recv() {
                 self.tick_aggregate.merge(&snapshot);
-                self.total_aggregate.merge(&snapshot);
+                // During warmup, don't accumulate into total_aggregate.
+                // This ensures the final results exclude warmup data.
+                if self.warmup_complete {
+                    self.total_aggregate.merge(&snapshot);
+                }
+            }
+        }
+
+        // Check if warmup just completed
+        if !self.warmup_complete {
+            if let Some(warmup) = self.warmup_duration {
+                if self.start_time.elapsed() >= warmup {
+                    self.warmup_complete = true;
+                    tracing::info!("warmup complete, metrics collection started");
+                }
+            } else {
+                // No warmup configured
+                self.warmup_complete = true;
             }
         }
 
@@ -247,6 +303,8 @@ impl Coordinator {
                 window: summary,
                 latency_buckets: buckets,
                 saturation,
+                total_bytes_sent: self.total_aggregate.bytes_sent(),
+                total_bytes_received: self.total_aggregate.bytes_received(),
             };
             callback(&update);
         }
@@ -365,7 +423,38 @@ impl Coordinator {
     }
 
     fn is_test_complete(&self) -> bool {
-        self.stopped || self.start_time.elapsed() >= self.test_duration
+        if self.stopped {
+            return true;
+        }
+        if self.start_time.elapsed() >= self.test_duration {
+            return true;
+        }
+        if let Some(max) = self.max_requests {
+            if self.total_aggregate.total_requests() >= max {
+                return true;
+            }
+        }
+        if let Some(threshold) = self.autostop_threshold {
+            if self.total_aggregate.total_errors() >= threshold {
+                tracing::warn!(
+                    errors = self.total_aggregate.total_errors(),
+                    threshold,
+                    "autostop: error threshold exceeded"
+                );
+                return true;
+            }
+        }
+        if let Some(threshold) = self.refusestop_threshold {
+            if self.total_aggregate.total_errors() >= threshold {
+                tracing::warn!(
+                    errors = self.total_aggregate.total_errors(),
+                    threshold,
+                    "refusestop: refused connection threshold exceeded"
+                );
+                return true;
+            }
+        }
+        false
     }
 
     fn collect_final_metrics(&mut self) -> TestResult {
@@ -440,6 +529,10 @@ impl Coordinator {
             },
         };
 
+        let bytes_sent = self.total_aggregate.bytes_sent();
+        let bytes_received = self.total_aggregate.bytes_received();
+        let secs = elapsed.as_secs_f64();
+
         TestResult {
             total_requests,
             total_errors: self.total_aggregate.total_errors(),
@@ -448,12 +541,16 @@ impl Coordinator {
             latency_p90: Duration::from_nanos(hist.value_at_quantile(0.90)),
             latency_p99: Duration::from_nanos(hist.value_at_quantile(0.99)),
             latency_max: Duration::from_nanos(hist.max()),
-            request_rate: total_requests as f64 / elapsed.as_secs_f64(),
+            request_rate: total_requests as f64 / secs,
             error_rate: if total_requests > 0 {
                 self.total_aggregate.total_errors() as f64 / total_requests as f64
             } else {
                 0.0
             },
+            total_bytes_sent: bytes_sent,
+            total_bytes_received: bytes_received,
+            throughput_send_mbps: bytes_sent as f64 * 8.0 / secs / 1_000_000.0,
+            throughput_recv_mbps: bytes_received as f64 * 8.0 / secs / 1_000_000.0,
             saturation,
         }
     }

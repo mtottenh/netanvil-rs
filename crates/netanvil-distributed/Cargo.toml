@@ -19,6 +19,7 @@ rustls-pemfile = "2"
 netanvil-api = { workspace = true }
 netanvil-http = { workspace = true }
 netanvil-core = { workspace = true }
+netanvil-test-servers = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tracing-subscriber = { workspace = true }

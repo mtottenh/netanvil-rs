@@ -23,6 +23,14 @@ pub struct TestResult {
     pub latency_max: Duration,
     pub request_rate: f64,
     pub error_rate: f64,
+    /// Total bytes sent across all cores.
+    pub total_bytes_sent: u64,
+    /// Total bytes received across all cores.
+    pub total_bytes_received: u64,
+    /// Send throughput in megabits per second.
+    pub throughput_send_mbps: f64,
+    /// Receive throughput in megabits per second.
+    pub throughput_recv_mbps: f64,
     /// Client/server saturation assessment over the entire test.
     pub saturation: SaturationInfo,
 }

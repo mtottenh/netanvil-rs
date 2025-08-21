@@ -102,7 +102,7 @@ fn make_summary(requests: u64, p99_ms: f64, error_rate: f64) -> MetricsSummary {
         latency_p90_ns: (p99_ms * 0.9 * 1_000_000.0) as u64,
         latency_p99_ns: (p99_ms * 1_000_000.0) as u64,
         window_duration: Duration::from_secs(1),
-        external_signals: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -395,6 +395,7 @@ fn make_summary_with_signal(requests: u64, signal_name: &str, signal_value: f64)
         latency_p99_ns: 20_000_000,
         window_duration: Duration::from_secs(1),
         external_signals: vec![(signal_name.to_string(), signal_value)],
+        ..Default::default()
     }
 }
 
@@ -545,6 +546,7 @@ fn make_summary_with_latency_and_errors(
         latency_p99_ns: (p99_ms * 1_000_000.0) as u64,
         window_duration: Duration::from_secs(1),
         external_signals: signals,
+        ..Default::default()
     }
 }
 

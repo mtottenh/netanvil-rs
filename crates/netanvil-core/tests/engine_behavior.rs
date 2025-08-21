@@ -42,6 +42,7 @@ impl RequestExecutor for MockExecutor {
                 ..Default::default()
             },
             status: Some(200),
+            bytes_sent: 0,
             response_size: 256,
             error: None,
         }
@@ -67,6 +68,7 @@ impl RequestExecutor for ErrorExecutor {
                 ..Default::default()
             },
             status: Some(500),
+            bytes_sent: 0,
             response_size: 0,
             error: Some(netanvil_types::ExecutionError::Http(
                 "500 Internal Server Error".into(),

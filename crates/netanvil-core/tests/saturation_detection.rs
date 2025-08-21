@@ -85,6 +85,7 @@ fn collector_tracks_scheduling_delay() {
             ..Default::default()
         },
         status: Some(200),
+        bytes_sent: 0,
         response_size: 0,
         error: None,
     });
@@ -99,6 +100,7 @@ fn collector_tracks_scheduling_delay() {
             ..Default::default()
         },
         status: Some(200),
+        bytes_sent: 0,
         response_size: 0,
         error: None,
     });
@@ -113,6 +115,7 @@ fn collector_tracks_scheduling_delay() {
             ..Default::default()
         },
         status: Some(200),
+        bytes_sent: 0,
         response_size: 0,
         error: None,
     });
@@ -157,6 +160,7 @@ fn collector_resets_delay_stats_on_snapshot() {
             ..Default::default()
         },
         status: Some(200),
+        bytes_sent: 0,
         response_size: 0,
         error: None,
     });

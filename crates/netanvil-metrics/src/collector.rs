@@ -67,6 +67,8 @@ impl MetricsCollector for HdrMetricsCollector {
             self.total_errors.set(self.total_errors.get() + 1);
         }
 
+        self.bytes_sent
+            .set(self.bytes_sent.get() + result.bytes_sent);
         self.bytes_received
             .set(self.bytes_received.get() + result.response_size);
 
@@ -156,6 +158,7 @@ mod tests {
             } else {
                 Some(500)
             },
+            bytes_sent: 0,
             response_size: 1024,
             error,
         }
@@ -211,6 +214,7 @@ mod tests {
                 ..Default::default()
             },
             status: Some(200),
+            bytes_sent: 0,
             response_size: 0,
             error: None,
         });
@@ -227,6 +231,7 @@ mod tests {
                 ..Default::default()
             },
             status: Some(200),
+            bytes_sent: 0,
             response_size: 0,
             error: None,
         });

@@ -49,6 +49,9 @@ pub struct ExecutionResult {
     pub actual_time: Instant,
     pub timing: TimingBreakdown,
     pub status: Option<u16>,
+    /// Bytes sent to the target (request payload size).
+    pub bytes_sent: u64,
+    /// Bytes received from the target (response payload size).
     pub response_size: u64,
     pub error: Option<ExecutionError>,
 }

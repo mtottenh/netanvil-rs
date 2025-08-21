@@ -415,13 +415,34 @@ where
     E: RequestExecutor + 'static,
     F: Fn() -> E + Send + 'static,
 {
+    // ── Core budget: reserve 1 for timer, 1 for coordinator/API ──
+    let available_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
     let num_cores = if config.num_cores == 0 {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
+        // Auto-detect: subtract 2 reserved cores (timer + misc)
+        available_cores.saturating_sub(2).max(1)
     } else {
         config.num_cores
     };
+
+    let timer_core = 0usize;
+    let io_core_start = 1usize;
+    // Coordinator/API/misc get the last core (or share core 0 on small machines)
+    let misc_core = if available_cores > num_cores + 1 {
+        num_cores + 1
+    } else {
+        0 // share with timer on small machines
+    };
+
+    tracing::info!(
+        available_cores,
+        io_workers = num_cores,
+        timer_core,
+        io_cores = ?(io_core_start..io_core_start + num_cores),
+        misc_core,
+        "thread pinning layout"
+    );
 
     let start_time = Instant::now();
 
@@ -484,10 +505,20 @@ where
         let thread = std::thread::Builder::new()
             .name(format!("netanvil-io-{core_id}"))
             .spawn(move || {
-                // Pin to core (offset by 1 to leave core 0 for timer thread)
-                let pin_core = core_affinity::CoreId { id: core_id + 1 };
+                // Pin to dedicated core (offset by io_core_start)
+                let pin_id = io_core_start + core_id;
+                let pin_core = core_affinity::CoreId { id: pin_id };
                 if !core_affinity::set_for_current(pin_core) {
-                    tracing::warn!(core_id, "failed to pin I/O worker to core {}", core_id + 1);
+                    tracing::warn!(core_id, pin_id, "failed to pin I/O worker");
+                }
+
+                // Elevate I/O worker priority (nice -10)
+                #[cfg(target_os = "linux")]
+                unsafe {
+                    let rc = libc::setpriority(libc::PRIO_PROCESS, 0, -10);
+                    if rc != 0 {
+                        tracing::debug!(core_id, "I/O worker: nice -10 failed (not privileged)");
+                    }
                 }
 
                 // SAFETY: pointers valid because parent joins all threads before returning.
@@ -512,6 +543,7 @@ where
                             metrics_tx,
                             core_id,
                             metrics_interval: config.metrics_interval,
+                            graceful_shutdown: config.graceful_shutdown,
                         },
                         generator,
                         Rc::new(transformer),
@@ -536,9 +568,26 @@ where
     let timer_thread = std::thread::Builder::new()
         .name("netanvil-timer".into())
         .spawn(move || {
-            let core = core_affinity::CoreId { id: 0 };
+            // Pin timer to dedicated core
+            let core = core_affinity::CoreId { id: timer_core };
             if !core_affinity::set_for_current(core) {
-                tracing::warn!("failed to pin timer thread to core 0");
+                tracing::warn!(timer_core, "failed to pin timer thread");
+            }
+
+            // Elevate timer priority: try SCHED_FIFO first, fall back to nice -20
+            #[cfg(target_os = "linux")]
+            unsafe {
+                let param = libc::sched_param { sched_priority: 50 };
+                if libc::sched_setscheduler(0, libc::SCHED_FIFO, &param) == 0 {
+                    tracing::info!("timer thread: SCHED_FIFO priority 50");
+                } else {
+                    // SCHED_FIFO requires CAP_SYS_NICE — fall back to nice
+                    if libc::setpriority(libc::PRIO_PROCESS, 0, -20) == 0 {
+                        tracing::info!("timer thread: nice -20 (SCHED_FIFO unavailable)");
+                    } else {
+                        tracing::warn!("timer thread: failed to elevate priority");
+                    }
+                }
             }
 
             timer_thread::timer_loop(schedulers, fire_txs, timer_cmd_rx, timer_stats_clone);
@@ -602,7 +651,31 @@ where
             *max_rps,
             config.control_interval,
         )),
+        RateConfig::Ramp {
+            warmup_rps,
+            warmup_duration,
+            latency_multiplier,
+            max_error_rate,
+            min_rps,
+            max_rps,
+        } => Box::new(crate::RampRateController::new(crate::RampConfig {
+            warmup_rps: *warmup_rps,
+            warmup_duration: *warmup_duration,
+            latency_multiplier: *latency_multiplier,
+            max_error_rate: *max_error_rate,
+            min_rps: *min_rps,
+            max_rps: *max_rps,
+            control_interval: config.control_interval,
+        })),
     };
+
+    // Pin coordinator (main thread) to misc core
+    if misc_core > 0 && misc_core != timer_core {
+        let core = core_affinity::CoreId { id: misc_core };
+        if !core_affinity::set_for_current(core) {
+            tracing::debug!(misc_core, "failed to pin coordinator to misc core");
+        }
+    }
 
     let mut coordinator = Coordinator::new(
         rate_controller,
@@ -631,6 +704,20 @@ where
     // Wire push-based signal source (e.g. from PUT /signal API endpoint)
     if let Some(source) = pushed_signal_source {
         coordinator.set_pushed_signal_source(source);
+    }
+
+    // Wire termination controls from config
+    if let Some(n) = config.max_requests {
+        coordinator.max_requests(n);
+    }
+    if let Some(n) = config.autostop_threshold {
+        coordinator.autostop_threshold(n);
+    }
+    if let Some(n) = config.refusestop_threshold {
+        coordinator.refusestop_threshold(n);
+    }
+    if let Some(d) = config.warmup_duration {
+        coordinator.warmup_duration(d);
     }
 
     Ok(coordinator.run())

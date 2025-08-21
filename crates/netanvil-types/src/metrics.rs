@@ -43,6 +43,14 @@ pub struct MetricsSummary {
     pub latency_p90_ns: u64,
     pub latency_p99_ns: u64,
     pub window_duration: Duration,
+    /// Total bytes sent during this window.
+    pub bytes_sent: u64,
+    /// Total bytes received during this window.
+    pub bytes_received: u64,
+    /// Send throughput in bytes per second.
+    pub throughput_send_bps: f64,
+    /// Receive throughput in bytes per second.
+    pub throughput_recv_bps: f64,
     /// External signals from the system under test.
     /// E.g. `[("load", 82.5)]` from a server-reported load metric.
     /// Injected by the coordinator from an external source (HTTP poll, push, etc.).

@@ -2,6 +2,7 @@
 
 pub mod controller;
 pub mod coordinator;
+pub mod dropping;
 pub mod engine;
 pub mod generator;
 pub mod handle;
@@ -35,7 +36,8 @@ pub type TransformerFactory = GenericTransformerFactory<netanvil_types::HttpRequ
 
 pub use controller::{
     AutotuneParams, AutotuningPidController, CompositePidController, PidGainValues,
-    PidRateController, PidStepInput, StaticRateController, StepRateController,
+    PidRateController, PidStepInput, RampConfig, RampRateController, StaticRateController,
+    StepRateController,
 };
 pub use coordinator::Coordinator;
 pub use coordinator::ProgressUpdate;

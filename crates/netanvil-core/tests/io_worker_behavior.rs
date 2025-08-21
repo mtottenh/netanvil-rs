@@ -46,6 +46,7 @@ impl RequestExecutor for MockExecutor {
                 ..Default::default()
             },
             status: Some(200),
+            bytes_sent: 0,
             response_size: 256,
             error: None,
         }
@@ -86,6 +87,7 @@ impl RequestExecutor for CapturingExecutor {
                 ..Default::default()
             },
             status: Some(200),
+            bytes_sent: 0,
             response_size: 64,
             error: None,
         }
@@ -134,6 +136,7 @@ fn io_worker_fires_requests_from_channel() {
                 metrics_tx,
                 core_id: 0,
                 metrics_interval: Duration::from_millis(50),
+                graceful_shutdown: true,
             },
             generator,
             Rc::new(NoopTransformer),
@@ -182,6 +185,7 @@ fn io_worker_stops_on_stop_message() {
                 metrics_tx,
                 core_id: 0,
                 metrics_interval: Duration::from_millis(100),
+                graceful_shutdown: true,
             },
             generator,
             Rc::new(NoopTransformer),
@@ -225,6 +229,7 @@ fn io_worker_exits_on_channel_disconnect() {
                 metrics_tx,
                 core_id: 0,
                 metrics_interval: Duration::from_millis(100),
+                graceful_shutdown: true,
             },
             generator,
             Rc::new(NoopTransformer),
@@ -283,6 +288,7 @@ fn io_worker_handles_target_update() {
                 metrics_tx,
                 core_id: 0,
                 metrics_interval: Duration::from_secs(10),
+                graceful_shutdown: true,
             },
             generator,
             Rc::new(NoopTransformer),
@@ -370,6 +376,7 @@ fn io_worker_handles_header_update() {
                 metrics_tx,
                 core_id: 0,
                 metrics_interval: Duration::from_secs(10),
+                graceful_shutdown: true,
             },
             generator,
             Rc::new(transformer),
@@ -446,6 +453,7 @@ fn io_worker_sends_periodic_metrics_snapshots() {
                 metrics_tx,
                 core_id: 0,
                 metrics_interval: Duration::from_millis(200), // report every 200ms
+                graceful_shutdown: true,
             },
             generator,
             Rc::new(NoopTransformer),

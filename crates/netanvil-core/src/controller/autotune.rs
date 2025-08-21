@@ -20,6 +20,8 @@ pub fn extract_metric(metric: &TargetMetric, summary: &MetricsSummary) -> f64 {
         TargetMetric::LatencyP90 => summary.latency_p90_ns as f64 / 1_000_000.0,
         TargetMetric::LatencyP99 => summary.latency_p99_ns as f64 / 1_000_000.0,
         TargetMetric::ErrorRate => summary.error_rate * 100.0, // fraction → percentage
+        TargetMetric::ThroughputSend => summary.throughput_send_bps / 125_000.0, // bytes/s → Mbps
+        TargetMetric::ThroughputRecv => summary.throughput_recv_bps / 125_000.0,
         TargetMetric::External { name } => summary
             .external_signals
             .iter()

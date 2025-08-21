@@ -53,18 +53,7 @@ impl PidRateController {
     }
 
     fn extract_current_value(&self, summary: &MetricsSummary) -> f64 {
-        match &self.target_metric {
-            TargetMetric::LatencyP50 => summary.latency_p50_ns as f64 / 1_000_000.0, // to ms
-            TargetMetric::LatencyP90 => summary.latency_p90_ns as f64 / 1_000_000.0,
-            TargetMetric::LatencyP99 => summary.latency_p99_ns as f64 / 1_000_000.0,
-            TargetMetric::ErrorRate => summary.error_rate * 100.0, // to percentage
-            TargetMetric::External { name } => summary
-                .external_signals
-                .iter()
-                .find(|(k, _)| k == name)
-                .map(|(_, v)| *v)
-                .unwrap_or(0.0),
-        }
+        crate::controller::autotune::extract_metric(&self.target_metric, summary)
     }
 }
 

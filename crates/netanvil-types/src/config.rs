@@ -2,6 +2,10 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+fn default_true() -> bool {
+    true
+}
+
 /// Top-level test configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestConfig {
@@ -42,12 +46,63 @@ pub struct TestConfig {
     /// Example values: 56_000 (56kbps modem), 1_000_000 (1 Mbps), 10_000_000 (10 Mbps).
     #[serde(default)]
     pub bandwidth_limit_bps: Option<u64>,
+    /// Warmup duration excluded from metrics. Workers run normally during
+    /// warmup (connections establish, caches warm) but the coordinator
+    /// discards all metrics until the warmup period ends.
+    #[serde(default)]
+    pub warmup_duration: Option<Duration>,
+    /// Stop after this many total requests (across all cores).
+    #[serde(default)]
+    pub max_requests: Option<u64>,
+    /// Stop if cumulative error count exceeds this threshold.
+    #[serde(default)]
+    pub autostop_threshold: Option<u64>,
+    /// Stop if cumulative refused/failed connection count exceeds this threshold.
+    #[serde(default)]
+    pub refusestop_threshold: Option<u64>,
+    /// Whether to wait for in-flight requests on shutdown. Default: true.
+    #[serde(default = "default_true")]
+    pub graceful_shutdown: bool,
     /// Optional plugin configuration for custom request generation.
     /// When set, the test uses the plugin's generator instead of the default
     /// `SimpleGenerator`. In distributed mode, the leader embeds the plugin
     /// source (script text or WASM bytes) so agents can instantiate generators.
     #[serde(default)]
     pub plugin: Option<PluginConfig>,
+    /// Protocol-specific configuration for TCP/UDP tests.
+    /// When set, the agent uses this to construct non-HTTP executors.
+    /// Serializable for transmission from leader to agent nodes.
+    #[serde(default)]
+    pub protocol: Option<ProtocolConfig>,
+}
+
+/// Protocol-specific configuration for non-HTTP tests.
+///
+/// Serializable for transmission from leader to agent nodes.
+/// Uses hex-encoded payloads for clean JSON representation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ProtocolConfig {
+    /// TCP test configuration.
+    Tcp {
+        /// Test mode: "echo", "rr", "sink", "source", "bidir"
+        mode: String,
+        /// Hex-encoded payload (e.g. "48454c4c4f" for "HELLO")
+        payload_hex: String,
+        /// Framing: "raw", "length-prefix:N", "delimiter:XX", "fixed:N"
+        framing: String,
+        /// Request payload size for RR protocol mode.
+        request_size: u16,
+        /// Response payload size for RR/SOURCE/BIDIR modes.
+        response_size: u32,
+    },
+    /// UDP test configuration.
+    Udp {
+        /// Hex-encoded payload.
+        payload_hex: String,
+        /// Whether to wait for a response datagram.
+        expect_response: bool,
+    },
 }
 
 /// Plugin configuration embedded in TestConfig.
@@ -81,6 +136,7 @@ impl TestConfig {
             RateConfig::Step { steps } => steps.first().map(|(_, rps)| *rps).unwrap_or(100.0),
             RateConfig::Pid { initial_rps, .. } => *initial_rps,
             RateConfig::CompositePid { initial_rps, .. } => *initial_rps,
+            RateConfig::Ramp { warmup_rps, .. } => *warmup_rps,
         }
     }
 }
@@ -102,7 +158,13 @@ impl Default for TestConfig {
             external_metrics_url: None,
             external_metrics_field: None,
             bandwidth_limit_bps: None,
+            warmup_duration: None,
+            max_requests: None,
+            autostop_threshold: None,
+            refusestop_threshold: None,
+            graceful_shutdown: true,
             plugin: None,
+            protocol: None,
         }
     }
 }
@@ -136,6 +198,24 @@ pub enum RateConfig {
         initial_rps: f64,
         constraints: Vec<PidConstraint>,
         min_rps: f64,
+        max_rps: f64,
+    },
+    /// Adaptive ramp: learn baseline latency during warmup, then use PID
+    /// to find the maximum rate where latency stays within a multiplier
+    /// of the baseline. Runs indefinitely if duration is 0.
+    Ramp {
+        /// RPS during warmup phase (default: 10)
+        warmup_rps: f64,
+        /// Duration of warmup phase to learn baseline latency
+        warmup_duration: Duration,
+        /// Acceptable latency multiplier over baseline.
+        /// E.g., 3.0 means "p99 can be 3x the warmup baseline before backing off"
+        latency_multiplier: f64,
+        /// Maximum error rate (%) before forcing rate reduction (default: 5.0)
+        max_error_rate: f64,
+        /// Minimum RPS floor
+        min_rps: f64,
+        /// Maximum RPS ceiling
         max_rps: f64,
     },
 }
@@ -194,6 +274,10 @@ pub enum TargetMetric {
     LatencyP90,
     LatencyP99,
     ErrorRate,
+    /// Send throughput in Mbps. PID increases rate when below target.
+    ThroughputSend,
+    /// Receive throughput in Mbps. PID increases rate when below target.
+    ThroughputRecv,
     /// Server-reported metric, identified by name.
     /// The coordinator polls an external endpoint and injects the value
     /// into MetricsSummary::external_signals.

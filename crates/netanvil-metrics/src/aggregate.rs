@@ -118,6 +118,10 @@ impl AggregateMetrics {
             latency_p90_ns: self.histogram.value_at_quantile(0.90),
             latency_p99_ns: self.histogram.value_at_quantile(0.99),
             window_duration,
+            bytes_sent: self.bytes_sent,
+            bytes_received: self.bytes_received,
+            throughput_send_bps: self.bytes_sent as f64 / secs,
+            throughput_recv_bps: self.bytes_received as f64 / secs,
             external_signals: Vec::new(), // populated by the coordinator if external source configured
         }
     }
@@ -149,6 +153,14 @@ impl AggregateMetrics {
 
     pub fn scheduling_delay_count_over_1ms(&self) -> u64 {
         self.scheduling_delay_count_over_1ms
+    }
+
+    pub fn bytes_sent(&self) -> u64 {
+        self.bytes_sent
+    }
+
+    pub fn bytes_received(&self) -> u64 {
+        self.bytes_received
     }
 }
 

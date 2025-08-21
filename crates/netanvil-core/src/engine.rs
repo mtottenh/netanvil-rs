@@ -3,8 +3,8 @@ use std::time::Instant;
 
 use netanvil_metrics::HdrMetricsCollector;
 use netanvil_types::{
-    ConnectionPolicy, RateConfig, RequestExecutor, RequestGenerator,
-    RequestScheduler, RequestTransformer, SchedulerConfig, TestConfig,
+    ConnectionPolicy, RateConfig, RequestExecutor, RequestGenerator, RequestScheduler,
+    RequestTransformer, SchedulerConfig, TestConfig,
 };
 
 use crate::controller::{

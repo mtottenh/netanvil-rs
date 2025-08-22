@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 
 use netanvil_types::{RequestContext, RequestGenerator};
 
-use crate::spec::{TcpFraming, TcpRequestSpec};
+use crate::spec::{TcpFraming, TcpRequestSpec, TcpTestMode};
 
 /// Generates identical TCP requests, cycling through targets round-robin.
 pub struct SimpleTcpGenerator {
@@ -13,6 +13,9 @@ pub struct SimpleTcpGenerator {
     framing: TcpFraming,
     expect_response: bool,
     response_max_bytes: usize,
+    mode: TcpTestMode,
+    request_size: u16,
+    response_size: u32,
     index: usize,
 }
 
@@ -29,12 +32,30 @@ impl SimpleTcpGenerator {
             framing,
             expect_response,
             response_max_bytes: 65536,
+            mode: TcpTestMode::Echo,
+            request_size: 0,
+            response_size: 0,
             index: 0,
         }
     }
 
     pub fn with_response_max_bytes(mut self, max: usize) -> Self {
         self.response_max_bytes = max;
+        self
+    }
+
+    pub fn with_mode(mut self, mode: TcpTestMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn with_request_size(mut self, size: u16) -> Self {
+        self.request_size = size;
+        self
+    }
+
+    pub fn with_response_size(mut self, size: u32) -> Self {
+        self.response_size = size;
         self
     }
 }
@@ -51,6 +72,9 @@ impl RequestGenerator for SimpleTcpGenerator {
             framing: self.framing.clone(),
             expect_response: self.expect_response,
             response_max_bytes: self.response_max_bytes,
+            mode: self.mode,
+            request_size: self.request_size,
+            response_size: self.response_size,
         }
     }
 

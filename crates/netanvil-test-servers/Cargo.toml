@@ -21,3 +21,7 @@ path = "src/bin/tcp_echo.rs"
 [[bin]]
 name = "udp-echo"
 path = "src/bin/udp_echo.rs"
+
+[[bin]]
+name = "netanvil-test-server"
+path = "src/bin/test_server.rs"

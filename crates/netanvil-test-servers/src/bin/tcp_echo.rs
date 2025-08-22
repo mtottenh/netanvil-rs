@@ -1,7 +1,10 @@
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "tcp-echo", about = "TCP echo server (compio-based)")]
+#[command(
+    name = "tcp-echo",
+    about = "TCP test server (compio-based) — supports protocol modes (RR, SINK, SOURCE, BIDIR) and plain echo"
+)]
 struct Args {
     #[arg(long, default_value = "127.0.0.1:9000")]
     listen: String,

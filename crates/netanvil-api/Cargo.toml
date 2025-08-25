@@ -10,6 +10,8 @@ description = "HTTP control API for netanvil-rs load testing"
 netanvil-types = { workspace = true }
 netanvil-core = { workspace = true }
 netanvil-http = { workspace = true }
+netanvil-tcp = { workspace = true }
+netanvil-udp = { workspace = true }
 netanvil-plugin = { workspace = true }
 netanvil-plugin-luajit = { workspace = true }
 tiny_http = { workspace = true }
@@ -25,6 +27,7 @@ webpki-roots = "0.26"
 [dev-dependencies]
 netanvil-http = { workspace = true }
 netanvil-metrics = { workspace = true }
+netanvil-test-servers = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 compio = { workspace = true }

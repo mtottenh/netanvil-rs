@@ -332,6 +332,11 @@ fn make_inner(port: u16, addr: &str, cores: usize) -> Arc<Mutex<AgentInner>> {
 }
 
 /// Start a test on a background thread (shared between HTTP and mTLS modes).
+///
+/// Dispatches to the appropriate protocol executor based on `test_config.protocol`:
+/// - `None` -> HTTP (default)
+/// - `Some(ProtocolConfig::Tcp { .. })` -> TCP executor with connection pool
+/// - `Some(ProtocolConfig::Udp { .. })` -> UDP executor
 fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> Result<(), String> {
     let (cmd_rx, shared_state) = {
         let mut agent = inner.lock().unwrap();
@@ -348,7 +353,7 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
         (cmd_rx, agent.shared_state.clone())
     };
 
-    // Build plugin generator factory if config includes a plugin
+    // Build plugin generator factory if config includes a plugin (HTTP only)
     let plugin_factory = test_config.plugin.as_ref().and_then(|pc| {
         match build_plugin_factory(pc, &test_config.targets) {
             Ok(factory) => {
@@ -364,24 +369,53 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
 
     let inner = inner.clone();
     let request_timeout = test_config.connections.request_timeout;
+    let protocol = test_config.protocol.clone();
 
     std::thread::Builder::new()
         .name("netanvil-agent-test".into())
         .spawn(move || {
             let progress_state = shared_state.clone();
-            let mut builder = TestBuilder::new(test_config, move || {
-                HttpExecutor::with_timeout(request_timeout)
-            })
-            .on_progress(move |update| {
-                progress_state.update_from_progress(update);
-            })
-            .external_commands(cmd_rx);
 
-            if let Some(factory) = plugin_factory {
-                builder = builder.generator_factory(factory);
-            }
-
-            let result = builder.run();
+            let result = match protocol {
+                Some(netanvil_types::ProtocolConfig::Tcp {
+                    mode,
+                    payload_hex,
+                    framing,
+                    request_size,
+                    response_size,
+                }) => run_tcp_test(
+                    test_config,
+                    request_timeout,
+                    cmd_rx,
+                    progress_state,
+                    &mode,
+                    &payload_hex,
+                    &framing,
+                    request_size,
+                    response_size,
+                ),
+                Some(netanvil_types::ProtocolConfig::Udp {
+                    payload_hex,
+                    expect_response,
+                }) => run_udp_test(
+                    test_config,
+                    request_timeout,
+                    cmd_rx,
+                    progress_state,
+                    &payload_hex,
+                    expect_response,
+                ),
+                None => {
+                    // Default HTTP path
+                    run_http_test(
+                        test_config,
+                        request_timeout,
+                        cmd_rx,
+                        progress_state,
+                        plugin_factory,
+                    )
+                }
+            };
 
             let mut agent = inner.lock().unwrap();
             agent.state = NodeState::Idle;
@@ -403,6 +437,186 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
         .map_err(|e| format!("spawn test thread: {e}"))?;
 
     Ok(())
+}
+
+/// Run an HTTP test (the original path).
+fn run_http_test(
+    config: TestConfig,
+    request_timeout: std::time::Duration,
+    cmd_rx: flume::Receiver<WorkerCommand>,
+    progress_state: SharedState,
+    plugin_factory: Option<netanvil_core::GeneratorFactory>,
+) -> netanvil_types::Result<TestResult> {
+    let mut builder = TestBuilder::new(config, move || HttpExecutor::with_timeout(request_timeout))
+        .on_progress(move |update| {
+            progress_state.update_from_progress(update);
+        })
+        .external_commands(cmd_rx);
+
+    if let Some(factory) = plugin_factory {
+        builder = builder.generator_factory(factory);
+    }
+
+    builder.run()
+}
+
+/// Run a TCP test with connection pooling.
+#[allow(clippy::too_many_arguments)]
+fn run_tcp_test(
+    config: TestConfig,
+    timeout: std::time::Duration,
+    cmd_rx: flume::Receiver<WorkerCommand>,
+    progress_state: SharedState,
+    mode_str: &str,
+    payload_hex: &str,
+    framing_str: &str,
+    request_size: u16,
+    response_size: u32,
+) -> netanvil_types::Result<TestResult> {
+    use netanvil_tcp::*;
+
+    let payload = decode_hex_bytes(payload_hex);
+    let mode = match mode_str {
+        "echo" => TcpTestMode::Echo,
+        "rr" => TcpTestMode::RR,
+        "sink" | "stream" => TcpTestMode::Sink,
+        "source" | "maerts" => TcpTestMode::Source,
+        "bidir" => TcpTestMode::Bidir,
+        _ => TcpTestMode::Echo,
+    };
+    let framing = if framing_str == "raw" || framing_str.is_empty() {
+        TcpFraming::Raw
+    } else if let Some(rest) = framing_str.strip_prefix("delimiter:") {
+        TcpFraming::Delimiter(rest.replace("\\r", "\r").replace("\\n", "\n").into_bytes())
+    } else if framing_str == "delimiter" {
+        TcpFraming::Delimiter(b"\r\n".to_vec())
+    } else if let Some(rest) = framing_str.strip_prefix("length-prefix:") {
+        TcpFraming::LengthPrefixed {
+            width: rest.parse().unwrap_or(4),
+        }
+    } else if let Some(rest) = framing_str.strip_prefix("fixed:") {
+        TcpFraming::FixedSize(rest.parse().unwrap_or(1024))
+    } else {
+        TcpFraming::Raw
+    };
+
+    let targets: Vec<std::net::SocketAddr> = config
+        .targets
+        .iter()
+        .filter_map(|t| {
+            t.strip_prefix("tcp://")
+                .and_then(|a| a.parse().ok())
+                .or_else(|| t.parse().ok())
+        })
+        .collect();
+
+    if targets.is_empty() {
+        return Err(netanvil_types::NetAnvilError::Other(
+            "no valid TCP targets".into(),
+        ));
+    }
+
+    let expect_response = mode == TcpTestMode::Echo || mode == TcpTestMode::RR;
+    let max_conns = config.connections.max_connections_per_core;
+    let policy = config.connections.connection_policy.clone();
+
+    let gen_factory: netanvil_core::GenericGeneratorFactory<TcpRequestSpec> =
+        Box::new(move |_core_id| {
+            Box::new(
+                SimpleTcpGenerator::new(
+                    targets.clone(),
+                    payload.clone(),
+                    framing.clone(),
+                    expect_response,
+                )
+                .with_mode(mode)
+                .with_request_size(request_size)
+                .with_response_size(response_size),
+            )
+        });
+    let trans_factory: netanvil_core::GenericTransformerFactory<TcpRequestSpec> =
+        Box::new(|_| Box::new(TcpNoopTransformer));
+
+    netanvil_core::GenericTestBuilder::new(
+        config,
+        move || TcpExecutor::with_pool(timeout, max_conns, policy.clone()),
+        gen_factory,
+        trans_factory,
+    )
+    .on_progress(move |update| {
+        progress_state.update_from_progress(update);
+    })
+    .external_commands(cmd_rx)
+    .run()
+}
+
+/// Run a UDP test.
+fn run_udp_test(
+    config: TestConfig,
+    timeout: std::time::Duration,
+    cmd_rx: flume::Receiver<WorkerCommand>,
+    progress_state: SharedState,
+    payload_hex: &str,
+    expect_response: bool,
+) -> netanvil_types::Result<TestResult> {
+    use netanvil_udp::*;
+
+    let payload = decode_hex_bytes(payload_hex);
+    let targets: Vec<std::net::SocketAddr> = config
+        .targets
+        .iter()
+        .filter_map(|t| {
+            t.strip_prefix("udp://")
+                .and_then(|a| a.parse().ok())
+                .or_else(|| t.parse().ok())
+        })
+        .collect();
+
+    if targets.is_empty() {
+        return Err(netanvil_types::NetAnvilError::Other(
+            "no valid UDP targets".into(),
+        ));
+    }
+
+    let gen_factory: netanvil_core::GenericGeneratorFactory<UdpRequestSpec> =
+        Box::new(move |_core_id| {
+            Box::new(SimpleUdpGenerator::new(
+                targets.clone(),
+                payload.clone(),
+                expect_response,
+            ))
+        });
+    let trans_factory: netanvil_core::GenericTransformerFactory<UdpRequestSpec> =
+        Box::new(|_| Box::new(UdpNoopTransformer));
+
+    netanvil_core::GenericTestBuilder::new(
+        config,
+        move || UdpExecutor::with_timeout(timeout),
+        gen_factory,
+        trans_factory,
+    )
+    .on_progress(move |update| {
+        progress_state.update_from_progress(update);
+    })
+    .external_commands(cmd_rx)
+    .run()
+}
+
+/// Decode hex string to bytes (tolerant of empty strings).
+fn decode_hex_bytes(hex: &str) -> Vec<u8> {
+    if hex.is_empty() {
+        return Vec::new();
+    }
+    (0..hex.len())
+        .step_by(2)
+        .filter_map(|i| {
+            if i + 2 <= hex.len() {
+                u8::from_str_radix(&hex[i..i + 2], 16).ok()
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn json_response(status: u16, value: &impl serde::Serialize) -> HttpResponse {

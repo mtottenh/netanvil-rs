@@ -43,6 +43,7 @@ impl SharedState {
             total_requests: update.total_requests,
             total_errors: update.total_errors,
         };
+        let secs = update.elapsed.as_secs_f64().max(0.001);
         inner.metrics = Some(MetricsView {
             current_rps: update.current_rps,
             target_rps: update.target_rps,
@@ -58,6 +59,10 @@ impl SharedState {
             latency_p99_ms: update.window.latency_p99_ns as f64 / 1_000_000.0,
             elapsed_secs: update.elapsed.as_secs_f64(),
             remaining_secs: update.remaining.as_secs_f64(),
+            bytes_sent: update.total_bytes_sent,
+            bytes_received: update.total_bytes_received,
+            throughput_send_mbps: update.total_bytes_sent as f64 * 8.0 / secs / 1_000_000.0,
+            throughput_recv_mbps: update.total_bytes_received as f64 * 8.0 / secs / 1_000_000.0,
             latency_buckets: update.latency_buckets.clone(),
             saturation: update.saturation.clone(),
         });
@@ -129,6 +134,18 @@ pub struct MetricsView {
     pub latency_p99_ms: f64,
     pub elapsed_secs: f64,
     pub remaining_secs: f64,
+    /// Total bytes sent across all cores (cumulative).
+    #[serde(default)]
+    pub bytes_sent: u64,
+    /// Total bytes received across all cores (cumulative).
+    #[serde(default)]
+    pub bytes_received: u64,
+    /// Send throughput in megabits per second.
+    #[serde(default)]
+    pub throughput_send_mbps: f64,
+    /// Receive throughput in megabits per second.
+    #[serde(default)]
+    pub throughput_recv_mbps: f64,
     /// Cumulative histogram buckets: (upper_bound_seconds, cumulative_count).
     /// Standard Prometheus bucket boundaries.
     #[serde(default)]

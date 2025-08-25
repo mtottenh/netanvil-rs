@@ -80,6 +80,18 @@ pub fn handle_get_metrics_prometheus(request: tiny_http::Request, state: &Shared
             out.push_str("# TYPE netanvil_errors_total counter\n");
             out.push_str(&format!("netanvil_errors_total {}\n", m.total_errors));
 
+            // Throughput counters
+            out.push_str("# HELP netanvil_bytes_sent_total Total bytes sent to targets.\n");
+            out.push_str("# TYPE netanvil_bytes_sent_total counter\n");
+            out.push_str(&format!("netanvil_bytes_sent_total {}\n", m.bytes_sent));
+
+            out.push_str("# HELP netanvil_bytes_received_total Total bytes received from targets.\n");
+            out.push_str("# TYPE netanvil_bytes_received_total counter\n");
+            out.push_str(&format!(
+                "netanvil_bytes_received_total {}\n",
+                m.bytes_received
+            ));
+
             // Gauges
             out.push_str("# HELP netanvil_request_rate Current requests per second.\n");
             out.push_str("# TYPE netanvil_request_rate gauge\n");

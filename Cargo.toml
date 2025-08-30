@@ -13,6 +13,7 @@ members = [
     "crates/netanvil-tcp",
     "crates/netanvil-udp",
     "crates/netanvil-test-servers",
+    "crates/REDACTED-CRATE",
     "crates/netanvil-cli",
 ]
 
@@ -30,6 +31,7 @@ default-members = [
     "crates/netanvil-distributed",
     "crates/netanvil-plugin",
     "crates/netanvil-plugin-luajit",
+    "crates/REDACTED-CRATE",
     "crates/netanvil-cli",
 ]
 
@@ -63,6 +65,9 @@ serde_json = "1.0"
 
 # HTTP types
 http = "1.1"
+
+# System
+libc = "0.2"
 
 # Error handling
 thiserror = "2.0"

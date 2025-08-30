@@ -179,6 +179,37 @@ enum Commands {
         /// Don't wait for a response (fire-and-forget mode for TCP/UDP)
         #[arg(long)]
         no_response: bool,
+
+        /// Test mode for TCP/UDP: "echo" (default), "rr", "stream", "maerts", "bidir"
+        #[arg(long, default_value = "echo")]
+        mode: String,
+
+        /// Request payload size in bytes for RR protocol mode.
+        /// Overrides --payload length; pads or truncates to this size.
+        #[arg(long)]
+        request_size: Option<u16>,
+
+        /// Response payload size in bytes for RR/SOURCE/BIDIR protocol modes.
+        #[arg(long)]
+        response_size: Option<u32>,
+
+        /// Chunk size in bytes for stream modes (default: 65536)
+        #[arg(long, default_value = "65536")]
+        chunk_size: usize,
+
+        // ── Ramp mode flags ──
+        /// Duration of warmup phase to learn baseline latency (e.g. "10s")
+        #[arg(long, default_value = "10s")]
+        ramp_warmup: String,
+
+        /// Acceptable latency multiplier over baseline.
+        /// E.g., 3.0 means "p99 can be 3x the warmup baseline before backing off"
+        #[arg(long, default_value = "3.0")]
+        ramp_multiplier: f64,
+
+        /// Maximum error rate (%) before forcing rate reduction in ramp mode
+        #[arg(long, default_value = "5.0")]
+        ramp_max_errors: f64,
     },
 
     /// Run as a remotely controllable agent node
@@ -314,6 +345,61 @@ enum Commands {
         /// Path to leader's private key PEM
         #[arg(long)]
         tls_key: Option<String>,
+
+        // ── TCP/UDP-specific flags (same as Test command) ──
+        /// Payload as UTF-8 string (for tcp:// and udp:// protocols)
+        #[arg(long)]
+        payload: Option<String>,
+
+        /// Payload as hex-encoded bytes (for tcp:// and udp:// protocols)
+        #[arg(long)]
+        payload_hex: Option<String>,
+
+        /// Payload from file (for tcp:// and udp:// protocols)
+        #[arg(long)]
+        payload_file: Option<String>,
+
+        /// TCP framing mode: "raw", "length-prefix:1|2|4", "delimiter", "fixed:N"
+        #[arg(long, default_value = "raw")]
+        framing: String,
+
+        /// Delimiter bytes for TCP delimiter framing (default: "\r\n")
+        #[arg(long, default_value = r"\r\n")]
+        delimiter: String,
+
+        /// Don't wait for a response (fire-and-forget mode for TCP/UDP)
+        #[arg(long)]
+        no_response: bool,
+
+        /// Test mode for TCP/UDP: "echo" (default), "rr", "stream", "maerts", "bidir"
+        #[arg(long, default_value = "echo")]
+        mode: String,
+
+        /// Request payload size in bytes for RR protocol mode
+        #[arg(long)]
+        request_size: Option<u16>,
+
+        /// Response payload size in bytes for RR/SOURCE/BIDIR protocol modes
+        #[arg(long)]
+        response_size: Option<u32>,
+
+        /// Chunk size in bytes for stream modes (default: 65536)
+        #[arg(long, default_value = "65536")]
+        chunk_size: usize,
+
+        // ── Ramp mode flags ──
+        /// Duration of warmup phase to learn baseline latency (e.g. "10s")
+        #[arg(long, default_value = "10s")]
+        ramp_warmup: String,
+
+        /// Acceptable latency multiplier over baseline.
+        /// E.g., 3.0 means "p99 can be 3x the warmup baseline before backing off"
+        #[arg(long, default_value = "3.0")]
+        ramp_multiplier: f64,
+
+        /// Maximum error rate (%) before forcing rate reduction in ramp mode
+        #[arg(long, default_value = "5.0")]
+        ramp_max_errors: f64,
     },
 }
 
@@ -323,9 +409,21 @@ fn REDACTED_FN(args: Vec<String>) -> Result<()> {
     let config = compat_result.test_config;
     let quiet = compat_result.quiet;
 
+    // Apply debug level to tracing (reinitialize if needed)
+    if let Some(level) = compat_result.debug_level {
+        let filter = match level {
+            0 => "warn",
+            1 => "info",
+            2 => "debug",
+            _ => "trace",
+        };
+        // Set RUST_LOG for any further tracing initialization
+        std::env::set_var("RUST_LOG", filter);
+    }
+
     if !quiet {
         eprintln!(
-            "netanvil-rs compat mode: {} target(s), {:.1} RPS, {:?} duration, {} cores",
+            "netanvil-rs compat mode: {} target(s), {:.1} RPS, {:?} duration, {} cores{}",
             config.targets.len(),
             match &config.rate {
                 RateConfig::Static { rps } => *rps,
@@ -338,35 +436,170 @@ fn REDACTED_FN(args: Vec<String>) -> Result<()> {
             } else {
                 config.num_cores.to_string()
             },
+            if let Some(warmup) = config.warmup_duration {
+                format!(", warmup {warmup:?}")
+            } else {
+                String::new()
+            },
         );
     }
 
     let request_timeout = config.connections.request_timeout;
+    let bandwidth_bps = config.bandwidth_limit_bps;
+    let drop_fraction = compat_result.drop_fraction;
+    let load_feedback = compat_result.load_feedback;
     let targets = config.targets.clone();
 
-    let mut builder = TestBuilder::new(config, move || HttpExecutor::with_timeout(request_timeout));
+    let make_executor = move || {
+        let executor = match bandwidth_bps {
+            Some(bps) => HttpExecutor::with_bandwidth_limit(bps, request_timeout),
+            None => HttpExecutor::with_timeout(request_timeout),
+        };
+        match drop_fraction {
+            Some(frac) => {
+                let stack_var: u32 = 0;
+                let seed = (&stack_var as *const u32 as u32).wrapping_mul(2654435761);
+                netanvil_core::dropping::DroppingExecutor::new(executor, frac, seed)
+            }
+            None => netanvil_core::dropping::DroppingExecutor::new(executor, 0.0, 1),
+        }
+    };
 
-    if !quiet {
-        builder = builder.on_progress(|update| {
-            eprint!("\r{}", netanvil_core::report::ProgressLine::new(update));
-        });
-    }
+    // If load feedback is configured, we need a control API for the sidecar
+    // to push signals into. Otherwise, run without the API.
+    let result = if let Some(ref lf_config) = load_feedback {
+        // Start control API on an ephemeral port
+        let shared_state = SharedState::new();
+        let (ext_cmd_tx, ext_cmd_rx) = flume::unbounded();
 
-    // Set up plugin generator from generated Lua script
-    if let Some(plugin_config) = compat_result.plugin_config {
-        let script = String::from_utf8(plugin_config.source)
-            .map_err(|_| anyhow::anyhow!("generated Lua script is not valid UTF-8"))?;
-        let targets_for_factory = targets.clone();
-        builder = builder.generator_factory(Box::new(move |_core_id| {
-            Box::new(
-                netanvil_plugin_luajit::LuaJitGenerator::new(&script, &targets_for_factory)
-                    .expect("LuaJIT generator init failed"),
-            )
-                as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
-        }));
-    }
+        // Try ports starting from 19100 to find an available one
+        let mut api_port = 19100u16;
+        let server = loop {
+            match ControlServer::new(api_port, shared_state.clone(), ext_cmd_tx.clone()) {
+                Ok(s) => break s,
+                Err(_) => {
+                    api_port += 1;
+                    if api_port > 19200 {
+                        anyhow::bail!(
+                            "could not find available port for control API (tried 19100-19200)"
+                        );
+                    }
+                }
+            }
+        };
+        let _server_handle = server.spawn();
 
-    let result = builder.run().context("load test failed")?;
+        if !quiet {
+            eprintln!("  load feedback: control API on port {api_port}, spawning REDACTED-CRATE");
+        }
+
+        // Spawn REDACTED-CRATE sidecar
+        let mut sidecar_cmd = std::process::Command::new("REDACTED-CRATE");
+        sidecar_cmd
+            .arg("--target-api")
+            .arg(format!("http://127.0.0.1:{api_port}"))
+            .arg("--source")
+            .arg("redacted_proto")
+            .arg("--redacted_proto-ip")
+            .arg(&lf_config.feedback_ip)
+            .arg("--redacted_proto-service")
+            .arg(&lf_config.service)
+            .arg("--period")
+            .arg(lf_config.period.to_string());
+
+        let mut sidecar_child = sidecar_cmd
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .context("failed to spawn REDACTED-CRATE sidecar (is it in PATH?)")?;
+
+        tracing::info!(
+            feedback_ip = %lf_config.feedback_ip,
+            service = %lf_config.service,
+            period = lf_config.period,
+            "REDACTED-CRATE sidecar started"
+        );
+
+        // Wire up signal source and external commands
+        let progress_state = shared_state.clone();
+        let signal_state = shared_state.clone();
+        let mut builder = TestBuilder::new(config, make_executor)
+            .external_commands(ext_cmd_rx)
+            .pushed_signal_source(move || signal_state.drain_pushed_signals());
+
+        if !quiet {
+            builder = builder.on_progress(move |update| {
+                progress_state.update_from_progress(update);
+                eprint!("\r{}", netanvil_core::report::ProgressLine::new(update));
+            });
+        }
+
+        // Set up plugin generator
+        if let Some(plugin_config) = compat_result.plugin_config {
+            let script = String::from_utf8(plugin_config.source)
+                .map_err(|_| anyhow::anyhow!("generated Lua script is not valid UTF-8"))?;
+            let targets_for_factory = targets.clone();
+            builder = builder.generator_factory(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin_luajit::LuaJitGenerator::new(&script, &targets_for_factory)
+                        .expect("LuaJIT generator init failed"),
+                )
+                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
+            }));
+        }
+
+        let result = builder.run().context("load test failed")?;
+
+        // Kill sidecar
+        let _ = sidecar_child.kill();
+        let _ = sidecar_child.wait();
+        tracing::info!("REDACTED-CRATE sidecar stopped");
+
+        result
+    } else {
+        // No load feedback — standard execution path
+        let mut builder = TestBuilder::new(config, make_executor);
+
+        // Progress callback with optional outlog
+        if !quiet {
+            let mut outlog_file = compat_result.outlog.map(|path| {
+                std::fs::File::create(&path)
+                    .unwrap_or_else(|e| panic!("cannot create outlog file '{path}': {e}"))
+            });
+            let lines_interval = compat_result.lines.unwrap_or(20);
+            let mut line_counter: u32 = 0;
+
+            builder = builder.on_progress(move |update| {
+                let line = format!("{}", netanvil_core::report::ProgressLine::new(update));
+                if line_counter % lines_interval == 0 {
+                    // Header re-print interval
+                }
+                eprint!("\r{line}");
+                if let Some(ref mut f) = outlog_file {
+                    use std::io::Write;
+                    let _ = writeln!(f, "{line}");
+                }
+                line_counter += 1;
+            });
+        }
+
+        // Set up plugin generator
+        if let Some(plugin_config) = compat_result.plugin_config {
+            let script = String::from_utf8(plugin_config.source)
+                .map_err(|_| anyhow::anyhow!("generated Lua script is not valid UTF-8"))?;
+            let targets_for_factory = targets.clone();
+            builder = builder.generator_factory(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin_luajit::LuaJitGenerator::new(&script, &targets_for_factory)
+                        .expect("LuaJIT generator init failed"),
+                )
+                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
+            }));
+        }
+
+        builder.run().context("load test failed")?
+    };
+
     if !quiet {
         eprintln!();
     }
@@ -422,9 +655,11 @@ fn parse_target_metric(s: &str) -> Result<TargetMetric> {
         "latency-p90" | "p90" => Ok(TargetMetric::LatencyP90),
         "latency-p99" | "p99" => Ok(TargetMetric::LatencyP99),
         "error-rate" | "errors" => Ok(TargetMetric::ErrorRate),
+        "throughput-send" | "throughput" | "send-mbps" => Ok(TargetMetric::ThroughputSend),
+        "throughput-recv" | "recv-mbps" => Ok(TargetMetric::ThroughputRecv),
         other => anyhow::bail!(
             "unknown PID metric: {other} (use 'latency-p50', 'latency-p90', 'latency-p99', \
-             'error-rate', or 'external:<name>')"
+             'error-rate', 'throughput-send', 'throughput-recv', or 'external:<name>')"
         ),
     }
 }
@@ -692,11 +927,19 @@ struct PidArgs<'a> {
     autotune_duration: Duration,
 }
 
+/// Ramp-specific CLI arguments.
+struct RampArgs {
+    warmup_duration: Duration,
+    latency_multiplier: f64,
+    max_error_rate: f64,
+}
+
 fn build_rate_config(
     rate_mode: &str,
     rps: f64,
     steps: Option<&str>,
     pid: &PidArgs<'_>,
+    ramp: &RampArgs,
 ) -> Result<RateConfig> {
     match rate_mode.to_lowercase().as_str() {
         "static" | "const" => Ok(RateConfig::Static { rps }),
@@ -707,14 +950,12 @@ fn build_rate_config(
         }
         "pid" => {
             if !pid.constraints.is_empty() {
-                // Composite mode: multiple constraints
                 let mut constraints: Vec<netanvil_types::PidConstraint> = pid
                     .constraints
                     .iter()
                     .map(|s| parse_pid_constraint(s))
                     .collect::<Result<_>>()?;
 
-                // Apply manual gains to all constraints if specified
                 let gains = build_pid_gains(pid.kp, pid.ki, pid.kd, pid.autotune_duration);
                 if matches!(gains, netanvil_types::PidGains::Manual { .. }) {
                     for c in &mut constraints {
@@ -729,7 +970,6 @@ fn build_rate_config(
                     max_rps: pid.max_rps,
                 })
             } else {
-                // Single-metric mode
                 let metric = parse_target_metric(pid.metric)?;
                 let gains = build_pid_gains(pid.kp, pid.ki, pid.kd, pid.autotune_duration);
                 Ok(RateConfig::Pid {
@@ -744,7 +984,17 @@ fn build_rate_config(
                 })
             }
         }
-        other => anyhow::bail!("unknown rate mode: {other} (use 'static', 'step', or 'pid')"),
+        "ramp" => Ok(RateConfig::Ramp {
+            warmup_rps: rps.clamp(1.0, 100.0), // warmup at low rate (capped at 100)
+            warmup_duration: ramp.warmup_duration,
+            latency_multiplier: ramp.latency_multiplier,
+            max_error_rate: ramp.max_error_rate,
+            min_rps: pid.min_rps,
+            max_rps: pid.max_rps,
+        }),
+        other => {
+            anyhow::bail!("unknown rate mode: {other} (use 'static', 'step', 'pid', or 'ramp')")
+        }
     }
 }
 
@@ -813,6 +1063,13 @@ fn main() -> Result<()> {
             framing,
             delimiter,
             no_response,
+            mode,
+            request_size,
+            response_size,
+            chunk_size: _,
+            ramp_warmup,
+            ramp_multiplier,
+            ramp_max_errors,
         } => {
             let duration = parse_duration(&duration).context("invalid --duration")?;
             let timeout = parse_duration(&timeout).context("invalid --timeout")?;
@@ -824,6 +1081,7 @@ fn main() -> Result<()> {
             let autotune_dur = parse_duration(&pid_autotune_duration)
                 .context("invalid --pid-autotune-duration")?;
             let scheduler = parse_scheduler(&scheduler).context("invalid --scheduler")?;
+            let ramp_warmup_dur = parse_duration(&ramp_warmup).context("invalid --ramp-warmup")?;
             let headers: Vec<(String, String)> = headers
                 .iter()
                 .map(|h| parse_header(h))
@@ -842,6 +1100,11 @@ fn main() -> Result<()> {
                     max_rps: pid_max_rps,
                     constraints: &pid_constraints,
                     autotune_duration: autotune_dur,
+                },
+                &RampArgs {
+                    warmup_duration: ramp_warmup_dur,
+                    latency_multiplier: ramp_multiplier,
+                    max_error_rate: ramp_max_errors,
                 },
             )?;
 
@@ -892,6 +1155,13 @@ fn main() -> Result<()> {
                     "{initial_rps} RPS initial (composite PID, {} constraints)",
                     constraints.len()
                 ),
+                RateConfig::Ramp {
+                    warmup_rps,
+                    latency_multiplier,
+                    ..
+                } => {
+                    format!("{warmup_rps} RPS warmup (ramp, {latency_multiplier}x baseline)")
+                }
             };
 
             let bw_desc = match bandwidth_bps {
@@ -920,22 +1190,44 @@ fn main() -> Result<()> {
                         parse_tcp_framing(&framing, &delimiter).context("invalid --framing")?;
                     let targets = parse_socket_targets(&config.targets, "tcp://")
                         .context("invalid TCP target address")?;
+                    let tcp_mode = parse_tcp_mode(&mode).context("invalid --mode")?;
                     let expect_response = !no_response;
 
-                    eprintln!("  protocol: TCP, {} byte payload, framing: {framing}, response: {expect_response}",
-                        tcp_payload.len());
+                    // Determine payload and sizes based on mode
+                    let req_size = request_size.unwrap_or(tcp_payload.len() as u16);
+                    let resp_size = response_size.unwrap_or(req_size as u32);
+
+                    eprintln!(
+                        "  protocol: TCP, mode: {mode}, payload: {} bytes, request: {req_size}, response: {resp_size}",
+                        tcp_payload.len()
+                    );
 
                     config.error_status_threshold = 0; // no HTTP status for TCP
+                    config.protocol = Some(netanvil_types::ProtocolConfig::Tcp {
+                        mode: mode.clone(),
+                        payload_hex: encode_hex(&tcp_payload),
+                        framing: framing.clone(),
+                        request_size: req_size,
+                        response_size: resp_size,
+                    });
+
+                    let conn_policy = config.connections.connection_policy.clone();
+                    let max_conns = config.connections.max_connections_per_core;
 
                     let gen_factory: netanvil_core::GenericGeneratorFactory<
                         netanvil_tcp::TcpRequestSpec,
                     > = Box::new(move |_core_id| {
-                        Box::new(netanvil_tcp::SimpleTcpGenerator::new(
-                            targets.clone(),
-                            tcp_payload.clone(),
-                            tcp_framing.clone(),
-                            expect_response,
-                        ))
+                        Box::new(
+                            netanvil_tcp::SimpleTcpGenerator::new(
+                                targets.clone(),
+                                tcp_payload.clone(),
+                                tcp_framing.clone(),
+                                expect_response,
+                            )
+                            .with_mode(tcp_mode)
+                            .with_request_size(req_size)
+                            .with_response_size(resp_size),
+                        )
                     });
                     let trans_factory: netanvil_core::GenericTransformerFactory<
                         netanvil_tcp::TcpRequestSpec,
@@ -943,7 +1235,13 @@ fn main() -> Result<()> {
 
                     GenericTestBuilder::new(
                         config,
-                        move || netanvil_tcp::TcpExecutor::with_timeout(request_timeout),
+                        move || {
+                            netanvil_tcp::TcpExecutor::with_pool(
+                                request_timeout,
+                                max_conns,
+                                conn_policy.clone(),
+                            )
+                        },
                         gen_factory,
                         trans_factory,
                     )
@@ -967,6 +1265,10 @@ fn main() -> Result<()> {
                     );
 
                     config.error_status_threshold = 0; // no HTTP status for UDP
+                    config.protocol = Some(netanvil_types::ProtocolConfig::Udp {
+                        payload_hex: encode_hex(&udp_payload),
+                        expect_response,
+                    });
 
                     let gen_factory: netanvil_core::GenericGeneratorFactory<
                         netanvil_udp::UdpRequestSpec,
@@ -1123,11 +1425,25 @@ fn main() -> Result<()> {
             tls_ca,
             tls_cert,
             tls_key,
+            payload,
+            payload_hex,
+            payload_file,
+            framing,
+            delimiter: _delimiter,
+            no_response,
+            mode,
+            request_size,
+            response_size,
+            chunk_size: _chunk_size,
+            ramp_warmup,
+            ramp_multiplier,
+            ramp_max_errors,
         } => {
             let duration = parse_duration(&duration).context("invalid --duration")?;
             let timeout = parse_duration(&timeout).context("invalid --timeout")?;
             let autotune_dur = parse_duration(&pid_autotune_duration)
                 .context("invalid --pid-autotune-duration")?;
+            let ramp_warmup_dur = parse_duration(&ramp_warmup).context("invalid --ramp-warmup")?;
             let headers: Vec<(String, String)> = headers
                 .iter()
                 .map(|h| parse_header(h))
@@ -1146,6 +1462,11 @@ fn main() -> Result<()> {
                     max_rps: pid_max_rps,
                     constraints: &pid_constraints,
                     autotune_duration: autotune_dur,
+                },
+                &RampArgs {
+                    warmup_duration: ramp_warmup_dur,
+                    latency_multiplier: ramp_multiplier,
+                    max_error_rate: ramp_max_errors,
                 },
             )?;
 
@@ -1168,7 +1489,7 @@ fn main() -> Result<()> {
                 None
             };
 
-            let config = TestConfig {
+            let mut config = TestConfig {
                 targets: url,
                 method,
                 duration,
@@ -1187,7 +1508,40 @@ fn main() -> Result<()> {
                 external_metrics_field: external_metrics_field.clone(),
                 bandwidth_limit_bps: None,
                 plugin: plugin_config,
+                ..Default::default()
             };
+
+            // Detect protocol from URLs and populate config.protocol for TCP/UDP
+            let protocol = detect_protocol(&config.targets);
+            match protocol {
+                DetectedProtocol::Tcp => {
+                    let tcp_payload = resolve_payload(&payload, &payload_hex, &payload_file)
+                        .context("invalid TCP payload")?;
+                    let _tcp_mode = parse_tcp_mode(&mode).context("invalid --mode")?;
+                    let req_size = request_size.unwrap_or(tcp_payload.len() as u16);
+                    let resp_size = response_size.unwrap_or(req_size as u32);
+                    config.protocol = Some(netanvil_types::ProtocolConfig::Tcp {
+                        mode: mode.clone(),
+                        payload_hex: encode_hex(&tcp_payload),
+                        framing: framing.clone(),
+                        request_size: req_size,
+                        response_size: resp_size,
+                    });
+                    config.error_status_threshold = 0;
+                }
+                DetectedProtocol::Udp => {
+                    let udp_payload = resolve_payload(&payload, &payload_hex, &payload_file)
+                        .context("invalid UDP payload")?;
+                    config.protocol = Some(netanvil_types::ProtocolConfig::Udp {
+                        payload_hex: encode_hex(&udp_payload),
+                        expect_response: !no_response,
+                    });
+                    config.error_status_threshold = 0;
+                }
+                DetectedProtocol::Http => {
+                    // No change needed — config.protocol stays None (default HTTP)
+                }
+            }
 
             tracing::info!(
                 agents = workers.len(),
@@ -1254,6 +1608,24 @@ fn main() -> Result<()> {
                     *min_rps,
                     *max_rps,
                     config.control_interval,
+                )),
+                RateConfig::Ramp {
+                    warmup_rps,
+                    warmup_duration,
+                    latency_multiplier,
+                    max_error_rate,
+                    min_rps,
+                    max_rps,
+                } => Box::new(netanvil_core::RampRateController::new(
+                    netanvil_core::RampConfig {
+                        warmup_rps: *warmup_rps,
+                        warmup_duration: *warmup_duration,
+                        latency_multiplier: *latency_multiplier,
+                        max_error_rate: *max_error_rate,
+                        min_rps: *min_rps,
+                        max_rps: *max_rps,
+                        control_interval: config.control_interval,
+                    },
                 )),
             };
 
@@ -1357,6 +1729,26 @@ fn main() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Hex encoding helpers
+// ---------------------------------------------------------------------------
+
+fn encode_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[allow(dead_code)]
+fn decode_hex(s: &str) -> Result<Vec<u8>> {
+    let clean: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    (0..clean.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&clean[i..i + 2], 16)
+                .map_err(|e| anyhow::anyhow!("hex decode at {i}: {e}"))
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Multi-protocol support
 // ---------------------------------------------------------------------------
 
@@ -1425,6 +1817,17 @@ fn resolve_payload(
 }
 
 /// Parse --framing flag into TcpFraming.
+fn parse_tcp_mode(s: &str) -> Result<netanvil_tcp::TcpTestMode> {
+    match s.to_lowercase().as_str() {
+        "echo" => Ok(netanvil_tcp::TcpTestMode::Echo),
+        "rr" => Ok(netanvil_tcp::TcpTestMode::RR),
+        "stream" | "sink" => Ok(netanvil_tcp::TcpTestMode::Sink),
+        "maerts" | "source" => Ok(netanvil_tcp::TcpTestMode::Source),
+        "bidir" => Ok(netanvil_tcp::TcpTestMode::Bidir),
+        other => anyhow::bail!("unknown mode: {other}. Expected: echo, rr, stream, maerts, bidir"),
+    }
+}
+
 fn parse_tcp_framing(s: &str, delimiter: &str) -> Result<netanvil_tcp::TcpFraming> {
     if s == "raw" {
         Ok(netanvil_tcp::TcpFraming::Raw)
@@ -1559,6 +1962,11 @@ mod tests {
                 constraints: &[],
                 autotune_duration: Duration::from_secs(3),
             },
+            &RampArgs {
+                warmup_duration: Duration::from_secs(10),
+                latency_multiplier: 3.0,
+                max_error_rate: 5.0,
+            },
         )
         .unwrap();
         assert!(matches!(rate, RateConfig::Static { rps } if rps == 500.0));
@@ -1580,6 +1988,11 @@ mod tests {
                 max_rps: 10000.0,
                 constraints: &[],
                 autotune_duration: Duration::from_secs(3),
+            },
+            &RampArgs {
+                warmup_duration: Duration::from_secs(10),
+                latency_multiplier: 3.0,
+                max_error_rate: 5.0,
             },
         )
         .unwrap();
@@ -1603,6 +2016,11 @@ mod tests {
                 constraints: &[],
                 autotune_duration: Duration::from_secs(3),
             },
+            &RampArgs {
+                warmup_duration: Duration::from_secs(10),
+                latency_multiplier: 3.0,
+                max_error_rate: 5.0,
+            },
         );
         assert!(result.is_err());
     }
@@ -1623,6 +2041,11 @@ mod tests {
                 max_rps: 10000.0,
                 constraints: &[],
                 autotune_duration: Duration::from_secs(3),
+            },
+            &RampArgs {
+                warmup_duration: Duration::from_secs(10),
+                latency_multiplier: 3.0,
+                max_error_rate: 5.0,
             },
         )
         .unwrap();
@@ -1659,6 +2082,11 @@ mod tests {
                 constraints: &[],
                 autotune_duration: Duration::from_secs(3),
             },
+            &RampArgs {
+                warmup_duration: Duration::from_secs(10),
+                latency_multiplier: 3.0,
+                max_error_rate: 5.0,
+            },
         )
         .unwrap();
         match rate {
@@ -1689,6 +2117,11 @@ mod tests {
                 max_rps: 50000.0,
                 constraints: &constraints,
                 autotune_duration: Duration::from_secs(3),
+            },
+            &RampArgs {
+                warmup_duration: Duration::from_secs(10),
+                latency_multiplier: 3.0,
+                max_error_rate: 5.0,
             },
         )
         .unwrap();

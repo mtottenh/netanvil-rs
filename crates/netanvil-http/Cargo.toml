@@ -11,7 +11,10 @@ netanvil-types = { workspace = true }
 compio = { workspace = true }
 cyper = { workspace = true }
 cyper-core = "0.8"
-compio-tls = { version = "0.9", features = ["native-tls"] }
+compio-tls = { version = "0.9", features = ["native-tls", "rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls-pemfile = "2"
+rustls-native-certs = "0.8"
 http = { workspace = true }
 hyper = "1"
 hyper-util = { version = "0.1", features = ["client-legacy"] }
@@ -27,3 +30,8 @@ tracing = { workspace = true }
 compio = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
+rcgen = "0.13"
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+tempfile = "3"
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio", "server-auto"] }

@@ -91,19 +91,46 @@ impl NegotiatedAlpn for MaybeThrottled<MaybeTlsStream<TcpStream>> {
 }
 
 /// Custom connector that creates TCP connections with optional bandwidth
-/// throttling and OS-level socket tuning.
+/// throttling, OS-level socket tuning, and configurable TLS.
 ///
 /// Implements `tower_service::Service<Uri>` so it can be used as the
 /// connector for `hyper_util::client::legacy::Client`.
+///
+/// When `tls_connector` is `Some`, the pre-configured connector is used
+/// for HTTPS connections instead of the default `native_tls::TlsConnector`.
+/// When `sni_override` is `Some`, the SNI server name is set independently
+/// of the URI host.
 #[derive(Clone)]
 pub struct ThrottledConnector {
     /// Target bandwidth in bits per second. None = no throttling.
     throttle_bps: Option<u64>,
+    /// Pre-configured TLS connector. None = use default native-tls.
+    tls_connector: Option<compio::tls::TlsConnector>,
+    /// Override SNI server name (independent of Host header).
+    sni_override: Option<String>,
 }
 
 impl ThrottledConnector {
     pub fn new(throttle_bps: Option<u64>) -> Self {
-        Self { throttle_bps }
+        Self {
+            throttle_bps,
+            tls_connector: None,
+            sni_override: None,
+        }
+    }
+
+    /// Create a connector with a pre-configured TLS connector and optional
+    /// SNI override. Used when `TlsClientConfig` is present.
+    pub fn with_tls(
+        throttle_bps: Option<u64>,
+        tls_connector: compio::tls::TlsConnector,
+        sni_override: Option<String>,
+    ) -> Self {
+        Self {
+            throttle_bps,
+            tls_connector: Some(tls_connector),
+            sni_override,
+        }
     }
 
     async fn connect(
@@ -151,10 +178,14 @@ impl ThrottledConnector {
 
         // TLS wrapping
         let stream: MaybeTlsStream<TcpStream> = if is_https {
-            let connector = compio::tls::TlsConnector::from(
-                compio::native_tls::TlsConnector::new().map_err(io::Error::other)?,
-            );
-            let tls_stream = connector.connect(host, tcp).await?;
+            let connector = match &self.tls_connector {
+                Some(c) => c.clone(),
+                None => compio::tls::TlsConnector::from(
+                    compio::native_tls::TlsConnector::new().map_err(io::Error::other)?,
+                ),
+            };
+            let sni_host = self.sni_override.as_deref().unwrap_or(host);
+            let tls_stream = connector.connect(sni_host, tcp).await?;
             MaybeTlsStream::new_tls(tls_stream)
         } else {
             MaybeTlsStream::new_plain(tcp)

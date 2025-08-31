@@ -74,6 +74,11 @@ pub struct TestConfig {
     /// Serializable for transmission from leader to agent nodes.
     #[serde(default)]
     pub protocol: Option<ProtocolConfig>,
+    /// TLS configuration for load traffic connections to the target.
+    /// When set, all HTTPS connections use the specified client certs,
+    /// verification settings, SNI, and cipher preferences.
+    #[serde(default)]
+    pub tls_client: Option<TlsClientConfig>,
 }
 
 /// Protocol-specific configuration for non-HTTP tests.
@@ -165,6 +170,7 @@ impl Default for TestConfig {
             graceful_shutdown: true,
             plugin: None,
             protocol: None,
+            tls_client: None,
         }
     }
 }
@@ -355,6 +361,35 @@ pub enum CountDistribution {
     Uniform { min: u32, max: u32 },
     /// Normal (Gaussian) distribution, clamped to >= 1.
     Normal { mean: f64, stddev: f64 },
+}
+
+/// TLS configuration for HTTP executor connections to the target.
+///
+/// Controls client certificates, server verification, SNI, and cipher
+/// selection for load traffic connections. Separate from [`TlsConfig`]
+/// (which is for leader↔agent mTLS).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsClientConfig {
+    /// Path to client certificate PEM file (leaf + optional chain).
+    pub client_cert: Option<String>,
+    /// Path to client private key PEM file (PKCS#1 or PKCS#8).
+    pub client_key: Option<String>,
+    /// Path to CA certificate PEM file for server verification.
+    /// When set with `verify_server: true`, only this CA is trusted.
+    pub ca_cert: Option<String>,
+    /// Whether to verify the server's certificate. Default: true.
+    #[serde(default = "default_true")]
+    pub verify_server: bool,
+    /// Override the TLS SNI server name (independent of Host header).
+    pub sni_override: Option<String>,
+    /// OpenSSL-style cipher string. Filters rustls cipher suites to
+    /// only those matching. Only modern AEAD suites are available;
+    /// legacy ciphers (RC4, DES, CBC) will produce an error.
+    pub cipher_list: Option<String>,
+    /// Disable TLS session resumption. When true, every connection
+    /// performs a full handshake (equivalent to legacy `-ctxreset 0`).
+    #[serde(default)]
+    pub disable_session_resumption: bool,
 }
 
 /// TLS configuration for mTLS between leader and agent nodes.

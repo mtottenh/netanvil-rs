@@ -1,11 +1,13 @@
 use std::time::{Duration, Instant};
 
+use netanvil_types::config::TlsClientConfig;
 use netanvil_types::{
     ExecutionError, ExecutionResult, HttpRequestSpec, RequestContext, RequestExecutor,
     TimingBreakdown,
 };
 
 use crate::connector::ThrottledConnector;
+use crate::tls::build_tls_connector;
 
 type HyperThrottledClient =
     hyper_util::client::legacy::Client<ThrottledConnector, http_body_util::Full<bytes::Bytes>>;
@@ -72,6 +74,32 @@ impl HttpExecutor {
             client: HttpClient::Throttled(client),
             request_timeout: timeout,
         }
+    }
+
+    /// Create an executor with TLS configuration and optional bandwidth throttling.
+    ///
+    /// Uses rustls with the ring crypto provider. All HTTPS connections go
+    /// through [`ThrottledConnector`] with the pre-configured TLS connector,
+    /// bypassing cyper's built-in TLS handling.
+    pub fn with_tls_config(
+        tls_config: &TlsClientConfig,
+        bandwidth_bps: Option<u64>,
+        timeout: Duration,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let compio_tls = build_tls_connector(tls_config)?;
+        let connector = ThrottledConnector::with_tls(
+            bandwidth_bps,
+            compio_tls,
+            tls_config.sni_override.clone(),
+        );
+        let client = hyper_util::client::legacy::Client::builder(cyper_core::CompioExecutor)
+            .set_host(true)
+            .timer(cyper_core::CompioTimer)
+            .build(connector);
+        Ok(Self {
+            client: HttpClient::Throttled(client),
+            request_timeout: timeout,
+        })
     }
 }
 

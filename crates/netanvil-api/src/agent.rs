@@ -447,7 +447,21 @@ fn run_http_test(
     progress_state: SharedState,
     plugin_factory: Option<netanvil_core::GeneratorFactory>,
 ) -> netanvil_types::Result<TestResult> {
-    let mut builder = TestBuilder::new(config, move || HttpExecutor::with_timeout(request_timeout))
+    let tls_client = config.tls_client.clone();
+    let bandwidth_bps = config.bandwidth_limit_bps;
+    let make_executor = move || -> HttpExecutor {
+        match &tls_client {
+            Some(tls_config) => {
+                HttpExecutor::with_tls_config(tls_config, bandwidth_bps, request_timeout)
+                    .expect("TLS configuration error")
+            }
+            None => match bandwidth_bps {
+                Some(bps) => HttpExecutor::with_bandwidth_limit(bps, request_timeout),
+                None => HttpExecutor::with_timeout(request_timeout),
+            },
+        }
+    };
+    let mut builder = TestBuilder::new(config, make_executor)
         .on_progress(move |update| {
             progress_state.update_from_progress(update);
         })

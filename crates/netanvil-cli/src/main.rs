@@ -446,14 +446,21 @@ fn REDACTED_FN(args: Vec<String>) -> Result<()> {
 
     let request_timeout = config.connections.request_timeout;
     let bandwidth_bps = config.bandwidth_limit_bps;
+    let tls_client = config.tls_client.clone();
     let drop_fraction = compat_result.drop_fraction;
     let load_feedback = compat_result.load_feedback;
     let targets = config.targets.clone();
 
     let make_executor = move || {
-        let executor = match bandwidth_bps {
-            Some(bps) => HttpExecutor::with_bandwidth_limit(bps, request_timeout),
-            None => HttpExecutor::with_timeout(request_timeout),
+        let executor = match &tls_client {
+            Some(tls_config) => {
+                HttpExecutor::with_tls_config(tls_config, bandwidth_bps, request_timeout)
+                    .expect("TLS configuration error")
+            }
+            None => match bandwidth_bps {
+                Some(bps) => HttpExecutor::with_bandwidth_limit(bps, request_timeout),
+                None => HttpExecutor::with_timeout(request_timeout),
+            },
         };
         match drop_fraction {
             Some(frac) => {
@@ -1297,11 +1304,22 @@ fn main() -> Result<()> {
                 }
 
                 DetectedProtocol::Http => {
-                    // Build executor factory — with or without bandwidth throttling
+                    // Build executor factory — with TLS config, bandwidth throttling, or default
+                    let tls_client = config.tls_client.clone();
                     let make_executor = move || -> HttpExecutor {
-                        match bandwidth_bps {
-                            Some(bps) => HttpExecutor::with_bandwidth_limit(bps, request_timeout),
-                            None => HttpExecutor::with_timeout(request_timeout),
+                        match &tls_client {
+                            Some(tls_config) => HttpExecutor::with_tls_config(
+                                tls_config,
+                                bandwidth_bps,
+                                request_timeout,
+                            )
+                            .expect("TLS configuration error"),
+                            None => match bandwidth_bps {
+                                Some(bps) => {
+                                    HttpExecutor::with_bandwidth_limit(bps, request_timeout)
+                                }
+                                None => HttpExecutor::with_timeout(request_timeout),
+                            },
                         }
                     };
 

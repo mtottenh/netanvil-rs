@@ -29,5 +29,6 @@ pub mod wasm;
 
 pub use error::{PluginError, Result};
 pub use hybrid::{GeneratorConfig, HybridGenerator, WeightedPattern};
-pub use rhai_runtime::RhaiGenerator;
+pub use rhai_runtime::{FromRhaiPlugin, RhaiGenerator};
+pub use types::FromPostcard;
 pub use wasm::{compile_wasm_module, WasmGenerator};

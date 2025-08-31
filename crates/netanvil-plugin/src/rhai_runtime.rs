@@ -136,3 +136,74 @@ impl netanvil_types::RequestGenerator for RhaiGenerator {
         self.scope.set_value("targets", targets_array);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Protocol-generic Rhai plugin output conversion.
+// ---------------------------------------------------------------------------
+
+/// Construct a protocol-specific spec from a Rhai dynamic map.
+///
+/// Each protocol implements this for its spec type. The Rhai generator calls
+/// `S::from_rhai_map()` instead of hardcoding the HTTP field extraction.
+pub trait FromRhaiPlugin: netanvil_types::ProtocolSpec + Sized {
+    fn from_rhai_map(map: &Map) -> std::result::Result<Self, PluginError>;
+    fn fallback() -> Self;
+}
+
+impl FromRhaiPlugin for netanvil_types::HttpRequestSpec {
+    fn from_rhai_map(map: &Map) -> std::result::Result<Self, PluginError> {
+        let method = map
+            .get("method")
+            .and_then(|v| v.clone().into_string().ok())
+            .unwrap_or_else(|| "GET".into());
+
+        let url = map
+            .get("url")
+            .and_then(|v| v.clone().into_string().ok())
+            .ok_or_else(|| PluginError::InvalidResponse("missing 'url' in response".into()))?;
+
+        let headers = match map.get("headers") {
+            Some(v) => {
+                if let Ok(arr) = v.clone().into_array() {
+                    arr.into_iter()
+                        .filter_map(|pair| {
+                            let pair = pair.into_array().ok()?;
+                            if pair.len() >= 2 {
+                                let k = pair[0].clone().into_string().ok()?;
+                                let v = pair[1].clone().into_string().ok()?;
+                                Some((k, v))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            }
+            None => Vec::new(),
+        };
+
+        let body = map
+            .get("body")
+            .and_then(|v| v.clone().into_string().ok())
+            .map(|s| s.into_bytes());
+
+        let plugin_spec = PluginHttpRequestSpec {
+            method,
+            url,
+            headers,
+            body,
+        };
+        Ok(plugin_spec.into_http_request_spec())
+    }
+
+    fn fallback() -> Self {
+        netanvil_types::HttpRequestSpec {
+            method: http::Method::GET,
+            url: "http://error.invalid".into(),
+            headers: vec![],
+            body: None,
+        }
+    }
+}

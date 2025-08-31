@@ -151,6 +151,65 @@ impl netanvil_types::RequestGenerator for Lua54Generator {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Protocol-generic Lua plugin output conversion.
+// ---------------------------------------------------------------------------
+
+/// Construct a protocol-specific spec from a Lua table.
+///
+/// Each protocol implements this for its spec type. The Lua 5.4 generator calls
+/// `S::from_lua_table()` instead of hardcoding the HTTP field extraction.
+pub trait FromLuaPlugin: netanvil_types::ProtocolSpec + Sized {
+    fn from_lua_table(table: &LuaTable) -> std::result::Result<Self, PluginError>;
+    fn fallback() -> Self;
+}
+
+impl FromLuaPlugin for netanvil_types::HttpRequestSpec {
+    fn from_lua_table(table: &LuaTable) -> std::result::Result<Self, PluginError> {
+        let method: String = table
+            .get("method")
+            .map_err(|e| PluginError::InvalidResponse(format!("method: {e}")))?;
+        let url: String = table
+            .get("url")
+            .map_err(|e| PluginError::InvalidResponse(format!("url: {e}")))?;
+
+        let headers: Vec<(String, String)> = match table.get::<LuaTable>("headers") {
+            Ok(h) => {
+                let mut headers = Vec::new();
+                for pair in h.sequence_values::<LuaTable>().flatten() {
+                    if let (Ok(k), Ok(v)) = (pair.get::<String>(1), pair.get::<String>(2)) {
+                        headers.push((k, v));
+                    }
+                }
+                headers
+            }
+            Err(_) => Vec::new(),
+        };
+
+        let body: Option<Vec<u8>> = match table.get::<LuaValue>("body") {
+            Ok(LuaValue::String(s)) => Some(s.as_bytes().to_vec()),
+            _ => None,
+        };
+
+        let plugin_spec = PluginHttpRequestSpec {
+            method,
+            url,
+            headers,
+            body,
+        };
+        Ok(plugin_spec.into_http_request_spec())
+    }
+
+    fn fallback() -> Self {
+        netanvil_types::HttpRequestSpec {
+            method: http::Method::GET,
+            url: "http://error.invalid".into(),
+            headers: vec![],
+            body: None,
+        }
+    }
+}
+
 /// Parse a Lua hybrid configuration script and return a `GeneratorConfig`.
 ///
 /// Same as `netanvil_plugin_luajit::config_from_lua` but uses Lua 5.4 interpreter.

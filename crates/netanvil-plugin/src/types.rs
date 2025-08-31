@@ -111,3 +111,33 @@ impl RawContext {
         unsafe { &*(self as *const Self as *const [u8; 24]) }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Protocol-generic plugin output conversion.
+// ---------------------------------------------------------------------------
+
+/// Construct a protocol-specific spec from postcard-encoded bytes (WASM output).
+///
+/// Each protocol implements this for its spec type. The WASM generator calls
+/// `S::from_postcard_bytes()` instead of hardcoding `PluginHttpRequestSpec`.
+pub trait FromPostcard: netanvil_types::ProtocolSpec + Sized {
+    fn from_postcard_bytes(bytes: &[u8]) -> std::result::Result<Self, crate::error::PluginError>;
+    fn fallback() -> Self;
+}
+
+impl FromPostcard for netanvil_types::HttpRequestSpec {
+    fn from_postcard_bytes(bytes: &[u8]) -> std::result::Result<Self, crate::error::PluginError> {
+        let plugin_spec: PluginHttpRequestSpec = postcard::from_bytes(bytes)
+            .map_err(|e| crate::error::PluginError::InvalidResponse(format!("postcard: {e}")))?;
+        Ok(plugin_spec.into_http_request_spec())
+    }
+
+    fn fallback() -> Self {
+        netanvil_types::HttpRequestSpec {
+            method: http::Method::GET,
+            url: "http://error.invalid".into(),
+            headers: vec![],
+            body: None,
+        }
+    }
+}

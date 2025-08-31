@@ -20,8 +20,10 @@ use wasmtime::*;
 use wasmtime_wasi::preview1::WasiP1Ctx;
 use wasmtime_wasi::WasiCtxBuilder;
 
+use std::marker::PhantomData;
+
 use crate::error::{PluginError, Result};
-use crate::types::{PluginHttpRequestSpec, RawContext};
+use crate::types::{FromPostcard, RawContext};
 
 /// A RequestGenerator backed by a WASM module.
 ///
@@ -31,16 +33,17 @@ use crate::types::{PluginHttpRequestSpec, RawContext};
 /// - `init(input_len: i32) -> i32` — initialize with JSON target URLs
 /// - `generate(input_len: i32) -> i32` — generate request, returns output JSON length
 /// - `update_targets(input_len: i32) -> i32` — update targets mid-test
-pub struct WasmGenerator {
+pub struct WasmGenerator<S: FromPostcard> {
     store: Store<WasiP1Ctx>,
     memory: Memory,
     fn_generate: TypedFunc<i32, i32>,
     fn_get_input_ptr: TypedFunc<(), i32>,
     fn_get_output_ptr: TypedFunc<(), i32>,
     fn_update_targets: TypedFunc<i32, i32>,
+    _phantom: PhantomData<S>,
 }
 
-impl WasmGenerator {
+impl<S: FromPostcard> WasmGenerator<S> {
     /// Create a new WasmGenerator from a pre-compiled WASM module.
     ///
     /// `targets` are the initial target URLs passed to the WASM `init()` function.
@@ -87,6 +90,7 @@ impl WasmGenerator {
             fn_get_input_ptr,
             fn_get_output_ptr,
             fn_update_targets,
+            _phantom: PhantomData,
         };
 
         // Initialize the WASM module with targets (postcard-encoded).
@@ -120,13 +124,10 @@ impl WasmGenerator {
     }
 }
 
-impl netanvil_types::RequestGenerator for WasmGenerator {
-    type Spec = netanvil_types::HttpRequestSpec;
+impl<S: FromPostcard> netanvil_types::RequestGenerator for WasmGenerator<S> {
+    type Spec = S;
 
-    fn generate(
-        &mut self,
-        context: &netanvil_types::RequestContext,
-    ) -> netanvil_types::HttpRequestSpec {
+    fn generate(&mut self, context: &netanvil_types::RequestContext) -> S {
         // Write 24-byte repr(C) context directly into guest memory (zero serialization).
         let raw = RawContext::from_context(context);
         let input_ptr = self
@@ -143,7 +144,7 @@ impl netanvil_types::RequestGenerator for WasmGenerator {
             .expect("generate trap");
 
         if output_len <= 0 {
-            return fallback_spec();
+            return S::fallback();
         }
 
         // Read postcard-encoded spec directly from guest memory (no .to_vec() allocation).
@@ -154,10 +155,7 @@ impl netanvil_types::RequestGenerator for WasmGenerator {
         let output_len = output_len as usize;
         let output_slice = &self.memory.data(&self.store)[output_ptr..output_ptr + output_len];
 
-        match postcard::from_bytes::<PluginHttpRequestSpec>(output_slice) {
-            Ok(spec) => spec.into_http_request_spec(),
-            Err(_) => fallback_spec(),
-        }
+        S::from_postcard_bytes(output_slice).unwrap_or_else(|_| S::fallback())
     }
 
     fn update_targets(&mut self, targets: Vec<String>) {
@@ -168,15 +166,6 @@ impl netanvil_types::RequestGenerator for WasmGenerator {
                     .call(&mut self.store, bytes.len() as i32);
             }
         }
-    }
-}
-
-fn fallback_spec() -> netanvil_types::HttpRequestSpec {
-    netanvil_types::HttpRequestSpec {
-        method: http::Method::GET,
-        url: "http://error.invalid".into(),
-        headers: vec![],
-        body: None,
     }
 }
 

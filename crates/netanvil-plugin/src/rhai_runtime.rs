@@ -9,6 +9,8 @@
 //! Each `RhaiGenerator` owns its own `Engine` and `AST`. The Rhai Engine is
 //! not the same as wasmtime's Engine — it includes the interpreter state.
 
+use std::marker::PhantomData;
+
 use rhai::{Dynamic, Engine, Map, Scope, AST};
 
 use crate::error::{PluginError, Result};
@@ -19,13 +21,14 @@ use crate::types::{PluginHttpRequestSpec, PluginRequestContext};
 /// The Rhai script must define a function `generate(ctx)` that receives an
 /// object map with `{request_id, core_id, is_sampled, session_id}` and
 /// returns an object map `{method, url, headers, body}`.
-pub struct RhaiGenerator {
+pub struct RhaiGenerator<S: FromRhaiPlugin> {
     engine: Engine,
     ast: AST,
     scope: Scope<'static>,
+    _phantom: PhantomData<S>,
 }
 
-impl RhaiGenerator {
+impl<S: FromRhaiPlugin> RhaiGenerator<S> {
     /// Create a new RhaiGenerator from Rhai source code.
     pub fn new(script: &str, targets: &[String]) -> Result<Self> {
         let engine = Engine::new();
@@ -46,7 +49,12 @@ impl RhaiGenerator {
             .run_ast_with_scope(&mut scope, &ast)
             .map_err(|e| PluginError::Rhai(format!("init: {e}")))?;
 
-        Ok(Self { engine, ast, scope })
+        Ok(Self {
+            engine,
+            ast,
+            scope,
+            _phantom: PhantomData,
+        })
     }
 
     fn ctx_to_map(&self, ctx: &PluginRequestContext) -> Map {
@@ -60,61 +68,12 @@ impl RhaiGenerator {
         };
         map
     }
-
-    fn map_to_spec(&self, map: Map) -> Result<PluginHttpRequestSpec> {
-        let method = map
-            .get("method")
-            .and_then(|v| v.clone().into_string().ok())
-            .unwrap_or_else(|| "GET".into());
-
-        let url = map
-            .get("url")
-            .and_then(|v| v.clone().into_string().ok())
-            .ok_or_else(|| PluginError::InvalidResponse("missing 'url' in response".into()))?;
-
-        let headers = match map.get("headers") {
-            Some(v) => {
-                if let Ok(arr) = v.clone().into_array() {
-                    arr.into_iter()
-                        .filter_map(|pair| {
-                            let pair = pair.into_array().ok()?;
-                            if pair.len() >= 2 {
-                                let k = pair[0].clone().into_string().ok()?;
-                                let v = pair[1].clone().into_string().ok()?;
-                                Some((k, v))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                }
-            }
-            None => Vec::new(),
-        };
-
-        let body = map
-            .get("body")
-            .and_then(|v| v.clone().into_string().ok())
-            .map(|s| s.into_bytes());
-
-        Ok(PluginHttpRequestSpec {
-            method,
-            url,
-            headers,
-            body,
-        })
-    }
 }
 
-impl netanvil_types::RequestGenerator for RhaiGenerator {
-    type Spec = netanvil_types::HttpRequestSpec;
+impl<S: FromRhaiPlugin> netanvil_types::RequestGenerator for RhaiGenerator<S> {
+    type Spec = S;
 
-    fn generate(
-        &mut self,
-        context: &netanvil_types::RequestContext,
-    ) -> netanvil_types::HttpRequestSpec {
+    fn generate(&mut self, context: &netanvil_types::RequestContext) -> S {
         let plugin_ctx = PluginRequestContext::from(context);
         let ctx_map = self.ctx_to_map(&plugin_ctx);
 
@@ -124,11 +83,7 @@ impl netanvil_types::RequestGenerator for RhaiGenerator {
             .expect("Rhai generate() call failed");
 
         let result_map: Map = result.cast();
-        let spec = self
-            .map_to_spec(result_map)
-            .expect("Rhai generate() returned invalid map");
-
-        spec.into_http_request_spec()
+        S::from_rhai_map(&result_map).unwrap_or_else(|_| S::fallback())
     }
 
     fn update_targets(&mut self, targets: Vec<String>) {

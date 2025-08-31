@@ -6,6 +6,8 @@
 //!
 //! Also provides `config_from_lua` for the hybrid approach (Lua config → native execution).
 
+use std::marker::PhantomData;
+
 use mlua::prelude::*;
 
 use netanvil_plugin::error::{PluginError, Result};
@@ -15,13 +17,14 @@ use netanvil_plugin::types::{PluginHttpRequestSpec, PluginRequestContext};
 /// A RequestGenerator backed by Lua 5.4.
 ///
 /// Same API as `LuaJitGenerator` but links against PUC Lua 5.4.
-pub struct Lua54Generator {
+pub struct Lua54Generator<S: FromLuaPlugin> {
     lua: Lua,
     /// Persistent context table — reused every call to avoid GC allocation.
     ctx_table: LuaTable,
+    _phantom: PhantomData<S>,
 }
 
-impl Lua54Generator {
+impl<S: FromLuaPlugin> Lua54Generator<S> {
     /// Create a new Lua54Generator from Lua source code.
     pub fn new(script: &str, targets: &[String]) -> Result<Self> {
         let lua = Lua::new();
@@ -57,7 +60,11 @@ impl Lua54Generator {
             .set("session_id", LuaNil)
             .map_err(|e| PluginError::Lua(format!("init ctx table: {e}")))?;
 
-        Ok(Self { lua, ctx_table })
+        Ok(Self {
+            lua,
+            ctx_table,
+            _phantom: PhantomData,
+        })
     }
 
     /// Update the persistent context table with new values (no allocation).
@@ -77,46 +84,12 @@ impl Lua54Generator {
         }
         .expect("ctx table set failed");
     }
-
-    fn table_to_spec(&self, table: LuaTable) -> LuaResult<PluginHttpRequestSpec> {
-        let method: String = table.get("method")?;
-        let url: String = table.get("url")?;
-
-        let headers: Vec<(String, String)> = match table.get::<LuaTable>("headers") {
-            Ok(h) => {
-                let mut headers = Vec::new();
-                for pair in h.sequence_values::<LuaTable>() {
-                    let pair = pair?;
-                    let k: String = pair.get(1)?;
-                    let v: String = pair.get(2)?;
-                    headers.push((k, v));
-                }
-                headers
-            }
-            Err(_) => Vec::new(),
-        };
-
-        let body: Option<Vec<u8>> = match table.get::<LuaValue>("body") {
-            Ok(LuaValue::String(s)) => Some(s.as_bytes().to_vec()),
-            _ => None,
-        };
-
-        Ok(PluginHttpRequestSpec {
-            method,
-            url,
-            headers,
-            body,
-        })
-    }
 }
 
-impl netanvil_types::RequestGenerator for Lua54Generator {
-    type Spec = netanvil_types::HttpRequestSpec;
+impl<S: FromLuaPlugin> netanvil_types::RequestGenerator for Lua54Generator<S> {
+    type Spec = S;
 
-    fn generate(
-        &mut self,
-        context: &netanvil_types::RequestContext,
-    ) -> netanvil_types::HttpRequestSpec {
+    fn generate(&mut self, context: &netanvil_types::RequestContext) -> S {
         let plugin_ctx = PluginRequestContext::from(context);
 
         // Reuse persistent table — avoids GC allocation per call.
@@ -132,11 +105,7 @@ impl netanvil_types::RequestGenerator for Lua54Generator {
             .call(self.ctx_table.clone())
             .expect("Lua generate() call failed");
 
-        let spec = self
-            .table_to_spec(result_table)
-            .expect("Lua generate() returned invalid table");
-
-        spec.into_http_request_spec()
+        S::from_lua_table(&result_table).unwrap_or_else(|_| S::fallback())
     }
 
     fn update_targets(&mut self, targets: Vec<String>) {

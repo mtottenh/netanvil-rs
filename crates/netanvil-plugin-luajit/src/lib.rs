@@ -184,6 +184,43 @@ impl FromLuaPlugin for netanvil_types::HttpRequestSpec {
     }
 }
 
+impl FromLuaPlugin for netanvil_types::TcpRequestSpec {
+    fn from_lua_table(table: &LuaTable) -> std::result::Result<Self, PluginError> {
+        // Plugin returns {payload = "..."} — target/framing/mode come from config.
+        let payload: Vec<u8> = if let Ok(s) = table.get::<String>("payload") {
+            s.into_bytes()
+        } else if let Ok(LuaValue::String(s)) = table.get::<LuaValue>("payload") {
+            s.as_bytes().to_vec()
+        } else {
+            vec![]
+        };
+
+        Ok(netanvil_types::TcpRequestSpec {
+            target: "0.0.0.0:0".parse().unwrap(),
+            payload,
+            framing: netanvil_types::TcpFraming::Raw,
+            expect_response: true,
+            response_max_bytes: 65536,
+            mode: netanvil_types::TcpTestMode::Echo,
+            request_size: 0,
+            response_size: 0,
+        })
+    }
+
+    fn fallback() -> Self {
+        netanvil_types::TcpRequestSpec {
+            target: "127.0.0.1:0".parse().unwrap(),
+            payload: vec![],
+            framing: netanvil_types::TcpFraming::Raw,
+            expect_response: true,
+            response_max_bytes: 65536,
+            mode: netanvil_types::TcpTestMode::Echo,
+            request_size: 0,
+            response_size: 0,
+        }
+    }
+}
+
 /// Parse a Lua hybrid configuration script and return a `GeneratorConfig`.
 ///
 /// The script must define a `configure()` function returning a table with:

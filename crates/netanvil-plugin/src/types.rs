@@ -125,6 +125,57 @@ pub trait FromPostcard: netanvil_types::ProtocolSpec + Sized {
     fn fallback() -> Self;
 }
 
+/// Serializable version of TcpRequestSpec returned by plugins.
+///
+/// Plugins only control the payload — target, framing, and mode come from
+/// test configuration and are filled in by the generator or transformer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginTcpSpec {
+    /// Payload bytes or UTF-8 string to send.
+    #[serde(default)]
+    pub payload: Vec<u8>,
+    /// Payload as a UTF-8 string (alternative to raw bytes).
+    /// If both `payload` and `payload_str` are set, `payload_str` takes priority.
+    #[serde(default)]
+    pub payload_str: Option<String>,
+}
+
+impl FromPostcard for netanvil_types::TcpRequestSpec {
+    fn from_postcard_bytes(bytes: &[u8]) -> std::result::Result<Self, crate::error::PluginError> {
+        let plugin_spec: PluginTcpSpec = postcard::from_bytes(bytes)
+            .map_err(|e| crate::error::PluginError::InvalidResponse(format!("postcard: {e}")))?;
+
+        let payload = match plugin_spec.payload_str {
+            Some(s) => s.into_bytes(),
+            None => plugin_spec.payload,
+        };
+
+        Ok(netanvil_types::TcpRequestSpec {
+            target: "0.0.0.0:0".parse().unwrap(),
+            payload,
+            framing: netanvil_types::TcpFraming::Raw,
+            expect_response: true,
+            response_max_bytes: 65536,
+            mode: netanvil_types::TcpTestMode::Echo,
+            request_size: 0,
+            response_size: 0,
+        })
+    }
+
+    fn fallback() -> Self {
+        netanvil_types::TcpRequestSpec {
+            target: "127.0.0.1:0".parse().unwrap(),
+            payload: vec![],
+            framing: netanvil_types::TcpFraming::Raw,
+            expect_response: true,
+            response_max_bytes: 65536,
+            mode: netanvil_types::TcpTestMode::Echo,
+            request_size: 0,
+            response_size: 0,
+        }
+    }
+}
+
 impl FromPostcard for netanvil_types::HttpRequestSpec {
     fn from_postcard_bytes(bytes: &[u8]) -> std::result::Result<Self, crate::error::PluginError> {
         let plugin_spec: PluginHttpRequestSpec = postcard::from_bytes(bytes)

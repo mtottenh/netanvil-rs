@@ -10,7 +10,9 @@ pub mod error;
 pub mod metrics;
 pub mod node;
 pub mod request;
+pub mod tcp_spec;
 pub mod traits;
+pub mod udp_spec;
 
 pub use command::{ScheduledRequest, TimerCommand, WorkerCommand};
 pub use config::{
@@ -27,10 +29,12 @@ pub use node::{NodeId, NodeInfo, NodeState};
 pub use request::{
     ExecutionError, ExecutionResult, HttpRequestSpec, ProtocolSpec, RequestContext, TimingBreakdown,
 };
+pub use tcp_spec::{TcpFraming, TcpRequestSpec, TcpTestMode};
 pub use traits::{
     HttpGenerator, HttpTransformer, MetricsCollector, RateController, RequestExecutor,
     RequestGenerator, RequestScheduler, RequestTransformer,
 };
+pub use udp_spec::UdpRequestSpec;
 
 #[cfg(test)]
 mod tests {

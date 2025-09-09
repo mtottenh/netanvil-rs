@@ -12,6 +12,7 @@ members = [
     "crates/netanvil-plugin-lua54",
     "crates/netanvil-tcp",
     "crates/netanvil-udp",
+    "crates/netanvil-dns",
     "crates/netanvil-test-servers",
     "crates/REDACTED-CRATE",
     "crates/netanvil-cli",
@@ -26,6 +27,7 @@ default-members = [
     "crates/netanvil-http",
     "crates/netanvil-tcp",
     "crates/netanvil-udp",
+    "crates/netanvil-dns",
     "crates/netanvil-test-servers",
     "crates/netanvil-api",
     "crates/netanvil-distributed",
@@ -103,6 +105,7 @@ netanvil-plugin-luajit = { path = "crates/netanvil-plugin-luajit" }
 netanvil-plugin-lua54 = { path = "crates/netanvil-plugin-lua54" }
 netanvil-tcp = { path = "crates/netanvil-tcp" }
 netanvil-udp = { path = "crates/netanvil-udp" }
+netanvil-dns = { path = "crates/netanvil-dns" }
 netanvil-test-servers = { path = "crates/netanvil-test-servers" }
 netanvil-cli = { path = "crates/netanvil-cli" }
 

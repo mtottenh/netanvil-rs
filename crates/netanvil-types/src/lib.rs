@@ -6,6 +6,7 @@
 pub mod command;
 pub mod config;
 pub mod distributed;
+pub mod dns_spec;
 pub mod error;
 pub mod metrics;
 pub mod node;
@@ -21,6 +22,7 @@ pub use config::{
     TestConfig, TlsConfig,
 };
 pub use distributed::{MetricsFetcher, NodeCommander, NodeDiscovery, RemoteMetrics};
+pub use dns_spec::{DnsQueryType, DnsRequestSpec};
 pub use error::{NetAnvilError, Result};
 pub use metrics::{
     MetricsSnapshot, MetricsSummary, RateDecision, SaturationAssessment, SaturationInfo,

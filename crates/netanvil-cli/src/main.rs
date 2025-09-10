@@ -1522,8 +1522,8 @@ fn main() -> Result<()> {
             request_size,
             response_size,
             chunk_size: _chunk_size,
-            dns_domains: _dns_domains,
-            dns_query_type: _dns_query_type,
+            dns_domains: leader_dns_domains,
+            dns_query_type: leader_dns_query_type,
             ramp_warmup,
             ramp_multiplier,
             ramp_max_errors,
@@ -1628,8 +1628,12 @@ fn main() -> Result<()> {
                     config.error_status_threshold = 0;
                 }
                 DetectedProtocol::Dns => {
-                    // DNS is handled by agents via SimpleDnsGenerator; no ProtocolConfig yet.
-                    // Future: add ProtocolConfig::Dns for distributed DNS tests.
+                    let domains = leader_dns_domains.as_deref().unwrap_or("example.com");
+                    config.protocol = Some(netanvil_types::ProtocolConfig::Dns {
+                        domains: domains.to_string(),
+                        query_type: leader_dns_query_type.clone(),
+                        recursion: true,
+                    });
                     config.error_status_threshold = 0;
                 }
                 DetectedProtocol::Http => {

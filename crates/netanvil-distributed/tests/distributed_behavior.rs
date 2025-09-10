@@ -12,7 +12,7 @@ use netanvil_api::AgentServer;
 use netanvil_distributed::{
     DistributedCoordinator, HttpMetricsFetcher, HttpNodeCommander, StaticDiscovery,
 };
-use netanvil_types::{ConnectionConfig, RateConfig, TestConfig};
+use netanvil_types::{ConnectionConfig, ProtocolConfig, RateConfig, TestConfig};
 
 fn start_target_server() -> (SocketAddr, Arc<AtomicU64>) {
     let (addr_tx, addr_rx) = std::sync::mpsc::channel();
@@ -188,4 +188,86 @@ fn distributed_stop_terminates_all_agents() {
         "should have generated requests, got {}",
         result.total_requests
     );
+}
+
+#[test]
+fn distributed_dns_test_with_two_agents() {
+    // Start DNS echo server
+    let dns_server = netanvil_test_servers::dns::start_dns_echo();
+
+    // Start two agents
+    let port1 = 19093;
+    let port2 = 19094;
+    let _agent1 = start_agent(port1);
+    let _agent2 = start_agent(port2);
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Build DNS test config
+    let config = TestConfig {
+        targets: vec![format!("dns://{}", dns_server.addr)],
+        duration: Duration::from_secs(3),
+        rate: RateConfig::Static { rps: 200.0 },
+        num_cores: 1,
+        connections: ConnectionConfig {
+            request_timeout: Duration::from_secs(5),
+            ..Default::default()
+        },
+        metrics_interval: Duration::from_millis(200),
+        control_interval: Duration::from_millis(200),
+        error_status_threshold: 0,
+        protocol: Some(ProtocolConfig::Dns {
+            domains: "example.com,test.com,foo.bar".to_string(),
+            query_type: "A".to_string(),
+            recursion: true,
+        }),
+        ..Default::default()
+    };
+
+    let discovery = StaticDiscovery::new(vec![
+        format!("127.0.0.1:{port1}"),
+        format!("127.0.0.1:{port2}"),
+    ]);
+    let fetcher = HttpMetricsFetcher::new(Duration::from_secs(5));
+    let commander = HttpNodeCommander::new(Duration::from_secs(10));
+    let rate_controller = Box::new(netanvil_core::StaticRateController::new(200.0));
+
+    let mut coordinator =
+        DistributedCoordinator::new(discovery, fetcher, commander, config, rate_controller);
+
+    let result = coordinator.run();
+
+    eprintln!(
+        "Distributed DNS test: {} requests in {:.1}s",
+        result.total_requests,
+        result.duration.as_secs_f64()
+    );
+    for (id, m) in &result.nodes {
+        eprintln!(
+            "  {id}: {} requests, {:.1} RPS",
+            m.total_requests, m.current_rps
+        );
+    }
+
+    // Should have generated a reasonable number of DNS queries
+    assert!(
+        result.total_requests > 200,
+        "expected >200 DNS requests across 2 agents, got {}",
+        result.total_requests
+    );
+
+    // Both agents should have contributed
+    assert_eq!(
+        result.nodes.len(),
+        2,
+        "expected metrics from 2 nodes, got {}",
+        result.nodes.len()
+    );
+
+    for (id, m) in &result.nodes {
+        assert!(
+            m.total_requests > 30,
+            "node {id} should have contributed DNS requests, got {}",
+            m.total_requests
+        );
+    }
 }

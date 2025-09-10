@@ -18,6 +18,7 @@ rustls-pemfile = "2"
 [dev-dependencies]
 netanvil-api = { workspace = true }
 netanvil-http = { workspace = true }
+netanvil-dns = { workspace = true }
 netanvil-core = { workspace = true }
 netanvil-test-servers = { workspace = true }
 tokio = { workspace = true }

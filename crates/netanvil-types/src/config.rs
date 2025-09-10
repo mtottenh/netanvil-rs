@@ -108,6 +108,15 @@ pub enum ProtocolConfig {
         /// Whether to wait for a response datagram.
         expect_response: bool,
     },
+    /// DNS test configuration.
+    Dns {
+        /// Comma-separated domain names to query.
+        domains: String,
+        /// Query type: "A", "AAAA", "MX", etc.
+        query_type: String,
+        /// Whether to set the RD (recursion desired) flag.
+        recursion: bool,
+    },
 }
 
 /// Plugin configuration embedded in TestConfig.

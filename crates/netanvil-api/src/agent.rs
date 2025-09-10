@@ -337,6 +337,7 @@ fn make_inner(port: u16, addr: &str, cores: usize) -> Arc<Mutex<AgentInner>> {
 /// - `None` -> HTTP (default)
 /// - `Some(ProtocolConfig::Tcp { .. })` -> TCP executor with connection pool
 /// - `Some(ProtocolConfig::Udp { .. })` -> UDP executor
+/// - `Some(ProtocolConfig::Dns { .. })` -> DNS executor (UDP queries)
 fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> Result<(), String> {
     let (cmd_rx, shared_state) = {
         let mut agent = inner.lock().unwrap();
@@ -404,6 +405,19 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
                     progress_state,
                     &payload_hex,
                     expect_response,
+                ),
+                Some(netanvil_types::ProtocolConfig::Dns {
+                    domains,
+                    query_type,
+                    recursion,
+                }) => run_dns_test(
+                    test_config,
+                    request_timeout,
+                    cmd_rx,
+                    progress_state,
+                    &domains,
+                    &query_type,
+                    recursion,
                 ),
                 None => {
                     // Default HTTP path
@@ -606,6 +620,64 @@ fn run_udp_test(
     netanvil_core::GenericTestBuilder::new(
         config,
         move || UdpExecutor::with_timeout(timeout),
+        gen_factory,
+        trans_factory,
+    )
+    .on_progress(move |update| {
+        progress_state.update_from_progress(update);
+    })
+    .external_commands(cmd_rx)
+    .run()
+}
+
+fn run_dns_test(
+    config: TestConfig,
+    timeout: std::time::Duration,
+    cmd_rx: flume::Receiver<WorkerCommand>,
+    progress_state: SharedState,
+    domains_csv: &str,
+    query_type_str: &str,
+    recursion: bool,
+) -> netanvil_types::Result<TestResult> {
+    use netanvil_dns::*;
+
+    let domains: Vec<String> = domains_csv
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+    let query_type = DnsQueryType::from_str_name(query_type_str).unwrap_or(DnsQueryType::A);
+
+    let targets: Vec<std::net::SocketAddr> = config
+        .targets
+        .iter()
+        .filter_map(|t| {
+            t.strip_prefix("dns://")
+                .and_then(|a| a.parse().ok())
+                .or_else(|| t.parse().ok())
+        })
+        .collect();
+
+    if targets.is_empty() {
+        return Err(netanvil_types::NetAnvilError::Other(
+            "no valid DNS targets".into(),
+        ));
+    }
+
+    let gen_factory: netanvil_core::GenericGeneratorFactory<DnsRequestSpec> =
+        Box::new(move |_core_id| {
+            Box::new(SimpleDnsGenerator::new(
+                targets.clone(),
+                domains.clone(),
+                query_type,
+                recursion,
+            ))
+        });
+    let trans_factory: netanvil_core::GenericTransformerFactory<DnsRequestSpec> =
+        Box::new(|_| Box::new(DnsNoopTransformer));
+
+    netanvil_core::GenericTestBuilder::new(
+        config,
+        move || DnsExecutor::with_timeout(timeout),
         gen_factory,
         trans_factory,
     )

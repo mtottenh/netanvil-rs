@@ -176,6 +176,56 @@ impl FromPostcard for netanvil_types::TcpRequestSpec {
     }
 }
 
+/// Serializable DNS query spec returned by plugins.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginDnsSpec {
+    pub query_name: String,
+    #[serde(default = "default_query_type")]
+    pub query_type: String,
+    #[serde(default = "default_true")]
+    pub recursion: bool,
+    #[serde(default)]
+    pub dnssec: bool,
+}
+
+fn default_query_type() -> String {
+    "A".into()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl FromPostcard for netanvil_types::DnsRequestSpec {
+    fn from_postcard_bytes(bytes: &[u8]) -> std::result::Result<Self, crate::error::PluginError> {
+        let plugin: PluginDnsSpec = postcard::from_bytes(bytes)
+            .map_err(|e| crate::error::PluginError::InvalidResponse(format!("postcard: {e}")))?;
+
+        let query_type = netanvil_types::DnsQueryType::from_str_name(&plugin.query_type)
+            .unwrap_or(netanvil_types::DnsQueryType::A);
+
+        Ok(netanvil_types::DnsRequestSpec {
+            server: "0.0.0.0:0".parse().unwrap(),
+            query_name: plugin.query_name,
+            query_type,
+            recursion: plugin.recursion,
+            dnssec: plugin.dnssec,
+            txid: 0,
+        })
+    }
+
+    fn fallback() -> Self {
+        netanvil_types::DnsRequestSpec {
+            server: "127.0.0.1:53".parse().unwrap(),
+            query_name: "error.invalid".into(),
+            query_type: netanvil_types::DnsQueryType::A,
+            recursion: true,
+            dnssec: false,
+            txid: 0,
+        }
+    }
+}
+
 impl FromPostcard for netanvil_types::HttpRequestSpec {
     fn from_postcard_bytes(bytes: &[u8]) -> std::result::Result<Self, crate::error::PluginError> {
         let plugin_spec: PluginHttpRequestSpec = postcard::from_bytes(bytes)

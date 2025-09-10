@@ -16,3 +16,5 @@ rand = { workspace = true }
 netanvil-test-servers = { workspace = true }
 netanvil-core = { workspace = true }
 netanvil-metrics = { workspace = true }
+netanvil-plugin-luajit = { workspace = true }
+netanvil-plugin = { workspace = true }

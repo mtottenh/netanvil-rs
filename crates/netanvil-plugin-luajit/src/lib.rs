@@ -221,6 +221,40 @@ impl FromLuaPlugin for netanvil_types::TcpRequestSpec {
     }
 }
 
+impl FromLuaPlugin for netanvil_types::DnsRequestSpec {
+    fn from_lua_table(table: &LuaTable) -> std::result::Result<Self, PluginError> {
+        let query_name: String = table
+            .get("query_name")
+            .map_err(|e| PluginError::InvalidResponse(format!("query_name: {e}")))?;
+        let query_type_str: String = table.get("query_type").unwrap_or_else(|_| "A".into());
+        let recursion: bool = table.get("recursion").unwrap_or(true);
+        let dnssec: bool = table.get("dnssec").unwrap_or(false);
+
+        let query_type = netanvil_types::DnsQueryType::from_str_name(&query_type_str)
+            .unwrap_or(netanvil_types::DnsQueryType::A);
+
+        Ok(netanvil_types::DnsRequestSpec {
+            server: "0.0.0.0:0".parse().unwrap(),
+            query_name,
+            query_type,
+            recursion,
+            dnssec,
+            txid: 0,
+        })
+    }
+
+    fn fallback() -> Self {
+        netanvil_types::DnsRequestSpec {
+            server: "127.0.0.1:53".parse().unwrap(),
+            query_name: "error.invalid".into(),
+            query_type: netanvil_types::DnsQueryType::A,
+            recursion: true,
+            dnssec: false,
+            txid: 0,
+        }
+    }
+}
+
 /// Parse a Lua hybrid configuration script and return a `GeneratorConfig`.
 ///
 /// The script must define a `configure()` function returning a table with:

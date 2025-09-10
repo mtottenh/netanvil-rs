@@ -197,6 +197,15 @@ enum Commands {
         #[arg(long, default_value = "65536")]
         chunk_size: usize,
 
+        // ── DNS-specific flags ──
+        /// Comma-separated domain names to query (for dns:// protocol)
+        #[arg(long)]
+        dns_domains: Option<String>,
+
+        /// DNS query type: A, AAAA, MX, CNAME, TXT, NS, SOA, PTR, SRV, ANY
+        #[arg(long, default_value = "A")]
+        dns_query_type: String,
+
         // ── Ramp mode flags ──
         /// Duration of warmup phase to learn baseline latency (e.g. "10s")
         #[arg(long, default_value = "10s")]
@@ -386,6 +395,15 @@ enum Commands {
         /// Chunk size in bytes for stream modes (default: 65536)
         #[arg(long, default_value = "65536")]
         chunk_size: usize,
+
+        // ── DNS-specific flags ──
+        /// Comma-separated domain names to query (for dns:// protocol)
+        #[arg(long)]
+        dns_domains: Option<String>,
+
+        /// DNS query type: A, AAAA, MX, CNAME, TXT, NS, SOA, PTR, SRV, ANY
+        #[arg(long, default_value = "A")]
+        dns_query_type: String,
 
         // ── Ramp mode flags ──
         /// Duration of warmup phase to learn baseline latency (e.g. "10s")
@@ -1074,6 +1092,8 @@ fn main() -> Result<()> {
             request_size,
             response_size,
             chunk_size: _,
+            dns_domains,
+            dns_query_type,
             ramp_warmup,
             ramp_multiplier,
             ramp_max_errors,
@@ -1303,6 +1323,55 @@ fn main() -> Result<()> {
                     .context("UDP load test failed")?
                 }
 
+                DetectedProtocol::Dns => {
+                    let servers = parse_socket_targets(&config.targets, "dns://")
+                        .context("invalid DNS target address")?;
+                    let domains: Vec<String> = dns_domains
+                        .as_deref()
+                        .unwrap_or("example.com")
+                        .split(',')
+                        .map(|s: &str| s.trim().to_string())
+                        .collect();
+                    let query_type = netanvil_dns::DnsQueryType::from_str_name(&dns_query_type)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("unknown DNS query type: {dns_query_type}")
+                        })?;
+
+                    eprintln!(
+                        "  protocol: DNS, query_type: {:?}, domains: {}",
+                        query_type,
+                        domains.len()
+                    );
+
+                    config.error_status_threshold = 0;
+
+                    let gen_factory: netanvil_core::GenericGeneratorFactory<
+                        netanvil_dns::DnsRequestSpec,
+                    > = Box::new(move |_core_id| {
+                        Box::new(netanvil_dns::SimpleDnsGenerator::new(
+                            servers.clone(),
+                            domains.clone(),
+                            query_type,
+                            true,
+                        ))
+                    });
+                    let trans_factory: netanvil_core::GenericTransformerFactory<
+                        netanvil_dns::DnsRequestSpec,
+                    > = Box::new(|_| Box::new(netanvil_dns::DnsNoopTransformer));
+
+                    GenericTestBuilder::new(
+                        config,
+                        move || netanvil_dns::DnsExecutor::with_timeout(request_timeout),
+                        gen_factory,
+                        trans_factory,
+                    )
+                    .on_progress(|update| {
+                        eprint!("\r{}", ProgressLine::new(update));
+                    })
+                    .run()
+                    .context("DNS load test failed")?
+                }
+
                 DetectedProtocol::Http => {
                     // Build executor factory — with TLS config, bandwidth throttling, or default
                     let tls_client = config.tls_client.clone();
@@ -1453,6 +1522,8 @@ fn main() -> Result<()> {
             request_size,
             response_size,
             chunk_size: _chunk_size,
+            dns_domains: _dns_domains,
+            dns_query_type: _dns_query_type,
             ramp_warmup,
             ramp_multiplier,
             ramp_max_errors,
@@ -1554,6 +1625,11 @@ fn main() -> Result<()> {
                         payload_hex: encode_hex(&udp_payload),
                         expect_response: !no_response,
                     });
+                    config.error_status_threshold = 0;
+                }
+                DetectedProtocol::Dns => {
+                    // DNS is handled by agents via SimpleDnsGenerator; no ProtocolConfig yet.
+                    // Future: add ProtocolConfig::Dns for distributed DNS tests.
                     config.error_status_threshold = 0;
                 }
                 DetectedProtocol::Http => {
@@ -1775,6 +1851,7 @@ enum DetectedProtocol {
     Http,
     Tcp,
     Udp,
+    Dns,
 }
 
 fn detect_protocol(urls: &[String]) -> DetectedProtocol {
@@ -1783,6 +1860,8 @@ fn detect_protocol(urls: &[String]) -> DetectedProtocol {
         DetectedProtocol::Tcp
     } else if first.starts_with("udp://") {
         DetectedProtocol::Udp
+    } else if first.starts_with("dns://") {
+        DetectedProtocol::Dns
     } else {
         DetectedProtocol::Http
     }

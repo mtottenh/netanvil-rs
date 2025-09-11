@@ -535,7 +535,12 @@ where
                     let generator = generator_factory(core_id);
                     let transformer = transformer_factory(core_id);
                     let executor = executor_factory();
-                    let collector = HdrMetricsCollector::new(config.error_status_threshold);
+                    let collector = HdrMetricsCollector::with_signal_configs(
+                        config.error_status_threshold,
+                        config.tracked_response_headers.clone(),
+                        config.md5_check_enabled,
+                        config.response_signal_headers.clone(),
+                    );
 
                     io_worker_loop(
                         crate::io_worker::IoWorkerConfig {
@@ -706,6 +711,11 @@ where
         coordinator.set_pushed_signal_source(source);
     }
 
+    // Wire response signal extraction configs
+    if !config.response_signal_headers.is_empty() {
+        coordinator.set_response_signal_configs(config.response_signal_headers.clone());
+    }
+
     // Wire termination controls from config
     if let Some(n) = config.max_requests {
         coordinator.max_requests(n);
@@ -718,6 +728,9 @@ where
     }
     if let Some(d) = config.warmup_duration {
         coordinator.warmup_duration(d);
+    }
+    if let Some(n) = config.target_bytes {
+        coordinator.target_bytes(n);
     }
 
     Ok(coordinator.run())

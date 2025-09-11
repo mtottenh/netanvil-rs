@@ -26,6 +26,26 @@ pub struct MetricsSnapshot {
     /// Number of requests with scheduling delay > 1ms.
     /// Indicates systematic client-side backlog.
     pub scheduling_delay_count_over_1ms: u64,
+    /// Response header value distribution. Maps (header_name, header_value) -> count.
+    /// Used for tracking response header distributions (e.g., X-Cache hit/miss).
+    pub header_value_counts:
+        std::collections::HashMap<String, std::collections::HashMap<String, u64>>,
+    /// V2-serialized HDR histogram of response sizes (bytes).
+    pub response_size_histogram_bytes: Vec<u8>,
+    /// Number of MD5 mismatches detected in this window.
+    pub md5_mismatches: u64,
+    /// Numeric signal values extracted from response headers this window.
+    /// Maps signal_name → (sum, count, max, last) for aggregation.
+    pub response_signals: std::collections::HashMap<String, ResponseSignalAccumulator>,
+}
+
+/// Accumulator for a single numeric signal extracted from response headers.
+#[derive(Debug, Clone, Default)]
+pub struct ResponseSignalAccumulator {
+    pub sum: f64,
+    pub count: u64,
+    pub max: f64,
+    pub last: f64,
 }
 
 /// Derived metrics summary for the RateController.

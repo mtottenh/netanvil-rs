@@ -72,7 +72,7 @@ fn timer_backpressure_increments_dropped_counter() {
 fn collector_tracks_scheduling_delay() {
     use netanvil_metrics::HdrMetricsCollector;
 
-    let collector = HdrMetricsCollector::new(0);
+    let collector = HdrMetricsCollector::new(0, vec![], false);
 
     // Request with no delay
     let now = Instant::now();
@@ -88,6 +88,8 @@ fn collector_tracks_scheduling_delay() {
         bytes_sent: 0,
         response_size: 0,
         error: None,
+        response_headers: None,
+        response_body: None,
     });
 
     // Request with 10ms delay (above 1ms threshold)
@@ -103,6 +105,8 @@ fn collector_tracks_scheduling_delay() {
         bytes_sent: 0,
         response_size: 0,
         error: None,
+        response_headers: None,
+        response_body: None,
     });
 
     // Request with 0.5ms delay (below 1ms threshold)
@@ -118,6 +122,8 @@ fn collector_tracks_scheduling_delay() {
         bytes_sent: 0,
         response_size: 0,
         error: None,
+        response_headers: None,
+        response_body: None,
     });
 
     let snapshot = collector.snapshot();
@@ -147,7 +153,7 @@ fn collector_tracks_scheduling_delay() {
 fn collector_resets_delay_stats_on_snapshot() {
     use netanvil_metrics::HdrMetricsCollector;
 
-    let collector = HdrMetricsCollector::new(0);
+    let collector = HdrMetricsCollector::new(0, vec![], false);
     let now = Instant::now();
 
     // Record a delayed request
@@ -163,6 +169,8 @@ fn collector_resets_delay_stats_on_snapshot() {
         bytes_sent: 0,
         response_size: 0,
         error: None,
+        response_headers: None,
+        response_body: None,
     });
 
     let snap1 = collector.snapshot();
@@ -201,6 +209,10 @@ fn aggregate_merges_scheduling_delay_fields() {
         scheduling_delay_sum_ns: 5_000_000, // 5ms total
         scheduling_delay_max_ns: 2_000_000, // 2ms max
         scheduling_delay_count_over_1ms: 3,
+        header_value_counts: std::collections::HashMap::new(),
+        response_size_histogram_bytes: Vec::new(),
+        md5_mismatches: 0,
+        response_signals: std::collections::HashMap::new(),
     };
 
     let snap_b = MetricsSnapshot {
@@ -214,6 +226,10 @@ fn aggregate_merges_scheduling_delay_fields() {
         scheduling_delay_sum_ns: 10_000_000, // 10ms total
         scheduling_delay_max_ns: 8_000_000,  // 8ms max
         scheduling_delay_count_over_1ms: 7,
+        header_value_counts: std::collections::HashMap::new(),
+        response_size_histogram_bytes: Vec::new(),
+        md5_mismatches: 0,
+        response_signals: std::collections::HashMap::new(),
     };
 
     let mut agg = AggregateMetrics::new();

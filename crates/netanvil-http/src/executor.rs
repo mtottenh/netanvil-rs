@@ -36,6 +36,13 @@ enum HttpClient {
 pub struct HttpExecutor {
     client: HttpClient,
     request_timeout: Duration,
+    /// When true, response headers are captured in ExecutionResult.
+    capture_headers: bool,
+    /// When true, response body is captured in ExecutionResult.
+    capture_body: bool,
+    /// Percentage of requests for which body is captured (0-100).
+    /// Only used when `capture_body` is true.
+    capture_body_pct: u32,
 }
 
 impl Default for HttpExecutor {
@@ -49,6 +56,9 @@ impl HttpExecutor {
         Self {
             client: HttpClient::Standard(cyper::Client::new()),
             request_timeout: Duration::from_secs(30),
+            capture_headers: false,
+            capture_body: false,
+            capture_body_pct: 0,
         }
     }
 
@@ -56,6 +66,9 @@ impl HttpExecutor {
         Self {
             client: HttpClient::Standard(cyper::Client::new()),
             request_timeout: timeout,
+            capture_headers: false,
+            capture_body: false,
+            capture_body_pct: 0,
         }
     }
 
@@ -73,6 +86,9 @@ impl HttpExecutor {
         Self {
             client: HttpClient::Throttled(client),
             request_timeout: timeout,
+            capture_headers: false,
+            capture_body: false,
+            capture_body_pct: 0,
         }
     }
 
@@ -99,6 +115,69 @@ impl HttpExecutor {
         Ok(Self {
             client: HttpClient::Throttled(client),
             request_timeout: timeout,
+            capture_headers: false,
+            capture_body: false,
+            capture_body_pct: 0,
+        })
+    }
+
+    /// Enable response header and/or body capture.
+    ///
+    /// When headers are captured, `ExecutionResult.response_headers` is populated.
+    /// When body is captured, `ExecutionResult.response_body` is populated for
+    /// `body_pct`% of requests (0 = never, 100 = always).
+    pub fn enable_capture(&mut self, headers: bool, body_pct: u32) {
+        self.capture_headers = headers;
+        self.capture_body = body_pct > 0;
+        self.capture_body_pct = body_pct.min(100);
+    }
+
+    /// Create an executor with connection settings from TestConfig.
+    ///
+    /// Handles noreuse (fd leaking) and dns_mode (address family filtering)
+    /// which require the ThrottledConnector path even without bandwidth limits.
+    pub fn with_connection_config(
+        tls_config: Option<&TlsClientConfig>,
+        bandwidth_bps: Option<u64>,
+        timeout: Duration,
+        noreuse: bool,
+        dns_mode: Option<netanvil_types::config::DnsMode>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let needs_custom_connector =
+            tls_config.is_some() || bandwidth_bps.is_some() || noreuse || dns_mode.is_some();
+
+        if !needs_custom_connector {
+            return Ok(Self::with_timeout(timeout));
+        }
+
+        let mut connector = match tls_config {
+            Some(tls) => {
+                let compio_tls = build_tls_connector(tls)?;
+                ThrottledConnector::with_tls(bandwidth_bps, compio_tls, tls.sni_override.clone())
+            }
+            None => ThrottledConnector::new(bandwidth_bps),
+        };
+
+        connector.set_noreuse(noreuse);
+        connector.set_dns_mode(dns_mode);
+
+        let mut builder = hyper_util::client::legacy::Client::builder(cyper_core::CompioExecutor);
+        builder.set_host(true);
+        builder.timer(cyper_core::CompioTimer);
+
+        // When noreuse is active, disable connection pooling so each request
+        // gets a fresh connection (the old one's fd leaks intentionally).
+        if noreuse {
+            builder.pool_max_idle_per_host(0);
+        }
+
+        let client = builder.build(connector);
+        Ok(Self {
+            client: HttpClient::Throttled(client),
+            request_timeout: timeout,
+            capture_headers: false,
+            capture_body: false,
+            capture_body_pct: 0,
         })
     }
 }
@@ -109,10 +188,21 @@ impl RequestExecutor for HttpExecutor {
     async fn execute(&self, spec: &HttpRequestSpec, context: &RequestContext) -> ExecutionResult {
         let start = Instant::now();
 
+        // Only capture body for the configured percentage of requests
+        let should_capture_body = self.capture_body
+            && (self.capture_body_pct >= 100
+                || (context.request_id % 100) < self.capture_body_pct as u64);
+
         let result = compio::time::timeout(self.request_timeout, async {
             match &self.client {
-                HttpClient::Standard(c) => do_execute_cyper(c, spec, start).await,
-                HttpClient::Throttled(c) => do_execute_throttled(c, spec, start).await,
+                HttpClient::Standard(c) => {
+                    do_execute_cyper(c, spec, start, self.capture_headers, should_capture_body)
+                        .await
+                }
+                HttpClient::Throttled(c) => {
+                    do_execute_throttled(c, spec, start, self.capture_headers, should_capture_body)
+                        .await
+                }
             }
         })
         .await;
@@ -120,15 +210,17 @@ impl RequestExecutor for HttpExecutor {
         let bytes_sent = spec.body.as_ref().map_or(0, |b| b.len() as u64);
 
         match result {
-            Ok(Ok((status, response_size, timing))) => ExecutionResult {
+            Ok(Ok(http_result)) => ExecutionResult {
                 request_id: context.request_id,
                 intended_time: context.intended_time,
                 actual_time: context.actual_time,
-                timing,
-                status: Some(status),
+                timing: http_result.timing,
+                status: Some(http_result.status),
                 bytes_sent,
-                response_size,
+                response_size: http_result.response_size,
                 error: None,
+                response_headers: http_result.headers,
+                response_body: http_result.body,
             },
             Ok(Err(err)) => ExecutionResult {
                 request_id: context.request_id,
@@ -142,6 +234,8 @@ impl RequestExecutor for HttpExecutor {
                 bytes_sent: 0,
                 response_size: 0,
                 error: Some(err),
+                response_headers: None,
+                response_body: None,
             },
             Err(_timeout) => ExecutionResult {
                 request_id: context.request_id,
@@ -155,9 +249,23 @@ impl RequestExecutor for HttpExecutor {
                 bytes_sent: 0,
                 response_size: 0,
                 error: Some(ExecutionError::Timeout),
+                response_headers: None,
+                response_body: None,
             },
         }
     }
+}
+
+/// Result from a single HTTP request execution.
+struct HttpResult {
+    status: u16,
+    response_size: u64,
+    timing: TimingBreakdown,
+    /// Response headers (only when capture_headers is true).
+    headers: Option<Vec<(String, String)>>,
+    /// Response body bytes (only when capture_body is true).
+    /// Uses `bytes::Bytes` for zero-copy reference counting.
+    body: Option<bytes::Bytes>,
 }
 
 /// Execute a request using the standard cyper client (no throttling).
@@ -165,7 +273,9 @@ async fn do_execute_cyper(
     client: &cyper::Client,
     spec: &HttpRequestSpec,
     start: Instant,
-) -> Result<(u16, u64, TimingBreakdown), ExecutionError> {
+    capture_headers: bool,
+    capture_body: bool,
+) -> Result<HttpResult, ExecutionError> {
     let mut builder = client
         .request(spec.method.clone(), spec.url.as_str())
         .map_err(|e| ExecutionError::Connect(e.to_string()))?;
@@ -186,20 +296,33 @@ async fn do_execute_cyper(
     let ttfb = request_sent.elapsed();
     let status = response.status().as_u16();
 
+    // Capture response headers before consuming the body
+    let headers = if capture_headers {
+        Some(
+            response
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect(),
+        )
+    } else {
+        None
+    };
+
     let body_start = Instant::now();
-    let body = response
+    let body_bytes = response
         .bytes()
         .await
         .map_err(|e| ExecutionError::Http(e.to_string()))?;
     let content_transfer = body_start.elapsed();
-    let response_size = body.len() as u64;
+    let response_size = body_bytes.len() as u64;
 
     let total = start.elapsed();
 
-    Ok((
+    Ok(HttpResult {
         status,
         response_size,
-        TimingBreakdown {
+        timing: TimingBreakdown {
             dns_lookup: Duration::ZERO,
             tcp_connect: Duration::ZERO,
             tls_handshake: Duration::ZERO,
@@ -207,7 +330,9 @@ async fn do_execute_cyper(
             content_transfer,
             total,
         },
-    ))
+        headers,
+        body: if capture_body { Some(body_bytes) } else { None },
+    })
 }
 
 /// Execute a request using the throttled hyper client.
@@ -215,7 +340,9 @@ async fn do_execute_throttled(
     client: &HyperThrottledClient,
     spec: &HttpRequestSpec,
     start: Instant,
-) -> Result<(u16, u64, TimingBreakdown), ExecutionError> {
+    capture_headers: bool,
+    capture_body: bool,
+) -> Result<HttpResult, ExecutionError> {
     use http_body_util::BodyExt;
 
     // Build hyper request
@@ -244,22 +371,35 @@ async fn do_execute_throttled(
     let ttfb = request_sent.elapsed();
     let status = response.status().as_u16();
 
+    // Capture response headers before consuming the body
+    let headers = if capture_headers {
+        Some(
+            response
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect(),
+        )
+    } else {
+        None
+    };
+
     let body_start = Instant::now();
-    let body = response
+    let body_bytes = response
         .into_body()
         .collect()
         .await
         .map_err(|e| ExecutionError::Http(e.to_string()))?
         .to_bytes();
     let content_transfer = body_start.elapsed();
-    let response_size = body.len() as u64;
+    let response_size = body_bytes.len() as u64;
 
     let total = start.elapsed();
 
-    Ok((
+    Ok(HttpResult {
         status,
         response_size,
-        TimingBreakdown {
+        timing: TimingBreakdown {
             dns_lookup: Duration::ZERO,
             tcp_connect: Duration::ZERO,
             tls_handshake: Duration::ZERO,
@@ -267,7 +407,9 @@ async fn do_execute_throttled(
             content_transfer,
             total,
         },
-    ))
+        headers,
+        body: if capture_body { Some(body_bytes) } else { None },
+    })
 }
 
 fn categorize_cyper_error(err: cyper::Error) -> ExecutionError {

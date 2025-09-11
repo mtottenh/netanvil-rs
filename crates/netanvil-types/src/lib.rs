@@ -18,8 +18,8 @@ pub mod udp_spec;
 pub use command::{ScheduledRequest, TimerCommand, WorkerCommand};
 pub use config::{
     ConnectionConfig, ConnectionPolicy, CountDistribution, PidConstraint, PidGains, PidTarget,
-    PluginConfig, PluginType, ProtocolConfig, RateConfig, SchedulerConfig, TargetMetric,
-    TestConfig, TlsConfig,
+    PluginConfig, PluginType, ProtocolConfig, RateConfig, ResponseSignalConfig, SchedulerConfig,
+    SignalAggregation, TargetMetric, TestConfig, TlsConfig,
 };
 pub use distributed::{MetricsFetcher, NodeCommander, NodeDiscovery, RemoteMetrics};
 pub use dns_spec::{DnsQueryType, DnsRequestSpec};

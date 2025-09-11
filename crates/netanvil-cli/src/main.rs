@@ -155,6 +155,14 @@ enum Commands {
         #[arg(long)]
         bandwidth: Option<String>,
 
+        /// Extract numeric value from a response header for PID rate control.
+        /// Format: "Header-Name" or "Header-Name:aggregation" where aggregation
+        /// is "mean" (default), "max", or "last".
+        /// Use with --rate-mode pid --pid-metric external:Header-Name.
+        /// Repeatable for multiple signals.
+        #[arg(long = "response-signal", num_args = 1)]
+        response_signals: Vec<String>,
+
         // ── TCP/UDP-specific flags ──
         /// Payload as UTF-8 string (for tcp:// and udp:// protocols)
         #[arg(long)]
@@ -355,6 +363,12 @@ enum Commands {
         #[arg(long)]
         tls_key: Option<String>,
 
+        /// Extract numeric value from a response header for PID rate control.
+        /// Format: "Header-Name" or "Header-Name:aggregation" (mean/max/last).
+        /// Repeatable for multiple signals.
+        #[arg(long = "response-signal", num_args = 1)]
+        response_signals: Vec<String>,
+
         // ── TCP/UDP-specific flags (same as Test command) ──
         /// Payload as UTF-8 string (for tcp:// and udp:// protocols)
         #[arg(long)]
@@ -424,8 +438,13 @@ enum Commands {
 /// Run in legacy compatibility mode.
 fn REDACTED_FN(args: Vec<String>) -> Result<()> {
     let compat_result = compat::run_compat(args)?;
-    let config = compat_result.test_config;
+    let mut config = compat_result.test_config;
     let quiet = compat_result.quiet;
+
+    // Wire md5check into config so the metrics collector can verify bodies
+    if compat_result.md5check_pct.is_some() {
+        config.md5_check_enabled = true;
+    }
 
     // Apply debug level to tracing (reinitialize if needed)
     if let Some(level) = compat_result.debug_level {
@@ -469,17 +488,44 @@ fn REDACTED_FN(args: Vec<String>) -> Result<()> {
     let load_feedback = compat_result.load_feedback;
     let targets = config.targets.clone();
 
+    // Determine if we need capture (redacted_stats, md5check, or explicit capture)
+    let redacted_stats = compat_result.redacted_stats;
+    let md5check_pct = compat_result.md5check_pct;
+    let capture_logfile = compat_result.capture_logfile.clone();
+    let needs_capture = redacted_stats || md5check_pct.is_some() || capture_logfile.is_some();
+    let capture_body_pct = md5check_pct.unwrap_or(0);
+
+    // Check if noreuse or dns_mode is active
+    let noreuse = matches!(
+        config.connections.connection_policy,
+        ConnectionPolicy::NoReuse
+    );
+    let dns_mode = config.connections.dns_mode.clone();
+
     let make_executor = move || {
-        let executor = match &tls_client {
-            Some(tls_config) => {
-                HttpExecutor::with_tls_config(tls_config, bandwidth_bps, request_timeout)
-                    .expect("TLS configuration error")
-            }
-            None => match bandwidth_bps {
-                Some(bps) => HttpExecutor::with_bandwidth_limit(bps, request_timeout),
-                None => HttpExecutor::with_timeout(request_timeout),
-            },
-        };
+        let mut executor = HttpExecutor::with_connection_config(
+            tls_client.as_ref(),
+            bandwidth_bps,
+            request_timeout,
+            noreuse,
+            dns_mode.clone(),
+        )
+        .expect("executor configuration error");
+
+        // Enable header/body capture when redacted_stats, md5check, or capture is active
+        if needs_capture {
+            // Determine body capture percentage:
+            // - md5check: capture body for md5check_pct% of requests
+            // - capture logfile: capture body for 100% of requests
+            // - redacted_stats only: no body capture needed (just headers)
+            let body_pct = if capture_logfile.is_some() {
+                100
+            } else {
+                capture_body_pct
+            };
+            executor.enable_capture(true, body_pct);
+        }
+
         match drop_fraction {
             Some(frac) => {
                 let stack_var: u32 = 0;
@@ -585,7 +631,7 @@ fn REDACTED_FN(args: Vec<String>) -> Result<()> {
         // No load feedback — standard execution path
         let mut builder = TestBuilder::new(config, make_executor);
 
-        // Progress callback with optional outlog
+        // Progress callback with optional outlog, livestats, and hists
         if !quiet {
             let mut outlog_file = compat_result.outlog.map(|path| {
                 std::fs::File::create(&path)
@@ -593,6 +639,11 @@ fn REDACTED_FN(args: Vec<String>) -> Result<()> {
             });
             let lines_interval = compat_result.lines.unwrap_or(20);
             let mut line_counter: u32 = 0;
+            let livestats = compat_result.livestats;
+            let mut hists_file = compat_result.hists_file.map(|path| {
+                std::fs::File::create(&path)
+                    .unwrap_or_else(|e| panic!("cannot create hists file '{path}': {e}"))
+            });
 
             builder = builder.on_progress(move |update| {
                 let line = format!("{}", netanvil_core::report::ProgressLine::new(update));
@@ -604,6 +655,33 @@ fn REDACTED_FN(args: Vec<String>) -> Result<()> {
                     use std::io::Write;
                     let _ = writeln!(f, "{line}");
                 }
+
+                // -livestats: write key=value stats to /var/tmp/redacted_client/livestats.log
+                if livestats {
+                    let _ = std::fs::create_dir_all("/var/tmp/redacted_client");
+                    let ttfb_ms = update.window.latency_p50_ns as f64 / 1_000_000.0;
+                    let elapsed_secs = update.elapsed.as_secs_f64().max(0.001);
+                    let throughput_mbps =
+                        update.total_bytes_received as f64 * 8.0 / elapsed_secs / 1_000_000.0;
+                    let content = format!(
+                        "rps={:.1}\nttfb_p50_ms={:.2}\nthroughput_mbps={:.2}\ntotal_requests={}\ntotal_errors={}\nelapsed_secs={:.1}\n",
+                        update.current_rps, ttfb_ms, throughput_mbps,
+                        update.total_requests, update.total_errors, elapsed_secs
+                    );
+                    let _ = std::fs::write("/var/tmp/redacted_client/livestats.log", content);
+                }
+
+                // -hists: append periodic histogram snapshot
+                if let Some(ref mut f) = hists_file {
+                    use std::io::Write;
+                    let _ = writeln!(f, "# timestamp={:.3}", update.elapsed.as_secs_f64());
+                    for (bound, count) in &update.latency_buckets {
+                        let _ = writeln!(f, "{:.6} {}", bound, count);
+                    }
+                    let _ = writeln!(f);
+                    let _ = f.flush();
+                }
+
                 line_counter += 1;
             });
         }
@@ -1082,6 +1160,7 @@ fn main() -> Result<()> {
             output,
             api_port,
             bandwidth,
+            response_signals,
             payload,
             payload_hex,
             payload_file,
@@ -1158,6 +1237,7 @@ fn main() -> Result<()> {
                 control_interval: Duration::from_millis(100),
                 error_status_threshold: error_threshold,
                 bandwidth_limit_bps: bandwidth_bps,
+                response_signal_headers: parse_response_signals(&response_signals)?,
                 ..Default::default()
             };
 
@@ -1512,6 +1592,7 @@ fn main() -> Result<()> {
             tls_ca,
             tls_cert,
             tls_key,
+            response_signals: leader_response_signals,
             payload,
             payload_hex,
             payload_file,
@@ -1597,6 +1678,7 @@ fn main() -> Result<()> {
                 external_metrics_field: external_metrics_field.clone(),
                 bandwidth_limit_bps: None,
                 plugin: plugin_config,
+                response_signal_headers: parse_response_signals(&leader_response_signals)?,
                 ..Default::default()
             };
 
@@ -1915,6 +1997,36 @@ fn resolve_payload(
     } else {
         Ok(Vec::new())
     }
+}
+
+/// Parse --response-signal flags into ResponseSignalConfig.
+///
+/// Format: "Header-Name" or "Header-Name:aggregation"
+/// where aggregation is "mean" (default), "max", or "last".
+fn parse_response_signals(signals: &[String]) -> Result<Vec<netanvil_types::ResponseSignalConfig>> {
+    signals
+        .iter()
+        .map(|s| {
+            let (header, agg) = if let Some((h, a)) = s.rsplit_once(':') {
+                let aggregation = match a.to_lowercase().as_str() {
+                    "mean" => netanvil_types::SignalAggregation::Mean,
+                    "max" => netanvil_types::SignalAggregation::Max,
+                    "last" => netanvil_types::SignalAggregation::Last,
+                    other => {
+                        anyhow::bail!("unknown aggregation '{other}', expected: mean, max, last")
+                    }
+                };
+                (h.to_string(), aggregation)
+            } else {
+                (s.clone(), netanvil_types::SignalAggregation::Mean)
+            };
+            Ok(netanvil_types::ResponseSignalConfig {
+                header,
+                signal_name: None,
+                aggregation: agg,
+            })
+        })
+        .collect()
 }
 
 /// Parse --framing flag into TcpFraming.

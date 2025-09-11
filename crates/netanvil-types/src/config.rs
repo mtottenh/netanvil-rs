@@ -79,6 +79,25 @@ pub struct TestConfig {
     /// verification settings, SNI, and cipher preferences.
     #[serde(default)]
     pub tls_client: Option<TlsClientConfig>,
+    /// Stop when cumulative bytes received reaches this threshold.
+    #[serde(default)]
+    pub target_bytes: Option<u64>,
+    /// Response headers to track value distributions for.
+    /// Each header name listed here will have its response values counted
+    /// per-core and aggregated (e.g., `["X-Cache"]` for ghost stats).
+    #[serde(default)]
+    pub tracked_response_headers: Vec<String>,
+    /// Enable MD5 body verification. When true, the metrics collector
+    /// computes MD5 of response bodies and compares with the Content-MD5
+    /// header. Mismatches are counted in MetricsSnapshot::md5_mismatches.
+    #[serde(default)]
+    pub md5_check_enabled: bool,
+    /// Response headers to extract as numeric PID signals.
+    /// Each configured header is parsed as f64 per-request, aggregated
+    /// per metrics window, and injected into `MetricsSummary::external_signals`
+    /// for use with `TargetMetric::External { name }`.
+    #[serde(default)]
+    pub response_signal_headers: Vec<ResponseSignalConfig>,
 }
 
 /// Protocol-specific configuration for non-HTTP tests.
@@ -180,6 +199,10 @@ impl Default for TestConfig {
             plugin: None,
             protocol: None,
             tls_client: None,
+            target_bytes: None,
+            tracked_response_headers: Vec::new(),
+            md5_check_enabled: false,
+            response_signal_headers: Vec::new(),
         }
     }
 }
@@ -312,6 +335,10 @@ pub struct ConnectionConfig {
     pub request_timeout: Duration,
     /// Connection lifecycle policy
     pub connection_policy: ConnectionPolicy,
+    /// DNS resolution preference. When set, the connector resolves hostnames
+    /// manually and filters by address family before connecting.
+    #[serde(default)]
+    pub dns_mode: Option<DnsMode>,
 }
 
 impl Default for ConnectionConfig {
@@ -321,8 +348,22 @@ impl Default for ConnectionConfig {
             connect_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(30),
             connection_policy: ConnectionPolicy::KeepAlive,
+            dns_mode: None,
         }
     }
+}
+
+/// DNS resolution preference for target hostname lookup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DnsMode {
+    /// IPv4 only (A records).
+    V4,
+    /// IPv6 only (AAAA records).
+    V6,
+    /// Prefer IPv4, fall back to IPv6.
+    PreferV4,
+    /// Prefer IPv6, fall back to IPv4.
+    PreferV6,
 }
 
 /// How connections to the target are managed.
@@ -341,6 +382,14 @@ pub enum ConnectionPolicy {
     /// Forces a new TCP connection (+ TLS handshake) for each request.
     /// Useful for testing connection establishment rate.
     AlwaysNew,
+
+    /// Open a new connection for every request but don't close old ones.
+    /// Old connections are intentionally leaked (fd stays open) so the
+    /// server sees idle persistent connections accumulating.
+    /// Does NOT send `Connection: close` — connections appear keep-alive.
+    /// Useful for stress-testing server idle connection handling.
+    /// Users need high ulimits (each request opens a new fd).
+    NoReuse,
 
     /// Mixed behavior simulating realistic client populations.
     /// A configurable fraction of requests reuse connections; the
@@ -399,6 +448,43 @@ pub struct TlsClientConfig {
     /// performs a full handshake (equivalent to legacy `-ctxreset 0`).
     #[serde(default)]
     pub disable_session_resumption: bool,
+}
+
+/// Configuration for extracting a numeric signal from response headers.
+///
+/// The value is parsed as f64 per-request and aggregated per metrics window.
+/// The aggregated value is injected into `MetricsSummary::external_signals`
+/// and can be targeted by `TargetMetric::External { name }` for PID control.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponseSignalConfig {
+    /// Response header name to extract (case-insensitive match).
+    pub header: String,
+    /// Signal name as it appears in `MetricsSummary::external_signals`.
+    /// Defaults to the header name if not set.
+    #[serde(default)]
+    pub signal_name: Option<String>,
+    /// How to aggregate per-request values across a metrics window.
+    #[serde(default)]
+    pub aggregation: SignalAggregation,
+}
+
+impl ResponseSignalConfig {
+    /// The signal name used in MetricsSummary::external_signals.
+    pub fn signal_name(&self) -> &str {
+        self.signal_name.as_deref().unwrap_or(&self.header)
+    }
+}
+
+/// How to aggregate per-request numeric values across a metrics window.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub enum SignalAggregation {
+    /// Arithmetic mean of all values in the window.
+    #[default]
+    Mean,
+    /// Maximum value in the window.
+    Max,
+    /// Most recent value seen in the window.
+    Last,
 }
 
 /// TLS configuration for mTLS between leader and agent nodes.

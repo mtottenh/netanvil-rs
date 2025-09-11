@@ -1,6 +1,9 @@
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use hdrhistogram::Histogram;
+use netanvil_types::config::SignalAggregation;
+use netanvil_types::metrics::ResponseSignalAccumulator;
 use netanvil_types::{MetricsSnapshot, MetricsSummary};
 
 use crate::encoding::decode_histogram;
@@ -12,6 +15,7 @@ use crate::encoding::decode_histogram;
 /// pattern work at both local and distributed levels.
 pub struct AggregateMetrics {
     histogram: Histogram<u64>,
+    size_histogram: Histogram<u64>,
     total_requests: u64,
     total_errors: u64,
     bytes_sent: u64,
@@ -23,12 +27,22 @@ pub struct AggregateMetrics {
     scheduling_delay_sum_ns: u64,
     scheduling_delay_max_ns: u64,
     scheduling_delay_count_over_1ms: u64,
+    // Response header value distribution (composable: sum per key/value pair)
+    header_value_counts: HashMap<String, HashMap<String, u64>>,
+    // MD5 mismatch count (composable: sum)
+    md5_mismatches: u64,
+    // Response signal accumulators (composable: sum sums, max maxes, last = last seen)
+    response_signals: HashMap<String, ResponseSignalAccumulator>,
+    // Signal aggregation configs (set once, used in to_summary)
+    signal_configs: Vec<netanvil_types::config::ResponseSignalConfig>,
 }
 
 impl AggregateMetrics {
     pub fn new() -> Self {
         Self {
             histogram: Histogram::<u64>::new_with_bounds(1, 60_000_000_000, 3)
+                .expect("valid histogram params"),
+            size_histogram: Histogram::<u64>::new_with_bounds(1, 1_073_741_824, 3)
                 .expect("valid histogram params"),
             total_requests: 0,
             total_errors: 0,
@@ -40,7 +54,16 @@ impl AggregateMetrics {
             scheduling_delay_sum_ns: 0,
             scheduling_delay_max_ns: 0,
             scheduling_delay_count_over_1ms: 0,
+            header_value_counts: HashMap::new(),
+            md5_mismatches: 0,
+            response_signals: HashMap::new(),
+            signal_configs: Vec::new(),
         }
+    }
+
+    /// Set response signal aggregation configs (called once at setup).
+    pub fn set_signal_configs(&mut self, configs: Vec<netanvil_types::config::ResponseSignalConfig>) {
+        self.signal_configs = configs;
     }
 }
 
@@ -79,11 +102,39 @@ impl AggregateMetrics {
             .scheduling_delay_max_ns
             .max(snapshot.scheduling_delay_max_ns);
         self.scheduling_delay_count_over_1ms += snapshot.scheduling_delay_count_over_1ms;
+
+        // Merge response size histogram
+        if let Ok(size_hist) = decode_histogram(&snapshot.response_size_histogram_bytes) {
+            let _ = self.size_histogram.add(&size_hist);
+        }
+
+        // Merge header value counts by summing
+        for (header, values) in &snapshot.header_value_counts {
+            let entry = self.header_value_counts.entry(header.clone()).or_default();
+            for (value, count) in values {
+                *entry.entry(value.clone()).or_insert(0) += count;
+            }
+        }
+
+        // Merge MD5 mismatches by summing
+        self.md5_mismatches += snapshot.md5_mismatches;
+
+        // Merge response signal accumulators
+        for (name, acc) in &snapshot.response_signals {
+            let entry = self.response_signals.entry(name.clone()).or_default();
+            entry.sum += acc.sum;
+            entry.count += acc.count;
+            if acc.max > entry.max {
+                entry.max = acc.max;
+            }
+            entry.last = acc.last;
+        }
     }
 
     /// Reset for the next aggregation window.
     pub fn reset(&mut self) {
         self.histogram.reset();
+        self.size_histogram.reset();
         self.total_requests = 0;
         self.total_errors = 0;
         self.bytes_sent = 0;
@@ -94,6 +145,9 @@ impl AggregateMetrics {
         self.scheduling_delay_sum_ns = 0;
         self.scheduling_delay_max_ns = 0;
         self.scheduling_delay_count_over_1ms = 0;
+        self.header_value_counts.clear();
+        self.md5_mismatches = 0;
+        self.response_signals.clear();
     }
 
     /// Compute derived metrics for the RateController.
@@ -122,8 +176,28 @@ impl AggregateMetrics {
             bytes_received: self.bytes_received,
             throughput_send_bps: self.bytes_sent as f64 / secs,
             throughput_recv_bps: self.bytes_received as f64 / secs,
-            external_signals: Vec::new(), // populated by the coordinator if external source configured
+            external_signals: self.compute_response_signals(),
         }
+    }
+
+    /// Compute aggregated response signal values from per-window accumulators.
+    fn compute_response_signals(&self) -> Vec<(String, f64)> {
+        let mut signals = Vec::new();
+        for config in &self.signal_configs {
+            let name = config.signal_name();
+            if let Some(acc) = self.response_signals.get(name) {
+                if acc.count == 0 {
+                    continue;
+                }
+                let value = match config.aggregation {
+                    SignalAggregation::Mean => acc.sum / acc.count as f64,
+                    SignalAggregation::Max => acc.max,
+                    SignalAggregation::Last => acc.last,
+                };
+                signals.push((name.to_string(), value));
+            }
+        }
+        signals
     }
 
     /// Accessors for final reporting.
@@ -162,6 +236,22 @@ impl AggregateMetrics {
     pub fn bytes_received(&self) -> u64 {
         self.bytes_received
     }
+
+    pub fn size_histogram(&self) -> &Histogram<u64> {
+        &self.size_histogram
+    }
+
+    pub fn header_value_counts(&self) -> &HashMap<String, HashMap<String, u64>> {
+        &self.header_value_counts
+    }
+
+    pub fn md5_mismatches(&self) -> u64 {
+        self.md5_mismatches
+    }
+
+    pub fn response_signals(&self) -> &HashMap<String, ResponseSignalAccumulator> {
+        &self.response_signals
+    }
 }
 
 #[cfg(test)]
@@ -187,6 +277,10 @@ mod tests {
             scheduling_delay_sum_ns: 0,
             scheduling_delay_max_ns: 0,
             scheduling_delay_count_over_1ms: 0,
+            header_value_counts: std::collections::HashMap::new(),
+            response_size_histogram_bytes: Vec::new(),
+            md5_mismatches: 0,
+            response_signals: std::collections::HashMap::new(),
         }
     }
 

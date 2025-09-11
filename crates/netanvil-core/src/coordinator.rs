@@ -105,6 +105,8 @@ pub struct Coordinator {
     warmup_duration: Option<Duration>,
     /// Whether warmup has completed.
     warmup_complete: bool,
+    /// Stop when cumulative bytes received reaches this.
+    target_bytes: Option<u64>,
 }
 
 impl Coordinator {
@@ -136,12 +138,18 @@ impl Coordinator {
             refusestop_threshold: None,
             warmup_duration: None,
             warmup_complete: false,
+            target_bytes: None,
         }
     }
 
     /// Configure request count limit.
     pub fn max_requests(&mut self, n: u64) {
         self.max_requests = Some(n);
+    }
+
+    /// Configure byte count termination threshold.
+    pub fn target_bytes(&mut self, n: u64) {
+        self.target_bytes = Some(n);
     }
 
     /// Configure auto-stop on error count threshold.
@@ -175,6 +183,16 @@ impl Coordinator {
     /// Used for server-reported metrics (e.g. proxy load, queue depth).
     pub fn set_external_signal_source(&mut self, f: impl FnMut() -> Vec<(String, f64)> + 'static) {
         self.external_signal_source = Some(Box::new(f));
+    }
+
+    /// Configure response signal extraction for PID control.
+    /// Aggregated numeric header values are injected into `MetricsSummary::external_signals`.
+    pub fn set_response_signal_configs(
+        &mut self,
+        configs: Vec<netanvil_types::config::ResponseSignalConfig>,
+    ) {
+        self.tick_aggregate.set_signal_configs(configs.clone());
+        self.total_aggregate.set_signal_configs(configs);
     }
 
     /// Set a pushed signal source, read each tick.
@@ -254,25 +272,38 @@ impl Coordinator {
         // Rate controller computes new target from the recent window
         let mut summary = self.tick_aggregate.to_summary();
 
-        // Inject external signals from both pull and push sources.
-        // Pushed signals override polled signals with the same key.
-        let mut signals = Vec::new();
+        // Inject external signals from pull, push, and response header sources.
+        // Response signals are already in summary.external_signals from to_summary().
+        // Polled signals are added next; pushed signals override any with the same key.
         if let Some(ref mut source) = self.external_signal_source {
-            signals = source();
-        }
-        if let Some(ref mut source) = self.pushed_signal_source {
             for (name, value) in source() {
-                if let Some(existing) = signals.iter_mut().find(|(k, _)| k == &name) {
+                if let Some(existing) = summary
+                    .external_signals
+                    .iter_mut()
+                    .find(|(k, _)| k == &name)
+                {
                     existing.1 = value;
                 } else {
-                    signals.push((name, value));
+                    summary.external_signals.push((name, value));
                 }
             }
         }
-        if !signals.is_empty() {
-            tracing::debug!(?signals, "injected external signals into metrics summary");
+        if let Some(ref mut source) = self.pushed_signal_source {
+            for (name, value) in source() {
+                if let Some(existing) = summary
+                    .external_signals
+                    .iter_mut()
+                    .find(|(k, _)| k == &name)
+                {
+                    existing.1 = value;
+                } else {
+                    summary.external_signals.push((name, value));
+                }
+            }
         }
-        summary.external_signals = signals;
+        if !summary.external_signals.is_empty() {
+            tracing::debug!(signals = ?summary.external_signals, "external signals for rate controller");
+        }
 
         let decision = self.rate_controller.update(&summary);
 
@@ -450,6 +481,16 @@ impl Coordinator {
                     errors = self.total_aggregate.total_errors(),
                     threshold,
                     "refusestop: refused connection threshold exceeded"
+                );
+                return true;
+            }
+        }
+        if let Some(target) = self.target_bytes {
+            if self.total_aggregate.bytes_received() >= target {
+                tracing::info!(
+                    bytes = self.total_aggregate.bytes_received(),
+                    target,
+                    "target bytes reached"
                 );
                 return true;
             }

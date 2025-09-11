@@ -76,6 +76,8 @@ impl<E: RequestExecutor> RequestExecutor for DroppingExecutor<E> {
                         bytes_sent: 0,
                         response_size: 0,
                         error: Some(ExecutionError::Other("connection dropped".to_string())),
+                        response_headers: None,
+                        response_body: None,
                     }
                 })
         } else {

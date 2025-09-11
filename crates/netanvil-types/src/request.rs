@@ -54,6 +54,13 @@ pub struct ExecutionResult {
     /// Bytes received from the target (response payload size).
     pub response_size: u64,
     pub error: Option<ExecutionError>,
+    /// Response headers, populated when capture_headers is enabled on the executor.
+    /// Each entry is (header_name, header_value).
+    pub response_headers: Option<Vec<(String, String)>>,
+    /// Response body bytes, populated when capture_body is enabled on the executor.
+    /// Only captured for a configurable percentage of requests.
+    /// Uses `bytes::Bytes` for zero-copy sharing (reference-counted, no memcpy).
+    pub response_body: Option<bytes::Bytes>,
 }
 
 /// Latency breakdown for a single request.

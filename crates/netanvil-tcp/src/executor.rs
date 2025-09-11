@@ -90,6 +90,8 @@ impl RequestExecutor for TcpExecutor {
                 bytes_sent,
                 response_size,
                 error: None,
+                response_headers: None,
+                response_body: None,
             },
             Ok(Err(err)) => ExecutionResult {
                 request_id: context.request_id,
@@ -103,6 +105,8 @@ impl RequestExecutor for TcpExecutor {
                 bytes_sent: 0,
                 response_size: 0,
                 error: Some(err),
+                response_headers: None,
+                response_body: None,
             },
             Err(_timeout) => ExecutionResult {
                 request_id: context.request_id,
@@ -116,6 +120,8 @@ impl RequestExecutor for TcpExecutor {
                 bytes_sent: 0,
                 response_size: 0,
                 error: Some(ExecutionError::Timeout),
+                response_headers: None,
+                response_body: None,
             },
         }
     }
@@ -342,6 +348,7 @@ impl TcpExecutor {
         match &self.policy {
             ConnectionPolicy::KeepAlive => true,
             ConnectionPolicy::AlwaysNew => false,
+            ConnectionPolicy::NoReuse => false, // never reuse, each request gets new connection
             ConnectionPolicy::Mixed {
                 persistent_ratio: _,
                 connection_lifetime,

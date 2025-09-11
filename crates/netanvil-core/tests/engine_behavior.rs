@@ -45,6 +45,8 @@ impl RequestExecutor for MockExecutor {
             bytes_sent: 0,
             response_size: 256,
             error: None,
+            response_headers: None,
+            response_body: None,
         }
     }
 }
@@ -73,6 +75,8 @@ impl RequestExecutor for ErrorExecutor {
             error: Some(netanvil_types::ExecutionError::Http(
                 "500 Internal Server Error".into(),
             )),
+            response_headers: None,
+            response_body: None,
         }
     }
 }

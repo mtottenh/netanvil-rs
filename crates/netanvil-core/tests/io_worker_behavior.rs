@@ -49,6 +49,8 @@ impl RequestExecutor for MockExecutor {
             bytes_sent: 0,
             response_size: 256,
             error: None,
+            response_headers: None,
+            response_body: None,
         }
     }
 }
@@ -90,6 +92,8 @@ impl RequestExecutor for CapturingExecutor {
             bytes_sent: 0,
             response_size: 64,
             error: None,
+            response_headers: None,
+            response_body: None,
         }
     }
 }
@@ -128,7 +132,7 @@ fn io_worker_fires_requests_from_channel() {
     rt.block_on(async {
         let generator = SimpleGenerator::get(vec!["http://mock.test/".into()]);
         let executor = MockExecutor::new();
-        let collector = HdrMetricsCollector::new(0);
+        let collector = HdrMetricsCollector::new(0, vec![], false);
 
         io_worker_loop(
             IoWorkerConfig {
@@ -177,7 +181,7 @@ fn io_worker_stops_on_stop_message() {
     rt.block_on(async {
         let generator = SimpleGenerator::get(vec!["http://mock.test/".into()]);
         let executor = MockExecutor::new();
-        let collector = HdrMetricsCollector::new(0);
+        let collector = HdrMetricsCollector::new(0, vec![], false);
 
         io_worker_loop(
             IoWorkerConfig {
@@ -221,7 +225,7 @@ fn io_worker_exits_on_channel_disconnect() {
     rt.block_on(async {
         let generator = SimpleGenerator::get(vec!["http://mock.test/".into()]);
         let executor = MockExecutor::new();
-        let collector = HdrMetricsCollector::new(0);
+        let collector = HdrMetricsCollector::new(0, vec![], false);
 
         io_worker_loop(
             IoWorkerConfig {
@@ -280,7 +284,7 @@ fn io_worker_handles_target_update() {
     let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
     rt.block_on(async {
         let generator = SimpleGenerator::get(vec!["http://original.test/".into()]);
-        let collector = HdrMetricsCollector::new(0);
+        let collector = HdrMetricsCollector::new(0, vec![], false);
 
         io_worker_loop(
             IoWorkerConfig {
@@ -368,7 +372,7 @@ fn io_worker_handles_header_update() {
     rt.block_on(async {
         let generator = SimpleGenerator::get(vec!["http://test.local/".into()]);
         let transformer = HeaderTransformer::new(vec![("X-Original".into(), "yes".into())]);
-        let collector = HdrMetricsCollector::new(0);
+        let collector = HdrMetricsCollector::new(0, vec![], false);
 
         io_worker_loop(
             IoWorkerConfig {
@@ -445,7 +449,7 @@ fn io_worker_sends_periodic_metrics_snapshots() {
     rt.block_on(async {
         let generator = SimpleGenerator::get(vec!["http://mock.test/".into()]);
         let executor = MockExecutor::new();
-        let collector = HdrMetricsCollector::new(0);
+        let collector = HdrMetricsCollector::new(0, vec![], false);
 
         io_worker_loop(
             IoWorkerConfig {

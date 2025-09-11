@@ -51,6 +51,8 @@ impl RequestExecutor for MockExecutor {
             bytes_sent: 0,
             response_size: 256,
             error: None,
+            response_headers: None,
+            response_body: None,
         }
     }
 }
@@ -109,7 +111,7 @@ fn spawn_full_architecture(
                 rt.block_on(async {
                     let generator = SimpleGenerator::get(vec!["http://mock.test/".into()]);
                     let executor = MockExecutor::new();
-                    let collector = HdrMetricsCollector::new(0);
+                    let collector = HdrMetricsCollector::new(0, vec![], false);
 
                     io_worker_loop(
                         IoWorkerConfig {
@@ -383,6 +385,8 @@ fn timer_plus_workers_coordinated_omission_tracking() {
                 bytes_sent: 0,
                 response_size: 64,
                 error: None,
+                response_headers: None,
+                response_body: None,
             }
         }
     }
@@ -394,7 +398,7 @@ fn timer_plus_workers_coordinated_omission_tracking() {
             contexts: std::cell::RefCell::new(Vec::new()),
         };
         let exec_rc = Rc::new(executor);
-        let collector = HdrMetricsCollector::new(0);
+        let collector = HdrMetricsCollector::new(0, vec![], false);
 
         io_worker_loop(
             IoWorkerConfig {

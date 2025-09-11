@@ -65,6 +65,8 @@ impl RequestExecutor for DnsExecutor {
                     bytes_sent: 0,
                     response_size: 0,
                     error: Some(ExecutionError::Connect(format!("UDP bind: {e}"))),
+                    response_headers: None,
+                    response_body: None,
                 };
             }
         };
@@ -84,6 +86,8 @@ impl RequestExecutor for DnsExecutor {
                 bytes_sent,
                 response_size: 0,
                 error: Some(ExecutionError::Connect(format!("UDP send: {e}"))),
+                response_headers: None,
+                response_body: None,
             };
         }
 
@@ -110,6 +114,8 @@ impl RequestExecutor for DnsExecutor {
                     bytes_sent,
                     response_size: n as u64,
                     error: None,
+                    response_headers: None,
+                    response_body: None,
                 }
             }
             Ok(BufResult(Err(e), _)) => ExecutionResult {
@@ -124,6 +130,8 @@ impl RequestExecutor for DnsExecutor {
                 bytes_sent,
                 response_size: 0,
                 error: Some(ExecutionError::Other(format!("UDP recv: {e}"))),
+                response_headers: None,
+                response_body: None,
             },
             Err(_timeout) => ExecutionResult {
                 request_id: ctx.request_id,
@@ -137,6 +145,8 @@ impl RequestExecutor for DnsExecutor {
                 bytes_sent,
                 response_size: 0,
                 error: Some(ExecutionError::Timeout),
+                response_headers: None,
+                response_body: None,
             },
         }
     }

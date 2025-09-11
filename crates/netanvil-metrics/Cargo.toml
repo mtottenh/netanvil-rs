@@ -9,3 +9,4 @@ description = "HDR histogram metrics collection and aggregation"
 [dependencies]
 netanvil-types = { workspace = true }
 hdrhistogram = { workspace = true }
+md5 = "0.7"

@@ -1,5 +1,6 @@
 //! Load test engine: worker, coordinator, schedulers, rate controllers.
 
+pub mod capture;
 pub mod controller;
 pub mod coordinator;
 pub mod dropping;

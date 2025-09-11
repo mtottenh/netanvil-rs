@@ -117,6 +117,7 @@ impl RequestTransformer for ConnectionPolicyTransformer {
         let close = match &self.policy {
             ConnectionPolicy::KeepAlive => false,
             ConnectionPolicy::AlwaysNew => true,
+            ConnectionPolicy::NoReuse => false, // Don't send Connection: close — leave connections dangling
             ConnectionPolicy::Mixed {
                 persistent_ratio,
                 connection_lifetime,

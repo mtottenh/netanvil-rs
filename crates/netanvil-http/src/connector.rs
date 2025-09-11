@@ -6,6 +6,7 @@
 
 use std::future::Future;
 use std::io;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -14,6 +15,7 @@ use compio::tls::MaybeTlsStream;
 use cyper_core::HyperStream;
 use hyper::Uri;
 use hyper_util::client::legacy::connect::{Connected, Connection};
+use netanvil_types::config::DnsMode;
 use send_wrapper::SendWrapper;
 use tower_service::Service;
 
@@ -108,6 +110,12 @@ pub struct ThrottledConnector {
     tls_connector: Option<compio::tls::TlsConnector>,
     /// Override SNI server name (independent of Host header).
     sni_override: Option<String>,
+    /// When true, leak each connection's fd so the server sees idle
+    /// persistent connections accumulating (legacy `-noreuse` behavior).
+    noreuse: bool,
+    /// DNS resolution preference. When set, resolves hostnames manually
+    /// and filters by address family before connecting.
+    dns_mode: Option<DnsMode>,
 }
 
 impl ThrottledConnector {
@@ -116,6 +124,8 @@ impl ThrottledConnector {
             throttle_bps,
             tls_connector: None,
             sni_override: None,
+            noreuse: false,
+            dns_mode: None,
         }
     }
 
@@ -130,6 +140,56 @@ impl ThrottledConnector {
             throttle_bps,
             tls_connector: Some(tls_connector),
             sni_override,
+            noreuse: false,
+            dns_mode: None,
+        }
+    }
+
+    /// Set the noreuse flag: leak connection fds so the server sees idle
+    /// persistent connections accumulating.
+    pub fn set_noreuse(&mut self, noreuse: bool) {
+        self.noreuse = noreuse;
+    }
+
+    /// Set DNS resolution mode for address family filtering.
+    pub fn set_dns_mode(&mut self, dns_mode: Option<DnsMode>) {
+        self.dns_mode = dns_mode;
+    }
+
+    /// Resolve hostname with DNS mode filtering.
+    fn resolve_with_dns_mode(
+        host: &str,
+        port: u16,
+        dns_mode: &DnsMode,
+    ) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
+        use std::net::ToSocketAddrs;
+
+        let addrs: Vec<SocketAddr> = (host, port).to_socket_addrs()?.collect();
+        if addrs.is_empty() {
+            return Err(format!("DNS resolution failed for {host}:{port}").into());
+        }
+
+        match dns_mode {
+            DnsMode::V4 => addrs
+                .iter()
+                .find(|a| a.is_ipv4())
+                .copied()
+                .ok_or_else(|| format!("no IPv4 address for {host}").into()),
+            DnsMode::V6 => addrs
+                .iter()
+                .find(|a| a.is_ipv6())
+                .copied()
+                .ok_or_else(|| format!("no IPv6 address for {host}").into()),
+            DnsMode::PreferV4 => {
+                let v4 = addrs.iter().find(|a| a.is_ipv4());
+                let v6 = addrs.iter().find(|a| a.is_ipv6());
+                Ok(*v4.or(v6).unwrap()) // addrs is non-empty
+            }
+            DnsMode::PreferV6 => {
+                let v6 = addrs.iter().find(|a| a.is_ipv6());
+                let v4 = addrs.iter().find(|a| a.is_ipv4());
+                Ok(*v6.or(v4).unwrap()) // addrs is non-empty
+            }
         }
     }
 
@@ -149,12 +209,22 @@ impl ThrottledConnector {
         let (tcp, is_https) = match scheme {
             "http" => {
                 let port = port.unwrap_or(80);
-                let tcp = TcpStream::connect((host, port)).await?;
+                let tcp = if let Some(ref dns_mode) = self.dns_mode {
+                    let addr = Self::resolve_with_dns_mode(host, port, dns_mode)?;
+                    TcpStream::connect(addr).await?
+                } else {
+                    TcpStream::connect((host, port)).await?
+                };
                 (tcp, false)
             }
             "https" => {
                 let port = port.unwrap_or(443);
-                let tcp = TcpStream::connect((host, port)).await?;
+                let tcp = if let Some(ref dns_mode) = self.dns_mode {
+                    let addr = Self::resolve_with_dns_mode(host, port, dns_mode)?;
+                    TcpStream::connect(addr).await?
+                } else {
+                    TcpStream::connect((host, port)).await?
+                };
                 (tcp, true)
             }
             other => return Err(format!("unsupported scheme: {other}").into()),
@@ -173,6 +243,23 @@ impl ThrottledConnector {
             }
             if let Err(e) = crate::throttle::set_window_clamp(fd, clamp) {
                 tracing::warn!(clamp, "failed to set TCP_WINDOW_CLAMP: {e}");
+            }
+        }
+
+        // -noreuse: leak a dup'd fd so the server sees idle connections
+        // accumulating. We dup() the raw fd BEFORE TLS wrapping, then
+        // wrap the dup in an OwnedFd and forget it. The original fd is
+        // used normally and closed by hyper when done — but the dup'd fd
+        // keeps the TCP connection alive at the OS level indefinitely.
+        #[cfg(target_os = "linux")]
+        if self.noreuse {
+            use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+            let fd = tcp.as_raw_fd();
+            let dup_fd = unsafe { libc::dup(fd) };
+            if dup_fd >= 0 {
+                // Wrap in OwnedFd, then forget it so the fd is never closed.
+                let owned = unsafe { OwnedFd::from_raw_fd(dup_fd) };
+                std::mem::forget(owned);
             }
         }
 

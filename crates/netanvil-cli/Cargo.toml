@@ -22,6 +22,7 @@ netanvil-udp = { workspace = true }
 netanvil-dns = { workspace = true }
 netanvil-plugin = { workspace = true }
 netanvil-plugin-luajit = { workspace = true }
+netanvil-harness = { workspace = true }
 flume = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }

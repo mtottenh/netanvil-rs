@@ -1,16 +1,6 @@
 use std::rc::Rc;
 use std::time::Instant;
 
-use netanvil_metrics::HdrMetricsCollector;
-use netanvil_types::{
-    ConnectionPolicy, RateConfig, RequestExecutor, RequestGenerator, RequestScheduler,
-    RequestTransformer, SchedulerConfig, TestConfig,
-};
-
-use crate::controller::{
-    AutotuningPidController, CompositePidController, PidRateController, StaticRateController,
-    StepRateController,
-};
 use crate::coordinator::Coordinator;
 use crate::generator::SimpleGenerator;
 use crate::handle::IoWorkerHandle;
@@ -19,6 +9,11 @@ use crate::result::TestResult;
 use crate::scheduler::{ConstantRateScheduler, PoissonScheduler};
 use crate::timer_thread::{self, TimerThreadHandle, FIRE_CHANNEL_CAPACITY};
 use crate::transformer::{ConnectionPolicyTransformer, HeaderTransformer, NoopTransformer};
+use netanvil_metrics::HdrMetricsCollector;
+use netanvil_types::{
+    ConnectionPolicy, RequestExecutor, RequestGenerator, RequestScheduler, RequestTransformer,
+    SchedulerConfig, TestConfig,
+};
 
 // ---------------------------------------------------------------------------
 // Convenience entry points (use defaults from TestConfig for everything)
@@ -606,73 +601,8 @@ where
     };
 
     // ── Create coordinator ──
-    let rate_controller: Box<dyn netanvil_types::RateController> = match &config.rate {
-        RateConfig::Static { rps } => Box::new(StaticRateController::new(*rps)),
-        RateConfig::Step { steps } => Box::new(StepRateController::with_start_time(
-            steps.clone(),
-            start_time,
-        )),
-        RateConfig::Pid {
-            initial_rps,
-            target,
-        } => match &target.gains {
-            netanvil_types::PidGains::Manual { kp, ki, kd } => Box::new(PidRateController::new(
-                target.metric.clone(),
-                target.value,
-                *initial_rps,
-                target.min_rps,
-                target.max_rps,
-                crate::PidGainValues {
-                    kp: *kp,
-                    ki: *ki,
-                    kd: *kd,
-                },
-            )),
-            netanvil_types::PidGains::Auto {
-                autotune_duration,
-                smoothing,
-            } => Box::new(AutotuningPidController::new(
-                target.metric.clone(),
-                target.value,
-                *initial_rps,
-                target.min_rps,
-                target.max_rps,
-                crate::AutotuneParams {
-                    autotune_duration: *autotune_duration,
-                    smoothing: *smoothing,
-                    control_interval: config.control_interval,
-                },
-            )),
-        },
-        RateConfig::CompositePid {
-            initial_rps,
-            constraints,
-            min_rps,
-            max_rps,
-        } => Box::new(CompositePidController::new(
-            constraints,
-            *initial_rps,
-            *min_rps,
-            *max_rps,
-            config.control_interval,
-        )),
-        RateConfig::Ramp {
-            warmup_rps,
-            warmup_duration,
-            latency_multiplier,
-            max_error_rate,
-            min_rps,
-            max_rps,
-        } => Box::new(crate::RampRateController::new(crate::RampConfig {
-            warmup_rps: *warmup_rps,
-            warmup_duration: *warmup_duration,
-            latency_multiplier: *latency_multiplier,
-            max_error_rate: *max_error_rate,
-            min_rps: *min_rps,
-            max_rps: *max_rps,
-            control_interval: config.control_interval,
-        })),
-    };
+    let rate_controller =
+        crate::build_rate_controller(&config.rate, config.control_interval, start_time);
 
     // Pin coordinator (main thread) to misc core
     if misc_core > 0 && misc_core != timer_core {

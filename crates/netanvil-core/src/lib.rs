@@ -35,6 +35,7 @@ pub type GeneratorFactory = GenericGeneratorFactory<netanvil_types::HttpRequestS
 /// HTTP-specific transformer factory (backward compatible alias).
 pub type TransformerFactory = GenericTransformerFactory<netanvil_types::HttpRequestSpec>;
 
+pub use controller::builder::build_rate_controller;
 pub use controller::{
     AutotuneParams, AutotuningPidController, CompositePidController, PidGainValues,
     PidRateController, PidStepInput, RampConfig, RampRateController, StaticRateController,

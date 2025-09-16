@@ -1,0 +1,23 @@
+[package]
+name = "netanvil-harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Test orchestration library for netanvil-rs load testing"
+
+[dependencies]
+netanvil-types = { workspace = true }
+netanvil-core = { workspace = true }
+netanvil-http = { workspace = true }
+netanvil-tcp = { workspace = true }
+netanvil-udp = { workspace = true }
+netanvil-dns = { workspace = true }
+netanvil-api = { workspace = true }
+netanvil-distributed = { workspace = true }
+netanvil-plugin = { workspace = true }
+netanvil-plugin-luajit = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+flume = { workspace = true }
+serde_json = { workspace = true }

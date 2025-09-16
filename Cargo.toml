@@ -14,8 +14,11 @@ members = [
     "crates/netanvil-udp",
     "crates/netanvil-dns",
     "crates/netanvil-test-servers",
+    "crates/netanvil-harness",
+    "crates/REDACTED-CRATE",
     "crates/REDACTED-CRATE",
     "crates/netanvil-cli",
+    "crates/REDACTED-CRATE",
 ]
 
 # Only build luajit by default (lua54 conflicts at link time).
@@ -33,7 +36,7 @@ default-members = [
     "crates/netanvil-distributed",
     "crates/netanvil-plugin",
     "crates/netanvil-plugin-luajit",
-    "crates/REDACTED-CRATE",
+    "crates/netanvil-harness",
     "crates/netanvil-cli",
 ]
 
@@ -107,7 +110,10 @@ netanvil-tcp = { path = "crates/netanvil-tcp" }
 netanvil-udp = { path = "crates/netanvil-udp" }
 netanvil-dns = { path = "crates/netanvil-dns" }
 netanvil-test-servers = { path = "crates/netanvil-test-servers" }
+netanvil-harness = { path = "crates/netanvil-harness" }
+REDACTED-CRATE = { path = "crates/REDACTED-CRATE" }
 netanvil-cli = { path = "crates/netanvil-cli" }
+REDACTED-CRATE = { path = "crates/REDACTED-CRATE" }
 
 [profile.release]
 opt-level = 3

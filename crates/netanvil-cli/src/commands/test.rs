@@ -1,0 +1,400 @@
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+
+use netanvil_api::{ControlServer, SharedState};
+use netanvil_core::{report::ProgressLine, GenericTestBuilder, TestBuilder};
+use netanvil_http::HttpExecutor;
+use netanvil_types::{ConnectionConfig, RateConfig, TestConfig};
+
+use crate::output;
+use crate::parsing::*;
+
+#[allow(clippy::too_many_arguments)]
+pub fn run(
+    url: Vec<String>,
+    plugin: Option<String>,
+    plugin_type: String,
+    method: String,
+    rps: f64,
+    duration: String,
+    rate_mode: String,
+    steps: Option<String>,
+    pid_metric: String,
+    pid_target: f64,
+    pid_kp: Option<f64>,
+    pid_ki: Option<f64>,
+    pid_kd: Option<f64>,
+    pid_min_rps: f64,
+    pid_max_rps: f64,
+    scheduler: String,
+    cores: usize,
+    timeout: String,
+    headers: Vec<String>,
+    error_threshold: u16,
+    pid_constraints: Vec<String>,
+    pid_autotune_duration: String,
+    connection_policy: String,
+    persistent_ratio: f64,
+    conn_lifetime: Option<String>,
+    output: String,
+    api_port: Option<u16>,
+    bandwidth: Option<String>,
+    response_signals: Vec<String>,
+    payload: Option<String>,
+    payload_hex: Option<String>,
+    payload_file: Option<String>,
+    framing: String,
+    delimiter: String,
+    no_response: bool,
+    mode: String,
+    request_size: Option<u16>,
+    response_size: Option<u32>,
+    dns_domains: Option<String>,
+    dns_query_type: String,
+    ramp_warmup: String,
+    ramp_multiplier: f64,
+    ramp_max_errors: f64,
+) -> Result<()> {
+    let duration = parse_duration(&duration).context("invalid --duration")?;
+    let timeout = parse_duration(&timeout).context("invalid --timeout")?;
+    let bandwidth_bps = bandwidth
+        .as_deref()
+        .map(parse_bandwidth)
+        .transpose()
+        .context("invalid --bandwidth")?;
+    let autotune_dur =
+        parse_duration(&pid_autotune_duration).context("invalid --pid-autotune-duration")?;
+    let scheduler = parse_scheduler(&scheduler).context("invalid --scheduler")?;
+    let ramp_warmup_dur = parse_duration(&ramp_warmup).context("invalid --ramp-warmup")?;
+    let headers: Vec<(String, String)> = headers
+        .iter()
+        .map(|h| parse_header(h))
+        .collect::<Result<_>>()?;
+    let rate = build_rate_config(
+        &rate_mode,
+        rps,
+        steps.as_deref(),
+        &PidArgs {
+            metric: &pid_metric,
+            target: pid_target,
+            kp: pid_kp,
+            ki: pid_ki,
+            kd: pid_kd,
+            min_rps: pid_min_rps,
+            max_rps: pid_max_rps,
+            constraints: &pid_constraints,
+            autotune_duration: autotune_dur,
+        },
+        &RampArgs {
+            warmup_duration: ramp_warmup_dur,
+            latency_multiplier: ramp_multiplier,
+            max_error_rate: ramp_max_errors,
+        },
+    )?;
+
+    let conn_policy = parse_connection_policy(
+        &connection_policy,
+        persistent_ratio,
+        conn_lifetime.as_deref(),
+    )?;
+
+    let mut config = TestConfig {
+        targets: url,
+        method,
+        duration,
+        rate,
+        scheduler,
+        headers,
+        num_cores: cores,
+        connections: ConnectionConfig {
+            request_timeout: timeout,
+            connection_policy: conn_policy,
+            ..Default::default()
+        },
+        metrics_interval: Duration::from_millis(500),
+        control_interval: Duration::from_millis(100),
+        error_status_threshold: error_threshold,
+        bandwidth_limit_bps: bandwidth_bps,
+        response_signal_headers: parse_response_signals(&response_signals)?,
+        ..Default::default()
+    };
+
+    let rate_desc = match &config.rate {
+        RateConfig::Static { rps } => format!("{rps} RPS (static)"),
+        RateConfig::Step { steps } => format!("{} steps", steps.len()),
+        RateConfig::Pid {
+            initial_rps,
+            target,
+        } => {
+            let mode = match &target.gains {
+                netanvil_types::PidGains::Auto { .. } => "PID/autotune",
+                netanvil_types::PidGains::Manual { .. } => "PID",
+            };
+            format!("{initial_rps} RPS initial ({mode})")
+        }
+        RateConfig::CompositePid {
+            initial_rps,
+            constraints,
+            ..
+        } => format!(
+            "{initial_rps} RPS initial (composite PID, {} constraints)",
+            constraints.len()
+        ),
+        RateConfig::Ramp {
+            warmup_rps,
+            latency_multiplier,
+            ..
+        } => {
+            format!("{warmup_rps} RPS warmup (ramp, {latency_multiplier}x baseline)")
+        }
+    };
+
+    let bw_desc = match bandwidth_bps {
+        Some(bps) => format!(", bandwidth: {}", format_bandwidth(bps)),
+        None => String::new(),
+    };
+    eprintln!(
+        "Running load test: {} target(s), {rate_desc}, {:?} duration, {} cores{bw_desc}",
+        config.targets.len(),
+        duration,
+        if cores == 0 {
+            "auto".to_string()
+        } else {
+            cores.to_string()
+        },
+    );
+
+    let request_timeout = timeout;
+    let protocol = detect_protocol(&config.targets);
+
+    let result = match protocol {
+        DetectedProtocol::Tcp => {
+            let tcp_payload = resolve_payload(&payload, &payload_hex, &payload_file)
+                .context("invalid TCP payload")?;
+            let tcp_framing =
+                parse_tcp_framing(&framing, &delimiter).context("invalid --framing")?;
+            let targets = parse_socket_targets(&config.targets, "tcp://")
+                .context("invalid TCP target address")?;
+            let tcp_mode = parse_tcp_mode(&mode).context("invalid --mode")?;
+            let expect_response = !no_response;
+
+            // Determine payload and sizes based on mode
+            let req_size = request_size.unwrap_or(tcp_payload.len() as u16);
+            let resp_size = response_size.unwrap_or(req_size as u32);
+
+            eprintln!(
+                "  protocol: TCP, mode: {mode}, payload: {} bytes, request: {req_size}, response: {resp_size}",
+                tcp_payload.len()
+            );
+
+            config.error_status_threshold = 0; // no HTTP status for TCP
+            config.protocol = Some(netanvil_types::ProtocolConfig::Tcp {
+                mode: mode.clone(),
+                payload_hex: encode_hex(&tcp_payload),
+                framing: framing.clone(),
+                request_size: req_size,
+                response_size: resp_size,
+            });
+
+            let conn_policy = config.connections.connection_policy.clone();
+            let max_conns = config.connections.max_connections_per_core;
+
+            let gen_factory: netanvil_core::GenericGeneratorFactory<netanvil_tcp::TcpRequestSpec> =
+                Box::new(move |_core_id| {
+                    Box::new(
+                        netanvil_tcp::SimpleTcpGenerator::new(
+                            targets.clone(),
+                            tcp_payload.clone(),
+                            tcp_framing.clone(),
+                            expect_response,
+                        )
+                        .with_mode(tcp_mode)
+                        .with_request_size(req_size)
+                        .with_response_size(resp_size),
+                    )
+                });
+            let trans_factory: netanvil_core::GenericTransformerFactory<netanvil_tcp::TcpRequestSpec> =
+                Box::new(|_| Box::new(netanvil_tcp::TcpNoopTransformer));
+
+            GenericTestBuilder::new(
+                config,
+                move || {
+                    netanvil_tcp::TcpExecutor::with_pool(
+                        request_timeout,
+                        max_conns,
+                        conn_policy.clone(),
+                    )
+                },
+                gen_factory,
+                trans_factory,
+            )
+            .on_progress(|update| {
+                eprint!("\r{}", ProgressLine::new(update));
+            })
+            .run()
+            .context("TCP load test failed")?
+        }
+
+        DetectedProtocol::Udp => {
+            let udp_payload = resolve_payload(&payload, &payload_hex, &payload_file)
+                .context("invalid UDP payload")?;
+            let targets = parse_socket_targets(&config.targets, "udp://")
+                .context("invalid UDP target address")?;
+            let expect_response = !no_response;
+
+            eprintln!(
+                "  protocol: UDP, {} byte payload, response: {expect_response}",
+                udp_payload.len()
+            );
+
+            config.error_status_threshold = 0; // no HTTP status for UDP
+            config.protocol = Some(netanvil_types::ProtocolConfig::Udp {
+                payload_hex: encode_hex(&udp_payload),
+                expect_response,
+            });
+
+            let gen_factory: netanvil_core::GenericGeneratorFactory<netanvil_udp::UdpRequestSpec> =
+                Box::new(move |_core_id| {
+                    Box::new(netanvil_udp::SimpleUdpGenerator::new(
+                        targets.clone(),
+                        udp_payload.clone(),
+                        expect_response,
+                    ))
+                });
+            let trans_factory: netanvil_core::GenericTransformerFactory<netanvil_udp::UdpRequestSpec> =
+                Box::new(|_| Box::new(netanvil_udp::UdpNoopTransformer));
+
+            GenericTestBuilder::new(
+                config,
+                move || netanvil_udp::UdpExecutor::with_timeout(request_timeout),
+                gen_factory,
+                trans_factory,
+            )
+            .on_progress(|update| {
+                eprint!("\r{}", ProgressLine::new(update));
+            })
+            .run()
+            .context("UDP load test failed")?
+        }
+
+        DetectedProtocol::Dns => {
+            let servers = parse_socket_targets(&config.targets, "dns://")
+                .context("invalid DNS target address")?;
+            let domains: Vec<String> = dns_domains
+                .as_deref()
+                .unwrap_or("example.com")
+                .split(',')
+                .map(|s: &str| s.trim().to_string())
+                .collect();
+            let query_type = netanvil_dns::DnsQueryType::from_str_name(&dns_query_type)
+                .ok_or_else(|| anyhow::anyhow!("unknown DNS query type: {dns_query_type}"))?;
+
+            eprintln!(
+                "  protocol: DNS, query_type: {:?}, domains: {}",
+                query_type,
+                domains.len()
+            );
+
+            config.error_status_threshold = 0;
+
+            let gen_factory: netanvil_core::GenericGeneratorFactory<netanvil_dns::DnsRequestSpec> =
+                Box::new(move |_core_id| {
+                    Box::new(netanvil_dns::SimpleDnsGenerator::new(
+                        servers.clone(),
+                        domains.clone(),
+                        query_type,
+                        true,
+                    ))
+                });
+            let trans_factory: netanvil_core::GenericTransformerFactory<netanvil_dns::DnsRequestSpec> =
+                Box::new(|_| Box::new(netanvil_dns::DnsNoopTransformer));
+
+            GenericTestBuilder::new(
+                config,
+                move || netanvil_dns::DnsExecutor::with_timeout(request_timeout),
+                gen_factory,
+                trans_factory,
+            )
+            .on_progress(|update| {
+                eprint!("\r{}", ProgressLine::new(update));
+            })
+            .run()
+            .context("DNS load test failed")?
+        }
+
+        DetectedProtocol::Http => {
+            // Build executor factory -- with TLS config, bandwidth throttling, or default
+            let tls_client = config.tls_client.clone();
+            let make_executor = move || -> HttpExecutor {
+                match &tls_client {
+                    Some(tls_config) => {
+                        HttpExecutor::with_tls_config(tls_config, bandwidth_bps, request_timeout)
+                            .expect("TLS configuration error")
+                    }
+                    None => match bandwidth_bps {
+                        Some(bps) => HttpExecutor::with_bandwidth_limit(bps, request_timeout),
+                        None => HttpExecutor::with_timeout(request_timeout),
+                    },
+                }
+            };
+
+            // Build plugin generator factory if --plugin is specified
+            let plugin_factory = if let Some(ref plugin_path) = plugin {
+                let ptype = detect_plugin_type(plugin_path, &plugin_type)?;
+                let factory = build_plugin_factory(plugin_path, ptype, &config.targets)?;
+                tracing::info!(
+                    plugin = %plugin_path,
+                    plugin_type = ?ptype,
+                    "loaded plugin generator"
+                );
+                Some(factory)
+            } else {
+                None
+            };
+
+            if let Some(port) = api_port {
+                let shared_state = SharedState::new();
+                let (ext_cmd_tx, ext_cmd_rx) = flume::unbounded();
+
+                let server = ControlServer::new(port, shared_state.clone(), ext_cmd_tx)
+                    .context(format!("failed to start API server on port {port}"))?;
+                let _server_handle = server.spawn();
+                tracing::info!(port, "control API listening");
+
+                let progress_state = shared_state.clone();
+                let signal_state = shared_state.clone();
+                let mut builder = TestBuilder::new(config, make_executor)
+                    .on_progress(move |update| {
+                        progress_state.update_from_progress(update);
+                        eprint!("\r{}", ProgressLine::new(update));
+                    })
+                    .external_commands(ext_cmd_rx)
+                    .pushed_signal_source(move || signal_state.drain_pushed_signals());
+
+                if let Some(factory) = plugin_factory {
+                    builder = builder.generator_factory(factory);
+                }
+
+                builder.run().context("load test failed")?
+            } else {
+                let mut builder = TestBuilder::new(config, make_executor).on_progress(|update| {
+                    eprint!("\r{}", ProgressLine::new(update));
+                });
+
+                if let Some(factory) = plugin_factory {
+                    builder = builder.generator_factory(factory);
+                }
+
+                builder.run().context("load test failed")?
+            }
+        }
+    };
+
+    eprintln!(); // newline after progress
+
+    let output_format = output::OutputFormat::parse(&output).map_err(|e| anyhow::anyhow!(e))?;
+    output::print_results(&result, output_format);
+
+    Ok(())
+}

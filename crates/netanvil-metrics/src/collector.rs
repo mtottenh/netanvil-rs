@@ -51,7 +51,7 @@ impl HdrMetricsCollector {
     /// or 0 to only count transport errors.
     ///
     /// `tracked_headers`: response header names whose value distributions
-    /// should be counted (e.g., `["X-Cache"]` for ghost stats).
+    /// should be counted (e.g., `["X-Cache"]` for cache-hit tracking).
     ///
     /// `md5_check_enabled`: when true, compute MD5 of response body and
     /// compare with `Content-MD5` header value.

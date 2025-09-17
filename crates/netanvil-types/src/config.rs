@@ -84,7 +84,7 @@ pub struct TestConfig {
     pub target_bytes: Option<u64>,
     /// Response headers to track value distributions for.
     /// Each header name listed here will have its response values counted
-    /// per-core and aggregated (e.g., `["X-Cache"]` for ghost stats).
+    /// per-core and aggregated (e.g., `["X-Cache"]` for cache-hit tracking).
     #[serde(default)]
     pub tracked_response_headers: Vec<String>,
     /// Enable MD5 body verification. When true, the metrics collector

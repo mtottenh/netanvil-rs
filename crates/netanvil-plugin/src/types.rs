@@ -125,6 +125,33 @@ pub trait FromPostcard: netanvil_types::ProtocolSpec + Sized {
     fn fallback() -> Self;
 }
 
+/// Serializable version of ExecutionResult for passing to WASM plugins.
+///
+/// Used by `WasmGenerator::on_response()` to serialize the response into
+/// guest memory. Postcard-encoded, read by the WASM `on_response(len)` export.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginExecutionResult {
+    pub request_id: u64,
+    pub status: Option<u16>,
+    pub latency_ns: u64,
+    pub error: Option<String>,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<Vec<u8>>,
+}
+
+impl PluginExecutionResult {
+    pub fn from_result(result: &netanvil_types::ExecutionResult) -> Self {
+        Self {
+            request_id: result.request_id,
+            status: result.status,
+            latency_ns: result.timing.total.as_nanos() as u64,
+            error: result.error.as_ref().map(|e| e.to_string()),
+            headers: result.response_headers.clone().unwrap_or_default(),
+            body: result.response_body.as_ref().map(|b| b.to_vec()),
+        }
+    }
+}
+
 /// Serializable version of TcpRequestSpec returned by plugins.
 ///
 /// Plugins only control the payload — target, framing, and mode come from

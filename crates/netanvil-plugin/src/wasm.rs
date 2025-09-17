@@ -23,7 +23,7 @@ use wasmtime_wasi::WasiCtxBuilder;
 use std::marker::PhantomData;
 
 use crate::error::{PluginError, Result};
-use crate::types::{FromPostcard, RawContext};
+use crate::types::{FromPostcard, PluginExecutionResult, RawContext};
 
 /// A RequestGenerator backed by a WASM module.
 ///
@@ -40,6 +40,8 @@ pub struct WasmGenerator<S: FromPostcard> {
     fn_get_input_ptr: TypedFunc<(), i32>,
     fn_get_output_ptr: TypedFunc<(), i32>,
     fn_update_targets: TypedFunc<i32, i32>,
+    /// Optional `on_response(input_len: i32) -> i32` WASM export.
+    fn_on_response: Option<TypedFunc<i32, i32>>,
     _phantom: PhantomData<S>,
 }
 
@@ -83,6 +85,11 @@ impl<S: FromPostcard> WasmGenerator<S> {
             .get_typed_func::<i32, i32>(&mut store, "update_targets")
             .map_err(|e| PluginError::Wasm(format!("missing update_targets: {e}")))?;
 
+        // Optional: on_response export for response feedback
+        let fn_on_response = instance
+            .get_typed_func::<i32, i32>(&mut store, "on_response")
+            .ok();
+
         let mut gen = Self {
             store,
             memory,
@@ -90,6 +97,7 @@ impl<S: FromPostcard> WasmGenerator<S> {
             fn_get_input_ptr,
             fn_get_output_ptr,
             fn_update_targets,
+            fn_on_response,
             _phantom: PhantomData,
         };
 
@@ -156,6 +164,24 @@ impl<S: FromPostcard> netanvil_types::RequestGenerator for WasmGenerator<S> {
         let output_slice = &self.memory.data(&self.store)[output_ptr..output_ptr + output_len];
 
         S::from_postcard_bytes(output_slice).unwrap_or_else(|_| S::fallback())
+    }
+
+    fn on_response(&mut self, result: &netanvil_types::ExecutionResult) {
+        if self.fn_on_response.is_none() {
+            return;
+        }
+        let plugin_result = PluginExecutionResult::from_result(result);
+        if let Ok(bytes) = postcard::to_allocvec(&plugin_result) {
+            if self.write_to_guest(&bytes).is_ok() {
+                // fn_on_response is Copy (TypedFunc is Copy), so we can reborrow self.
+                let func = self.fn_on_response.clone().unwrap();
+                let _ = func.call(&mut self.store, bytes.len() as i32);
+            }
+        }
+    }
+
+    fn wants_responses(&self) -> bool {
+        self.fn_on_response.is_some()
     }
 
     fn update_targets(&mut self, targets: Vec<String>) {

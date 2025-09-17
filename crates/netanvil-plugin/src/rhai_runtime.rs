@@ -25,6 +25,7 @@ pub struct RhaiGenerator<S: FromRhaiPlugin> {
     engine: Engine,
     ast: AST,
     scope: Scope<'static>,
+    has_on_response: bool,
     _phantom: PhantomData<S>,
 }
 
@@ -49,10 +50,13 @@ impl<S: FromRhaiPlugin> RhaiGenerator<S> {
             .run_ast_with_scope(&mut scope, &ast)
             .map_err(|e| PluginError::Rhai(format!("init: {e}")))?;
 
+        let has_on_response = ast.iter_functions().any(|f| f.name == "on_response");
+
         Ok(Self {
             engine,
             ast,
             scope,
+            has_on_response,
             _phantom: PhantomData,
         })
     }
@@ -84,6 +88,40 @@ impl<S: FromRhaiPlugin> netanvil_types::RequestGenerator for RhaiGenerator<S> {
 
         let result_map: Map = result.cast();
         S::from_rhai_map(&result_map).unwrap_or_else(|_| S::fallback())
+    }
+
+    fn on_response(&mut self, result: &netanvil_types::ExecutionResult) {
+        if !self.has_on_response {
+            return;
+        }
+        let mut map = Map::new();
+        map.insert("request_id".into(), Dynamic::from(result.request_id as i64));
+        map.insert(
+            "status".into(),
+            result
+                .status
+                .map(|s| Dynamic::from(s as i64))
+                .unwrap_or(Dynamic::UNIT),
+        );
+        map.insert(
+            "latency_ms".into(),
+            Dynamic::from(result.timing.total.as_secs_f64() * 1000.0),
+        );
+        map.insert("bytes_sent".into(), Dynamic::from(result.bytes_sent as i64));
+        map.insert(
+            "response_size".into(),
+            Dynamic::from(result.response_size as i64),
+        );
+        if let Some(ref err) = result.error {
+            map.insert("error".into(), Dynamic::from(err.to_string()));
+        }
+        let _ = self
+            .engine
+            .call_fn::<()>(&mut self.scope, &self.ast, "on_response", (map,));
+    }
+
+    fn wants_responses(&self) -> bool {
+        self.has_on_response
     }
 
     fn update_targets(&mut self, targets: Vec<String>) {

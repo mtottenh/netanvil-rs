@@ -21,6 +21,8 @@ pub struct Lua54Generator<S: FromLuaPlugin> {
     lua: Lua,
     /// Persistent context table — reused every call to avoid GC allocation.
     ctx_table: LuaTable,
+    /// Whether the script defines an `on_response(result)` function.
+    has_on_response: bool,
     _phantom: PhantomData<S>,
 }
 
@@ -60,11 +62,38 @@ impl<S: FromLuaPlugin> Lua54Generator<S> {
             .set("session_id", LuaNil)
             .map_err(|e| PluginError::Lua(format!("init ctx table: {e}")))?;
 
+        let has_on_response = lua.globals().get::<LuaFunction>("on_response").is_ok();
+
         Ok(Self {
             lua,
             ctx_table,
+            has_on_response,
             _phantom: PhantomData,
         })
+    }
+
+    /// Build a Lua table from an ExecutionResult for the on_response callback.
+    fn result_to_lua_table(&self, result: &netanvil_types::ExecutionResult) -> LuaResult<LuaTable> {
+        let t = self.lua.create_table()?;
+        t.set("request_id", result.request_id)?;
+        t.set("status", result.status)?;
+        t.set("latency_ms", result.timing.total.as_secs_f64() * 1000.0)?;
+        t.set("bytes_sent", result.bytes_sent)?;
+        t.set("response_size", result.response_size)?;
+        if let Some(ref err) = result.error {
+            t.set("error", err.to_string())?;
+        }
+        if let Some(ref headers) = result.response_headers {
+            let ht = self.lua.create_table()?;
+            for (k, v) in headers {
+                ht.set(k.as_str(), v.as_str())?;
+            }
+            t.set("headers", ht)?;
+        }
+        if let Some(ref body) = result.response_body {
+            t.set("body", self.lua.create_string(body.as_ref())?)?;
+        }
+        Ok(t)
     }
 
     /// Update the persistent context table with new values (no allocation).
@@ -106,6 +135,21 @@ impl<S: FromLuaPlugin> netanvil_types::RequestGenerator for Lua54Generator<S> {
             .expect("Lua generate() call failed");
 
         S::from_lua_table(&result_table).unwrap_or_else(|_| S::fallback())
+    }
+
+    fn on_response(&mut self, result: &netanvil_types::ExecutionResult) {
+        if !self.has_on_response {
+            return;
+        }
+        if let Ok(on_resp) = self.lua.globals().get::<LuaFunction>("on_response") {
+            if let Ok(table) = self.result_to_lua_table(result) {
+                let _ = on_resp.call::<()>(table);
+            }
+        }
+    }
+
+    fn wants_responses(&self) -> bool {
+        self.has_on_response
     }
 
     fn update_targets(&mut self, targets: Vec<String>) {

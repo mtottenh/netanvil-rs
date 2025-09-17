@@ -32,6 +32,22 @@ pub trait RequestGenerator {
 
     fn generate(&mut self, context: &RequestContext) -> Self::Spec;
 
+    /// Called with the result of a completed request.
+    ///
+    /// Invoked on the I/O worker main loop BEFORE the next `generate()` call,
+    /// so `&mut self` is safe. Only called when `wants_responses()` returns true.
+    /// Enables stateful session simulation, custom assertions, and adaptive payloads.
+    fn on_response(&mut self, _result: &ExecutionResult) {}
+
+    /// Whether this generator wants response callbacks via `on_response`.
+    ///
+    /// When false (default), zero overhead — no channel created, no results cloned.
+    /// When true, the I/O worker channels completed `ExecutionResult`s back to
+    /// the main loop and delivers them before each `generate()` call.
+    fn wants_responses(&self) -> bool {
+        false
+    }
+
     /// Replace the target URLs mid-test. Default: no-op.
     fn update_targets(&mut self, _targets: Vec<String>) {}
 }
@@ -97,6 +113,12 @@ impl<G: RequestGenerator + ?Sized> RequestGenerator for Box<G> {
     type Spec = G::Spec;
     fn generate(&mut self, context: &RequestContext) -> Self::Spec {
         (**self).generate(context)
+    }
+    fn on_response(&mut self, result: &ExecutionResult) {
+        (**self).on_response(result)
+    }
+    fn wants_responses(&self) -> bool {
+        (**self).wants_responses()
     }
     fn update_targets(&mut self, targets: Vec<String>) {
         (**self).update_targets(targets)

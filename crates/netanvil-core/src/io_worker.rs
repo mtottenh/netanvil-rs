@@ -10,8 +10,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use netanvil_types::{
-    MetricsCollector, MetricsSnapshot, RequestContext, RequestExecutor, RequestGenerator,
-    RequestTransformer, ScheduledRequest,
+    ExecutionResult, MetricsCollector, MetricsSnapshot, RequestContext, RequestExecutor,
+    RequestGenerator, RequestTransformer, ScheduledRequest,
 };
 
 /// Infrastructure channels and config for an I/O worker.
@@ -56,9 +56,31 @@ pub async fn io_worker_loop<G, T, E, M>(
     let mut request_seq: u64 = 0;
     let mut last_report = Instant::now();
 
+    // Create response feedback channel only if the generator opts in.
+    // When disabled (default), zero overhead — no channel, no result cloning.
+    // Bounded to 1024 entries; try_send drops on backpressure to avoid
+    // blocking the executor runtime or accumulating unbounded memory.
+    let (response_tx, response_rx) = if generator.wants_responses() {
+        let (tx, rx) = flume::bounded(1024);
+        tracing::info!(
+            core_id,
+            "generator requested response callbacks, channel created"
+        );
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
     tracing::info!(core_id, "io worker starting, waiting for fire events");
 
     loop {
+        // Deliver completed responses to generator before next generate() call.
+        if let Some(ref rx) = response_rx {
+            while let Ok(result) = rx.try_recv() {
+                generator.on_response(&result);
+            }
+        }
+
         // Wait for next message from timer thread.
         // While suspended: compio processes io_uring completions.
         // Wakes immediately when timer thread pushes a message.
@@ -78,6 +100,7 @@ pub async fn io_worker_loop<G, T, E, M>(
             &transformer,
             &executor,
             &metrics,
+            &response_tx,
             &mut request_seq,
             core_id,
         ) {
@@ -92,12 +115,21 @@ pub async fn io_worker_loop<G, T, E, M>(
         let mut last_yield = Instant::now();
         while let Ok(msg) = fire_rx.try_recv() {
             drained += 1;
+
+            // Deliver any responses that completed during the burst.
+            if let Some(ref rx) = response_rx {
+                while let Ok(result) = rx.try_recv() {
+                    generator.on_response(&result);
+                }
+            }
+
             if !handle_message(
                 msg,
                 &mut generator,
                 &transformer,
                 &executor,
                 &metrics,
+                &response_tx,
                 &mut request_seq,
                 core_id,
             ) {
@@ -164,6 +196,7 @@ fn handle_message<G, T, E, M>(
     transformer: &Rc<T>,
     executor: &Rc<E>,
     metrics: &Rc<M>,
+    response_tx: &Option<flume::Sender<ExecutionResult>>,
     seq: &mut u64,
     core_id: usize,
 ) -> bool
@@ -190,9 +223,13 @@ where
 
             let exec = executor.clone();
             let met = metrics.clone();
+            let resp_tx = response_tx.clone();
             compio::runtime::spawn(async move {
                 let result = exec.execute(&spec, &context).await;
                 met.record(&result);
+                if let Some(tx) = resp_tx {
+                    let _ = tx.try_send(result); // drop on backpressure
+                }
             })
             .detach();
 

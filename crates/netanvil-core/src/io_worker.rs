@@ -176,6 +176,13 @@ pub async fn io_worker_loop<G, T, E, M>(
         compio::time::sleep(Duration::from_millis(50)).await;
     }
 
+    // Final drain of responses from in-flight tasks that completed during shutdown.
+    if let Some(ref rx) = response_rx {
+        while let Ok(result) = rx.try_recv() {
+            generator.on_response(&result);
+        }
+    }
+
     // Send final snapshot
     let snapshot = metrics.snapshot();
     tracing::info!(

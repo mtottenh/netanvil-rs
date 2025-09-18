@@ -125,31 +125,107 @@ pub trait FromPostcard: netanvil_types::ProtocolSpec + Sized {
     fn fallback() -> Self;
 }
 
-/// Serializable version of ExecutionResult for passing to WASM plugins.
+/// Plugin response configuration — what data the plugin needs in `on_response`.
 ///
-/// Used by `WasmGenerator::on_response()` to serialize the response into
-/// guest memory. Postcard-encoded, read by the WASM `on_response(len)` export.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginExecutionResult {
-    pub request_id: u64,
-    pub status: Option<u16>,
-    pub latency_ns: u64,
-    pub error: Option<String>,
-    pub headers: Vec<(String, String)>,
-    pub body: Option<Vec<u8>>,
+/// Detected by probing for a `response_config()` function in the plugin
+/// (Lua table, WASM export, Rhai function). When absent but `on_response`
+/// exists, defaults to `headers: true, body: false`.
+///
+/// This controls both what the executor captures AND what gets serialized
+/// to the plugin boundary, avoiding work for data the plugin won't use.
+#[derive(Debug, Clone, Copy)]
+pub struct ResponseConfig {
+    /// Whether to include response headers in the on_response callback.
+    pub headers: bool,
+    /// Whether to include response body in the on_response callback.
+    pub body: bool,
 }
 
-impl PluginExecutionResult {
-    pub fn from_result(result: &netanvil_types::ExecutionResult) -> Self {
+impl Default for ResponseConfig {
+    fn default() -> Self {
         Self {
-            request_id: result.request_id,
-            status: result.status,
-            latency_ns: result.timing.total.as_nanos() as u64,
-            error: result.error.as_ref().map(|e| e.to_string()),
-            headers: result.response_headers.clone().unwrap_or_default(),
-            body: result.response_body.as_ref().map(|b| b.to_vec()),
+            headers: false,
+            body: false,
         }
     }
+}
+
+impl ResponseConfig {
+    /// Default when on_response exists but response_config doesn't:
+    /// headers enabled (most common need), body disabled (expensive).
+    pub fn on_response_default() -> Self {
+        Self {
+            headers: true,
+            body: false,
+        }
+    }
+}
+
+/// Fixed-layout result for zero-copy passing to WASM plugins.
+///
+/// Mirrors `RawContext` but for the response path. The fixed numeric fields
+/// are written as a repr(C) struct (40-byte memcpy, zero serialization).
+/// Variable-length data (error string, headers, body) is postcard-encoded
+/// after the fixed portion, controlled by `ResponseConfig`.
+///
+/// Guest memory layout: `[RawResult: 40 bytes][postcard var data: N bytes]`
+///
+/// Flags byte: bit 0 = has_error, bit 1 = has_var_data.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawResult {
+    pub request_id: u64,    // offset 0
+    pub status: u16,        // offset 8
+    pub flags: u8,          // offset 10
+    pub _pad: [u8; 5],      // offset 11 — align latency_ns
+    pub latency_ns: u64,    // offset 16
+    pub bytes_sent: u64,    // offset 24
+    pub response_size: u64, // offset 32
+}
+// Total: 40 bytes
+
+const _: () = assert!(std::mem::size_of::<RawResult>() == 40);
+
+/// Flags for RawResult.
+pub const RAW_RESULT_HAS_ERROR: u8 = 0x01;
+pub const RAW_RESULT_HAS_VAR_DATA: u8 = 0x02;
+
+impl RawResult {
+    pub fn from_execution_result(result: &netanvil_types::ExecutionResult) -> Self {
+        let mut flags = 0u8;
+        if result.error.is_some() {
+            flags |= RAW_RESULT_HAS_ERROR;
+        }
+        Self {
+            request_id: result.request_id,
+            status: result.status.unwrap_or(0),
+            flags,
+            _pad: [0; 5],
+            latency_ns: result.timing.total.as_nanos() as u64,
+            bytes_sent: result.bytes_sent,
+            response_size: result.response_size,
+        }
+    }
+
+    /// View as raw bytes for direct memory copy.
+    pub fn as_bytes(&self) -> &[u8; 40] {
+        // Safety: RawResult is repr(C) with no uninitialized padding
+        // (_pad is explicitly zeroed in from_execution_result).
+        unsafe { &*(self as *const Self as *const [u8; 40]) }
+    }
+}
+
+/// Variable-length response data, postcard-encoded after `RawResult`.
+///
+/// Only serialized when `ResponseConfig` indicates the plugin needs it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponseVarData {
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    #[serde(default)]
+    pub body: Option<Vec<u8>>,
 }
 
 /// Serializable version of TcpRequestSpec returned by plugins.

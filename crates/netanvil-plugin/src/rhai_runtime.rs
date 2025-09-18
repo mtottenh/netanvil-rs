@@ -14,7 +14,7 @@ use std::marker::PhantomData;
 use rhai::{Dynamic, Engine, Map, Scope, AST};
 
 use crate::error::{PluginError, Result};
-use crate::types::{PluginHttpRequestSpec, PluginRequestContext};
+use crate::types::{PluginHttpRequestSpec, PluginRequestContext, ResponseConfig};
 
 /// A RequestGenerator backed by a Rhai script.
 ///
@@ -26,6 +26,7 @@ pub struct RhaiGenerator<S: FromRhaiPlugin> {
     ast: AST,
     scope: Scope<'static>,
     has_on_response: bool,
+    response_cfg: ResponseConfig,
     _phantom: PhantomData<S>,
 }
 
@@ -52,11 +53,39 @@ impl<S: FromRhaiPlugin> RhaiGenerator<S> {
 
         let has_on_response = ast.iter_functions().any(|f| f.name == "on_response");
 
+        // Detect response_config() for what data the plugin needs.
+        let response_cfg = if has_on_response {
+            let has_config = ast.iter_functions().any(|f| f.name == "response_config");
+            if has_config {
+                let result: std::result::Result<Map, _> =
+                    engine.call_fn(&mut scope, &ast, "response_config", ());
+                if let Ok(map) = result {
+                    ResponseConfig {
+                        headers: map
+                            .get("headers")
+                            .and_then(|v| v.as_bool().ok())
+                            .unwrap_or(false),
+                        body: map
+                            .get("body")
+                            .and_then(|v| v.as_bool().ok())
+                            .unwrap_or(false),
+                    }
+                } else {
+                    ResponseConfig::on_response_default()
+                }
+            } else {
+                ResponseConfig::on_response_default()
+            }
+        } else {
+            ResponseConfig::default()
+        };
+
         Ok(Self {
             engine,
             ast,
             scope,
             has_on_response,
+            response_cfg,
             _phantom: PhantomData,
         })
     }

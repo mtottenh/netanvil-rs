@@ -23,7 +23,9 @@ use wasmtime_wasi::WasiCtxBuilder;
 use std::marker::PhantomData;
 
 use crate::error::{PluginError, Result};
-use crate::types::{FromPostcard, PluginExecutionResult, RawContext};
+use crate::types::{
+    FromPostcard, RawContext, RawResult, ResponseConfig, ResponseVarData, RAW_RESULT_HAS_VAR_DATA,
+};
 
 /// A RequestGenerator backed by a WASM module.
 ///
@@ -42,6 +44,11 @@ pub struct WasmGenerator<S: FromPostcard> {
     fn_update_targets: TypedFunc<i32, i32>,
     /// Optional `on_response(input_len: i32) -> i32` WASM export.
     fn_on_response: Option<TypedFunc<i32, i32>>,
+    /// What response data the plugin wants (from `response_config()` export).
+    response_cfg: ResponseConfig,
+    /// Pre-allocated host buffer for building response payloads.
+    /// Reused per call — after warmup, no allocations occur.
+    response_buf: Vec<u8>,
     _phantom: PhantomData<S>,
 }
 
@@ -90,6 +97,23 @@ impl<S: FromPostcard> WasmGenerator<S> {
             .get_typed_func::<i32, i32>(&mut store, "on_response")
             .ok();
 
+        // Probe for response_config() export to determine what data the plugin needs.
+        // Returns a flags byte: bit 0 = headers, bit 1 = body.
+        let response_cfg = if fn_on_response.is_some() {
+            if let Ok(config_fn) = instance.get_typed_func::<(), i32>(&mut store, "response_config")
+            {
+                let flags = config_fn.call(&mut store, ()).unwrap_or(0x01); // default: headers only
+                ResponseConfig {
+                    headers: flags & 0x01 != 0,
+                    body: flags & 0x02 != 0,
+                }
+            } else {
+                ResponseConfig::on_response_default()
+            }
+        } else {
+            ResponseConfig::default()
+        };
+
         let mut gen = Self {
             store,
             memory,
@@ -98,6 +122,8 @@ impl<S: FromPostcard> WasmGenerator<S> {
             fn_get_output_ptr,
             fn_update_targets,
             fn_on_response,
+            response_cfg,
+            response_buf: Vec::with_capacity(4096),
             _phantom: PhantomData,
         };
 
@@ -170,13 +196,65 @@ impl<S: FromPostcard> netanvil_types::RequestGenerator for WasmGenerator<S> {
         if self.fn_on_response.is_none() {
             return;
         }
-        let plugin_result = PluginExecutionResult::from_result(result);
-        if let Ok(bytes) = postcard::to_allocvec(&plugin_result) {
-            if self.write_to_guest(&bytes).is_ok() {
-                // fn_on_response is Copy (TypedFunc is Copy), so we can reborrow self.
-                let func = self.fn_on_response.clone().unwrap();
-                let _ = func.call(&mut self.store, bytes.len() as i32);
+
+        // Build response into pre-allocated buffer (amortized zero alloc after warmup).
+        self.response_buf.clear();
+
+        // Fixed fields: 40-byte repr(C) struct, zero serialization.
+        let mut raw = RawResult::from_execution_result(result);
+
+        // Variable data: only include what response_config() requested.
+        let needs_var = result.error.is_some()
+            || (self.response_cfg.headers && result.response_headers.is_some())
+            || (self.response_cfg.body && result.response_body.is_some());
+
+        if needs_var {
+            raw.flags |= RAW_RESULT_HAS_VAR_DATA;
+            let var_data = ResponseVarData {
+                error: result.error.as_ref().map(|e| e.to_string()),
+                headers: if self.response_cfg.headers {
+                    result.response_headers.clone().unwrap_or_default()
+                } else {
+                    vec![]
+                },
+                body: if self.response_cfg.body {
+                    result.response_body.as_ref().map(|b| b.to_vec())
+                } else {
+                    None
+                },
+            };
+
+            self.response_buf.extend_from_slice(raw.as_bytes());
+            if let Ok(var_bytes) = postcard::to_allocvec(&var_data) {
+                self.response_buf.extend_from_slice(&var_bytes);
             }
+        } else {
+            // Common fast path: just the 40-byte fixed struct, no variable data.
+            self.response_buf.extend_from_slice(raw.as_bytes());
+        }
+
+        // Write to guest memory — inline to avoid borrow conflict with self.response_buf.
+        let buf_len = self.response_buf.len();
+        let write_ok = {
+            let ptr = self
+                .fn_get_input_ptr
+                .call(&mut self.store, ())
+                .map(|p| p as usize);
+            if let Ok(ptr) = ptr {
+                let mem = self.memory.data_mut(&mut self.store);
+                if ptr + buf_len <= mem.len() {
+                    mem[ptr..ptr + buf_len].copy_from_slice(&self.response_buf);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if write_ok {
+            let func = self.fn_on_response.clone().unwrap();
+            let _ = func.call(&mut self.store, buf_len as i32);
         }
     }
 

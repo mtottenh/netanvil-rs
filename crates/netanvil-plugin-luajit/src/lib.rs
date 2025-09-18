@@ -11,7 +11,7 @@ use mlua::prelude::*;
 
 use netanvil_plugin::error::{PluginError, Result};
 use netanvil_plugin::hybrid::{GeneratorConfig, WeightedPattern};
-use netanvil_plugin::types::{PluginHttpRequestSpec, PluginRequestContext};
+use netanvil_plugin::types::{PluginHttpRequestSpec, PluginRequestContext, ResponseConfig};
 
 /// A RequestGenerator backed by LuaJIT.
 ///
@@ -26,8 +26,14 @@ pub struct LuaJitGenerator<S: FromLuaPlugin> {
     lua: Lua,
     /// Persistent context table — reused every call to avoid GC allocation.
     ctx_table: LuaTable,
+    /// Persistent result table — reused every on_response call to avoid GC allocation.
+    result_table: Option<LuaTable>,
+    /// Persistent headers sub-table inside result_table.
+    headers_table: Option<LuaTable>,
     /// Whether the script defines an `on_response(result)` function.
     has_on_response: bool,
+    /// What response data the plugin needs.
+    response_cfg: ResponseConfig,
     _phantom: PhantomData<S>,
 }
 
@@ -69,40 +75,121 @@ impl<S: FromLuaPlugin> LuaJitGenerator<S> {
 
         let has_on_response = lua.globals().get::<LuaFunction>("on_response").is_ok();
 
+        // Detect response_config() for what data the plugin needs.
+        let response_cfg = if has_on_response {
+            if let Ok(config_fn) = lua.globals().get::<LuaFunction>("response_config") {
+                if let Ok(table) = config_fn.call::<LuaTable>(()) {
+                    ResponseConfig {
+                        headers: table.get("headers").unwrap_or(false),
+                        body: table.get("body").unwrap_or(false),
+                    }
+                } else {
+                    ResponseConfig::on_response_default()
+                }
+            } else {
+                ResponseConfig::on_response_default()
+            }
+        } else {
+            ResponseConfig::default()
+        };
+
+        // Pre-allocate persistent result table (like ctx_table) — reused per on_response call.
+        let (result_table, headers_table) = if has_on_response {
+            let rt = lua
+                .create_table()
+                .map_err(|e| PluginError::Lua(format!("create result table: {e}")))?;
+            rt.set("request_id", 0u64)
+                .map_err(|e| PluginError::Lua(format!("init result table: {e}")))?;
+            rt.set("status", LuaNil)
+                .map_err(|e| PluginError::Lua(format!("init result table: {e}")))?;
+            rt.set("latency_ms", 0.0)
+                .map_err(|e| PluginError::Lua(format!("init result table: {e}")))?;
+            rt.set("bytes_sent", 0u64)
+                .map_err(|e| PluginError::Lua(format!("init result table: {e}")))?;
+            rt.set("response_size", 0u64)
+                .map_err(|e| PluginError::Lua(format!("init result table: {e}")))?;
+
+            let ht = if response_cfg.headers {
+                let ht = lua
+                    .create_table()
+                    .map_err(|e| PluginError::Lua(format!("create headers table: {e}")))?;
+                rt.set("headers", ht.clone())
+                    .map_err(|e| PluginError::Lua(format!("set headers table: {e}")))?;
+                Some(ht)
+            } else {
+                None
+            };
+
+            (Some(rt), ht)
+        } else {
+            (None, None)
+        };
+
         Ok(Self {
             lua,
             ctx_table,
+            result_table,
+            headers_table,
             has_on_response,
+            response_cfg,
             _phantom: PhantomData,
         })
     }
 
-    /// Build a Lua table from an ExecutionResult for the on_response callback.
-    fn result_to_lua_table(&self, result: &netanvil_types::ExecutionResult) -> LuaResult<LuaTable> {
-        let t = self.lua.create_table()?;
-        t.set("request_id", result.request_id)?;
-        t.set("status", result.status)?;
-        t.set("latency_ms", result.timing.total.as_secs_f64() * 1000.0)?;
-        t.set("bytes_sent", result.bytes_sent)?;
-        t.set("response_size", result.response_size)?;
+    /// Update the persistent result table with new values (minimal allocation).
+    fn update_result_table(&self, result: &netanvil_types::ExecutionResult) {
+        let Some(ref rt) = self.result_table else {
+            return;
+        };
 
-        if let Some(ref err) = result.error {
-            t.set("error", err.to_string())?;
+        // Fixed fields: mutate existing table values (no allocation).
+        rt.set("request_id", result.request_id)
+            .expect("result table set failed");
+        rt.set("status", result.status)
+            .expect("result table set failed");
+        rt.set("latency_ms", result.timing.total.as_secs_f64() * 1000.0)
+            .expect("result table set failed");
+        rt.set("bytes_sent", result.bytes_sent)
+            .expect("result table set failed");
+        rt.set("response_size", result.response_size)
+            .expect("result table set failed");
+
+        // Error: string allocation only when present (unavoidable).
+        match &result.error {
+            Some(err) => rt.set("error", err.to_string()).expect("set error"),
+            None => rt.set("error", LuaNil).expect("clear error"),
         }
 
-        if let Some(ref headers) = result.response_headers {
-            let ht = self.lua.create_table()?;
-            for (k, v) in headers {
-                ht.set(k.as_str(), v.as_str())?;
+        // Headers: reuse persistent sub-table, clear and repopulate.
+        if self.response_cfg.headers {
+            if let Some(ref ht) = self.headers_table {
+                // Clear existing entries
+                let keys: Vec<String> = ht
+                    .pairs::<String, LuaValue>()
+                    .filter_map(|r| r.ok().map(|(k, _)| k))
+                    .collect();
+                for key in keys {
+                    let _ = ht.set(key, LuaNil);
+                }
+                // Populate from response
+                if let Some(ref headers) = result.response_headers {
+                    for (k, v) in headers {
+                        let _ = ht.set(k.as_str(), v.as_str());
+                    }
+                }
             }
-            t.set("headers", ht)?;
         }
 
-        if let Some(ref body) = result.response_body {
-            t.set("body", self.lua.create_string(body.as_ref())?)?;
+        // Body: string allocation when present (unavoidable for Lua strings).
+        if self.response_cfg.body {
+            if let Some(ref body) = result.response_body {
+                if let Ok(s) = self.lua.create_string(body.as_ref()) {
+                    let _ = rt.set("body", s);
+                }
+            } else {
+                let _ = rt.set("body", LuaNil);
+            }
         }
-
-        Ok(t)
     }
 
     /// Update the persistent context table with new values (no allocation).
@@ -150,9 +237,11 @@ impl<S: FromLuaPlugin> netanvil_types::RequestGenerator for LuaJitGenerator<S> {
         if !self.has_on_response {
             return;
         }
+        // Update persistent result table (mutate, don't allocate new table).
+        self.update_result_table(result);
         if let Ok(on_resp) = self.lua.globals().get::<LuaFunction>("on_response") {
-            if let Ok(table) = self.result_to_lua_table(result) {
-                let _ = on_resp.call::<()>(table);
+            if let Some(ref rt) = self.result_table {
+                let _ = on_resp.call::<()>(rt.clone());
             }
         }
     }

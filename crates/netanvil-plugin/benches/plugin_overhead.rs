@@ -107,7 +107,8 @@ fn bench_wasm(c: &mut Criterion) {
     let wasm_bytes = include_bytes!("../testdata/netanvil_guest_wasm.wasm");
 
     let (engine, module) = compile_wasm_module(wasm_bytes).expect("WASM compile failed");
-    let mut gen = WasmGenerator::new(&engine, &module, &targets()).expect("WASM init failed");
+    let mut gen: WasmGenerator<netanvil_types::HttpRequestSpec> =
+        WasmGenerator::new(&engine, &module, &targets()).expect("WASM init failed");
     let mut id = 0u64;
 
     c.bench_function("wasm_generate_json", |b| {
@@ -121,7 +122,8 @@ fn bench_wasm(c: &mut Criterion) {
 
 fn bench_luajit(c: &mut Criterion) {
     let script = include_str!("../examples/scripts/generator.lua");
-    let mut gen = LuaJitGenerator::new(script, &targets()).expect("LuaJIT init failed");
+    let mut gen: LuaJitGenerator<netanvil_types::HttpRequestSpec> =
+        LuaJitGenerator::new(script, &targets()).expect("LuaJIT init failed");
     let mut id = 0u64;
 
     c.bench_function("luajit_generate", |b| {
@@ -135,7 +137,8 @@ fn bench_luajit(c: &mut Criterion) {
 
 fn bench_rhai(c: &mut Criterion) {
     let script = include_str!("../examples/scripts/generator.rhai");
-    let mut gen = RhaiGenerator::new(script, &targets()).expect("Rhai init failed");
+    let mut gen: RhaiGenerator<netanvil_types::HttpRequestSpec> =
+        RhaiGenerator::new(script, &targets()).expect("Rhai init failed");
     let mut id = 0u64;
 
     c.bench_function("rhai_generate", |b| {
@@ -198,21 +201,28 @@ fn bench_instance_creation(c: &mut Criterion) {
 
     group.bench_function("wasm_instance", |b| {
         b.iter(|| {
-            black_box(WasmGenerator::new(&engine, &module, &tgts).unwrap());
+            black_box(
+                WasmGenerator::<netanvil_types::HttpRequestSpec>::new(&engine, &module, &tgts)
+                    .unwrap(),
+            );
         })
     });
 
     let lua_script = include_str!("../examples/scripts/generator.lua");
     group.bench_function("luajit_instance", |b| {
         b.iter(|| {
-            black_box(LuaJitGenerator::new(lua_script, &tgts).unwrap());
+            black_box(
+                LuaJitGenerator::<netanvil_types::HttpRequestSpec>::new(lua_script, &tgts).unwrap(),
+            );
         })
     });
 
     let rhai_script = include_str!("../examples/scripts/generator.rhai");
     group.bench_function("rhai_instance", |b| {
         b.iter(|| {
-            black_box(RhaiGenerator::new(rhai_script, &tgts).unwrap());
+            black_box(
+                RhaiGenerator::<netanvil_types::HttpRequestSpec>::new(rhai_script, &tgts).unwrap(),
+            );
         })
     });
 
@@ -239,7 +249,8 @@ fn bench_throughput(c: &mut Criterion) {
 
     let wasm_bytes = include_bytes!("../testdata/netanvil_guest_wasm.wasm");
     let (engine, module) = compile_wasm_module(wasm_bytes).unwrap();
-    let mut wasm_gen = WasmGenerator::new(&engine, &module, &targets()).unwrap();
+    let mut wasm_gen: WasmGenerator<netanvil_types::HttpRequestSpec> =
+        WasmGenerator::new(&engine, &module, &targets()).unwrap();
     group.bench_function("wasm_1000", |b| {
         b.iter(|| {
             for i in 0..1000u64 {
@@ -250,7 +261,8 @@ fn bench_throughput(c: &mut Criterion) {
     });
 
     let lua_script = include_str!("../examples/scripts/generator.lua");
-    let mut lua_gen = LuaJitGenerator::new(lua_script, &targets()).unwrap();
+    let mut lua_gen: LuaJitGenerator<netanvil_types::HttpRequestSpec> =
+        LuaJitGenerator::new(lua_script, &targets()).unwrap();
     group.bench_function("luajit_1000", |b| {
         b.iter(|| {
             for i in 0..1000u64 {
@@ -261,7 +273,8 @@ fn bench_throughput(c: &mut Criterion) {
     });
 
     let rhai_script = include_str!("../examples/scripts/generator.rhai");
-    let mut rhai_gen = RhaiGenerator::new(rhai_script, &targets()).unwrap();
+    let mut rhai_gen: RhaiGenerator<netanvil_types::HttpRequestSpec> =
+        RhaiGenerator::new(rhai_script, &targets()).unwrap();
     group.bench_function("rhai_1000", |b| {
         b.iter(|| {
             for i in 0..1000u64 {

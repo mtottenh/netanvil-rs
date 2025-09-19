@@ -29,3 +29,7 @@ netanvil-plugin-luajit = { workspace = true }
 [[bench]]
 name = "plugin_overhead"
 harness = false
+
+[[bench]]
+name = "response_overhead"
+harness = false

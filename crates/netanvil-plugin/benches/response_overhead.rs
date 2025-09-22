@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
+use netanvil_plugin::wasm::{compile_wasm_module, WasmGenerator};
 use netanvil_plugin_luajit::LuaJitGenerator;
 use netanvil_types::{
     ExecutionResult, HttpRequestSpec, RequestContext, RequestGenerator, TimingBreakdown,
@@ -114,6 +115,37 @@ fn bench_on_response_percall(c: &mut Criterion) {
         })
     });
 
+    // WASM — with on_response + response_config (headers only)
+    let wasm_bytes = include_bytes!("../testdata/netanvil_guest_wasm_response.wasm");
+    let (engine, module) = compile_wasm_module(wasm_bytes).expect("WASM compile");
+    let mut wasm_gen: WasmGenerator<HttpRequestSpec> =
+        WasmGenerator::new(&engine, &module, &targets()).expect("WASM init");
+
+    assert!(
+        wasm_gen.wants_responses(),
+        "WASM guest should export on_response"
+    );
+
+    group.bench_function("wasm_with_headers", |b| {
+        let mut id = 0u64;
+        b.iter(|| {
+            id += 1;
+            let result = make_result(id, true);
+            black_box(wasm_gen.on_response(&result));
+        })
+    });
+
+    // WASM — minimal response (no headers in result, but flags say yes)
+    // This benchmarks the RawResult-only fast path when there's no var data.
+    group.bench_function("wasm_no_var_data", |b| {
+        let mut id = 0u64;
+        b.iter(|| {
+            id += 1;
+            let result = make_result(id, false); // no headers in result
+            black_box(wasm_gen.on_response(&result));
+        })
+    });
+
     // Rhai — minimal
     let rhai_script = r#"
         let ok_count = 0;
@@ -194,6 +226,40 @@ fn bench_generate_vs_generate_with_response(c: &mut Criterion) {
         })
     });
 
+    // WASM — generate only (no on_response)
+    let wasm_bytes_plain = include_bytes!("../testdata/netanvil_guest_wasm.wasm");
+    let (engine_plain, module_plain) = compile_wasm_module(wasm_bytes_plain).unwrap();
+    let mut wasm_gen_only: WasmGenerator<HttpRequestSpec> =
+        WasmGenerator::new(&engine_plain, &module_plain, &targets()).unwrap();
+
+    assert!(!wasm_gen_only.wants_responses());
+
+    group.bench_function("wasm_generate_only_1000", |b| {
+        b.iter(|| {
+            for i in 0..1000u64 {
+                let ctx = make_context(i);
+                black_box(wasm_gen_only.generate(&ctx));
+            }
+        })
+    });
+
+    // WASM — generate + on_response (with headers)
+    let wasm_bytes_resp = include_bytes!("../testdata/netanvil_guest_wasm_response.wasm");
+    let (engine_resp, module_resp) = compile_wasm_module(wasm_bytes_resp).unwrap();
+    let mut wasm_gen_resp: WasmGenerator<HttpRequestSpec> =
+        WasmGenerator::new(&engine_resp, &module_resp, &targets()).unwrap();
+
+    group.bench_function("wasm_generate_plus_on_response_headers_1000", |b| {
+        b.iter(|| {
+            for i in 0..1000u64 {
+                let ctx = make_context(i);
+                black_box(wasm_gen_resp.generate(&ctx));
+                let result = make_result(i, true);
+                black_box(wasm_gen_resp.on_response(&result));
+            }
+        })
+    });
+
     group.finish();
 }
 
@@ -219,6 +285,26 @@ fn bench_instance_creation_response(c: &mut Criterion) {
     group.bench_function("luajit_with_on_response", |b| {
         b.iter(|| {
             black_box(LuaJitGenerator::<HttpRequestSpec>::new(resp_script, &tgts).unwrap());
+        })
+    });
+
+    // WASM — module WITHOUT on_response (baseline)
+    let wasm_plain = include_bytes!("../testdata/netanvil_guest_wasm.wasm");
+    let (eng_plain, mod_plain) = compile_wasm_module(wasm_plain).unwrap();
+    group.bench_function("wasm_no_on_response", |b| {
+        b.iter(|| {
+            black_box(
+                WasmGenerator::<HttpRequestSpec>::new(&eng_plain, &mod_plain, &tgts).unwrap(),
+            );
+        })
+    });
+
+    // WASM — module WITH on_response + response_config
+    let wasm_resp = include_bytes!("../testdata/netanvil_guest_wasm_response.wasm");
+    let (eng_resp, mod_resp) = compile_wasm_module(wasm_resp).unwrap();
+    group.bench_function("wasm_with_on_response", |b| {
+        b.iter(|| {
+            black_box(WasmGenerator::<HttpRequestSpec>::new(&eng_resp, &mod_resp, &tgts).unwrap());
         })
     });
 

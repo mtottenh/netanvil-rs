@@ -329,6 +329,49 @@ impl FromPostcard for netanvil_types::DnsRequestSpec {
     }
 }
 
+/// Serializable UDP datagram spec returned by plugins.
+///
+/// Plugins only control the payload — target and response settings come from
+/// test configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginUdpSpec {
+    /// Payload bytes to send.
+    #[serde(default)]
+    pub payload: Vec<u8>,
+    /// Payload as a UTF-8 string (alternative to raw bytes).
+    /// If both `payload` and `payload_str` are set, `payload_str` takes priority.
+    #[serde(default)]
+    pub payload_str: Option<String>,
+}
+
+impl FromPostcard for netanvil_types::UdpRequestSpec {
+    fn from_postcard_bytes(bytes: &[u8]) -> std::result::Result<Self, crate::error::PluginError> {
+        let plugin_spec: PluginUdpSpec = postcard::from_bytes(bytes)
+            .map_err(|e| crate::error::PluginError::InvalidResponse(format!("postcard: {e}")))?;
+
+        let payload = match plugin_spec.payload_str {
+            Some(s) => s.into_bytes(),
+            None => plugin_spec.payload,
+        };
+
+        Ok(netanvil_types::UdpRequestSpec {
+            target: "0.0.0.0:0".parse().unwrap(),
+            payload,
+            expect_response: true,
+            response_max_bytes: 65536,
+        })
+    }
+
+    fn fallback() -> Self {
+        netanvil_types::UdpRequestSpec {
+            target: "127.0.0.1:0".parse().unwrap(),
+            payload: vec![],
+            expect_response: true,
+            response_max_bytes: 65536,
+        }
+    }
+}
+
 impl FromPostcard for netanvil_types::HttpRequestSpec {
     fn from_postcard_bytes(bytes: &[u8]) -> std::result::Result<Self, crate::error::PluginError> {
         let plugin_spec: PluginHttpRequestSpec = postcard::from_bytes(bytes)
@@ -343,5 +386,49 @@ impl FromPostcard for netanvil_types::HttpRequestSpec {
             headers: vec![],
             body: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_postcard_invalid_bytes_returns_error() {
+        let bad = &[0xFF, 0xFF, 0xFF];
+        assert!(netanvil_types::HttpRequestSpec::from_postcard_bytes(bad).is_err());
+        assert!(netanvil_types::TcpRequestSpec::from_postcard_bytes(bad).is_err());
+        assert!(netanvil_types::DnsRequestSpec::from_postcard_bytes(bad).is_err());
+        assert!(netanvil_types::UdpRequestSpec::from_postcard_bytes(bad).is_err());
+    }
+
+    #[test]
+    fn from_postcard_udp_with_payload_str() {
+        let spec = PluginUdpSpec {
+            payload: vec![],
+            payload_str: Some("HELLO".into()),
+        };
+        let bytes = postcard::to_allocvec(&spec).unwrap();
+        let result = netanvil_types::UdpRequestSpec::from_postcard_bytes(&bytes).unwrap();
+        assert_eq!(result.payload, b"HELLO");
+        assert!(result.expect_response);
+    }
+
+    #[test]
+    fn from_postcard_udp_with_raw_payload() {
+        let spec = PluginUdpSpec {
+            payload: vec![0xCA, 0xFE],
+            payload_str: None,
+        };
+        let bytes = postcard::to_allocvec(&spec).unwrap();
+        let result = netanvil_types::UdpRequestSpec::from_postcard_bytes(&bytes).unwrap();
+        assert_eq!(result.payload, vec![0xCA, 0xFE]);
+    }
+
+    #[test]
+    fn from_postcard_udp_fallback() {
+        let fallback = netanvil_types::UdpRequestSpec::fallback();
+        assert!(fallback.payload.is_empty());
+        assert!(fallback.expect_response);
     }
 }

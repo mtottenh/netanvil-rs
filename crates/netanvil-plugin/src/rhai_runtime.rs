@@ -229,3 +229,110 @@ impl FromRhaiPlugin for netanvil_types::HttpRequestSpec {
         }
     }
 }
+
+impl FromRhaiPlugin for netanvil_types::TcpRequestSpec {
+    fn from_rhai_map(map: &Map) -> std::result::Result<Self, PluginError> {
+        let payload = map
+            .get("payload")
+            .and_then(|v| v.clone().into_string().ok())
+            .map(|s| s.into_bytes())
+            .unwrap_or_default();
+
+        Ok(netanvil_types::TcpRequestSpec {
+            target: "0.0.0.0:0".parse().unwrap(),
+            payload,
+            framing: netanvil_types::TcpFraming::Raw,
+            expect_response: true,
+            response_max_bytes: 65536,
+            mode: netanvil_types::TcpTestMode::Echo,
+            request_size: 0,
+            response_size: 0,
+        })
+    }
+
+    fn fallback() -> Self {
+        netanvil_types::TcpRequestSpec {
+            target: "127.0.0.1:0".parse().unwrap(),
+            payload: vec![],
+            framing: netanvil_types::TcpFraming::Raw,
+            expect_response: true,
+            response_max_bytes: 65536,
+            mode: netanvil_types::TcpTestMode::Echo,
+            request_size: 0,
+            response_size: 0,
+        }
+    }
+}
+
+impl FromRhaiPlugin for netanvil_types::DnsRequestSpec {
+    fn from_rhai_map(map: &Map) -> std::result::Result<Self, PluginError> {
+        let query_name = map
+            .get("query_name")
+            .and_then(|v| v.clone().into_string().ok())
+            .ok_or_else(|| PluginError::InvalidResponse("missing 'query_name'".into()))?;
+
+        let query_type_str = map
+            .get("query_type")
+            .and_then(|v| v.clone().into_string().ok())
+            .unwrap_or_else(|| "A".into());
+
+        let recursion = map
+            .get("recursion")
+            .and_then(|v| v.as_bool().ok())
+            .unwrap_or(true);
+
+        let dnssec = map
+            .get("dnssec")
+            .and_then(|v| v.as_bool().ok())
+            .unwrap_or(false);
+
+        let query_type = netanvil_types::DnsQueryType::from_str_name(&query_type_str)
+            .unwrap_or(netanvil_types::DnsQueryType::A);
+
+        Ok(netanvil_types::DnsRequestSpec {
+            server: "0.0.0.0:0".parse().unwrap(),
+            query_name,
+            query_type,
+            recursion,
+            dnssec,
+            txid: 0,
+        })
+    }
+
+    fn fallback() -> Self {
+        netanvil_types::DnsRequestSpec {
+            server: "127.0.0.1:53".parse().unwrap(),
+            query_name: "error.invalid".into(),
+            query_type: netanvil_types::DnsQueryType::A,
+            recursion: true,
+            dnssec: false,
+            txid: 0,
+        }
+    }
+}
+
+impl FromRhaiPlugin for netanvil_types::UdpRequestSpec {
+    fn from_rhai_map(map: &Map) -> std::result::Result<Self, PluginError> {
+        let payload = map
+            .get("payload")
+            .and_then(|v| v.clone().into_string().ok())
+            .map(|s| s.into_bytes())
+            .unwrap_or_default();
+
+        Ok(netanvil_types::UdpRequestSpec {
+            target: "0.0.0.0:0".parse().unwrap(),
+            payload,
+            expect_response: true,
+            response_max_bytes: 65536,
+        })
+    }
+
+    fn fallback() -> Self {
+        netanvil_types::UdpRequestSpec {
+            target: "127.0.0.1:0".parse().unwrap(),
+            payload: vec![],
+            expect_response: true,
+            response_max_bytes: 65536,
+        }
+    }
+}

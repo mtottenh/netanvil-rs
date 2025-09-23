@@ -392,6 +392,34 @@ impl FromLuaPlugin for netanvil_types::DnsRequestSpec {
     }
 }
 
+impl FromLuaPlugin for netanvil_types::UdpRequestSpec {
+    fn from_lua_table(table: &LuaTable) -> std::result::Result<Self, PluginError> {
+        let payload: Vec<u8> = if let Ok(s) = table.get::<String>("payload") {
+            s.into_bytes()
+        } else if let Ok(LuaValue::String(s)) = table.get::<LuaValue>("payload") {
+            s.as_bytes().to_vec()
+        } else {
+            vec![]
+        };
+
+        Ok(netanvil_types::UdpRequestSpec {
+            target: "0.0.0.0:0".parse().unwrap(),
+            payload,
+            expect_response: true,
+            response_max_bytes: 65536,
+        })
+    }
+
+    fn fallback() -> Self {
+        netanvil_types::UdpRequestSpec {
+            target: "127.0.0.1:0".parse().unwrap(),
+            payload: vec![],
+            expect_response: true,
+            response_max_bytes: 65536,
+        }
+    }
+}
+
 /// Parse a Lua hybrid configuration script and return a `GeneratorConfig`.
 ///
 /// The script must define a `configure()` function returning a table with:

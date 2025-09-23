@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use netanvil_core::GeneratorFactory;
+use netanvil_core::{GenericGeneratorFactory, GeneratorFactory};
 use netanvil_types::{
     ConnectionPolicy, CountDistribution, PidTarget, PluginType, RateConfig, ResponseSignalConfig,
     SchedulerConfig, SignalAggregation, TargetMetric,
@@ -284,6 +284,156 @@ pub fn build_plugin_factory(
                         .expect("WASM generator init failed"),
                 )
                     as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
+            }))
+        }
+    }
+}
+
+/// Build a TCP generator factory from a plugin file.
+///
+/// Same pattern as [`build_plugin_factory`] but produces generators for
+/// [`netanvil_types::TcpRequestSpec`] instead of HTTP.
+pub fn build_tcp_plugin_factory(
+    plugin_path: &str,
+    plugin_type: PluginType,
+    targets: &[String],
+) -> Result<GenericGeneratorFactory<netanvil_types::TcpRequestSpec>> {
+    match plugin_type {
+        PluginType::Hybrid => {
+            anyhow::bail!("hybrid plugins are only supported for HTTP")
+        }
+        PluginType::Lua => {
+            let script = std::fs::read_to_string(plugin_path)
+                .context(format!("failed to read plugin: {plugin_path}"))?;
+            let targets = targets.to_vec();
+            Ok(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin_luajit::LuaJitGenerator::<netanvil_types::TcpRequestSpec>::new(
+                        &script, &targets,
+                    )
+                    .expect("LuaJIT generator init failed"),
+                )
+                    as Box<
+                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::TcpRequestSpec>,
+                    >
+            }))
+        }
+        PluginType::Wasm => {
+            let wasm_bytes = std::fs::read(plugin_path)
+                .context(format!("failed to read WASM module: {plugin_path}"))?;
+            let (engine, module) = netanvil_plugin::compile_wasm_module(&wasm_bytes)
+                .map_err(|e| anyhow::anyhow!("WASM compile error: {e}"))?;
+            let targets = targets.to_vec();
+            Ok(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin::WasmGenerator::<netanvil_types::TcpRequestSpec>::new(
+                        &engine, &module, &targets,
+                    )
+                    .expect("WASM generator init failed"),
+                )
+                    as Box<
+                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::TcpRequestSpec>,
+                    >
+            }))
+        }
+    }
+}
+
+/// Build a UDP generator factory from a plugin file.
+///
+/// Same pattern as [`build_plugin_factory`] but produces generators for
+/// [`netanvil_types::UdpRequestSpec`] instead of HTTP.
+pub fn build_udp_plugin_factory(
+    plugin_path: &str,
+    plugin_type: PluginType,
+    targets: &[String],
+) -> Result<GenericGeneratorFactory<netanvil_types::UdpRequestSpec>> {
+    match plugin_type {
+        PluginType::Hybrid => {
+            anyhow::bail!("hybrid plugins are only supported for HTTP")
+        }
+        PluginType::Lua => {
+            let script = std::fs::read_to_string(plugin_path)
+                .context(format!("failed to read plugin: {plugin_path}"))?;
+            let targets = targets.to_vec();
+            Ok(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin_luajit::LuaJitGenerator::<netanvil_types::UdpRequestSpec>::new(
+                        &script, &targets,
+                    )
+                    .expect("LuaJIT generator init failed"),
+                )
+                    as Box<
+                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::UdpRequestSpec>,
+                    >
+            }))
+        }
+        PluginType::Wasm => {
+            let wasm_bytes = std::fs::read(plugin_path)
+                .context(format!("failed to read WASM module: {plugin_path}"))?;
+            let (engine, module) = netanvil_plugin::compile_wasm_module(&wasm_bytes)
+                .map_err(|e| anyhow::anyhow!("WASM compile error: {e}"))?;
+            let targets = targets.to_vec();
+            Ok(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin::WasmGenerator::<netanvil_types::UdpRequestSpec>::new(
+                        &engine, &module, &targets,
+                    )
+                    .expect("WASM generator init failed"),
+                )
+                    as Box<
+                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::UdpRequestSpec>,
+                    >
+            }))
+        }
+    }
+}
+
+/// Build a DNS generator factory from a plugin file.
+///
+/// Same pattern as [`build_plugin_factory`] but produces generators for
+/// [`netanvil_types::DnsRequestSpec`] instead of HTTP.
+pub fn build_dns_plugin_factory(
+    plugin_path: &str,
+    plugin_type: PluginType,
+    targets: &[String],
+) -> Result<GenericGeneratorFactory<netanvil_types::DnsRequestSpec>> {
+    match plugin_type {
+        PluginType::Hybrid => {
+            anyhow::bail!("hybrid plugins are only supported for HTTP")
+        }
+        PluginType::Lua => {
+            let script = std::fs::read_to_string(plugin_path)
+                .context(format!("failed to read plugin: {plugin_path}"))?;
+            let targets = targets.to_vec();
+            Ok(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin_luajit::LuaJitGenerator::<netanvil_types::DnsRequestSpec>::new(
+                        &script, &targets,
+                    )
+                    .expect("LuaJIT generator init failed"),
+                )
+                    as Box<
+                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::DnsRequestSpec>,
+                    >
+            }))
+        }
+        PluginType::Wasm => {
+            let wasm_bytes = std::fs::read(plugin_path)
+                .context(format!("failed to read WASM module: {plugin_path}"))?;
+            let (engine, module) = netanvil_plugin::compile_wasm_module(&wasm_bytes)
+                .map_err(|e| anyhow::anyhow!("WASM compile error: {e}"))?;
+            let targets = targets.to_vec();
+            Ok(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin::WasmGenerator::<netanvil_types::DnsRequestSpec>::new(
+                        &engine, &module, &targets,
+                    )
+                    .expect("WASM generator init failed"),
+                )
+                    as Box<
+                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::DnsRequestSpec>,
+                    >
             }))
         }
     }

@@ -201,19 +201,29 @@ pub fn run(
             let max_conns = config.connections.max_connections_per_core;
 
             let gen_factory: netanvil_core::GenericGeneratorFactory<netanvil_tcp::TcpRequestSpec> =
-                Box::new(move |_core_id| {
-                    Box::new(
-                        netanvil_tcp::SimpleTcpGenerator::new(
-                            targets.clone(),
-                            tcp_payload.clone(),
-                            tcp_framing.clone(),
-                            expect_response,
+                if let Some(ref plugin_path) = plugin {
+                    let ptype = detect_plugin_type(plugin_path, &plugin_type)?;
+                    tracing::info!(
+                        plugin = %plugin_path,
+                        plugin_type = ?ptype,
+                        "loaded TCP plugin generator"
+                    );
+                    build_tcp_plugin_factory(plugin_path, ptype, &config.targets)?
+                } else {
+                    Box::new(move |_core_id| {
+                        Box::new(
+                            netanvil_tcp::SimpleTcpGenerator::new(
+                                targets.clone(),
+                                tcp_payload.clone(),
+                                tcp_framing.clone(),
+                                expect_response,
+                            )
+                            .with_mode(tcp_mode)
+                            .with_request_size(req_size)
+                            .with_response_size(resp_size),
                         )
-                        .with_mode(tcp_mode)
-                        .with_request_size(req_size)
-                        .with_response_size(resp_size),
-                    )
-                });
+                    })
+                };
             let trans_factory: netanvil_core::GenericTransformerFactory<netanvil_tcp::TcpRequestSpec> =
                 Box::new(|_| Box::new(netanvil_tcp::TcpNoopTransformer));
 
@@ -255,13 +265,23 @@ pub fn run(
             });
 
             let gen_factory: netanvil_core::GenericGeneratorFactory<netanvil_udp::UdpRequestSpec> =
-                Box::new(move |_core_id| {
-                    Box::new(netanvil_udp::SimpleUdpGenerator::new(
-                        targets.clone(),
-                        udp_payload.clone(),
-                        expect_response,
-                    ))
-                });
+                if let Some(ref plugin_path) = plugin {
+                    let ptype = detect_plugin_type(plugin_path, &plugin_type)?;
+                    tracing::info!(
+                        plugin = %plugin_path,
+                        plugin_type = ?ptype,
+                        "loaded UDP plugin generator"
+                    );
+                    build_udp_plugin_factory(plugin_path, ptype, &config.targets)?
+                } else {
+                    Box::new(move |_core_id| {
+                        Box::new(netanvil_udp::SimpleUdpGenerator::new(
+                            targets.clone(),
+                            udp_payload.clone(),
+                            expect_response,
+                        ))
+                    })
+                };
             let trans_factory: netanvil_core::GenericTransformerFactory<netanvil_udp::UdpRequestSpec> =
                 Box::new(|_| Box::new(netanvil_udp::UdpNoopTransformer));
 
@@ -299,14 +319,24 @@ pub fn run(
             config.error_status_threshold = 0;
 
             let gen_factory: netanvil_core::GenericGeneratorFactory<netanvil_dns::DnsRequestSpec> =
-                Box::new(move |_core_id| {
-                    Box::new(netanvil_dns::SimpleDnsGenerator::new(
-                        servers.clone(),
-                        domains.clone(),
-                        query_type,
-                        true,
-                    ))
-                });
+                if let Some(ref plugin_path) = plugin {
+                    let ptype = detect_plugin_type(plugin_path, &plugin_type)?;
+                    tracing::info!(
+                        plugin = %plugin_path,
+                        plugin_type = ?ptype,
+                        "loaded DNS plugin generator"
+                    );
+                    build_dns_plugin_factory(plugin_path, ptype, &config.targets)?
+                } else {
+                    Box::new(move |_core_id| {
+                        Box::new(netanvil_dns::SimpleDnsGenerator::new(
+                            servers.clone(),
+                            domains.clone(),
+                            query_type,
+                            true,
+                        ))
+                    })
+                };
             let trans_factory: netanvil_core::GenericTransformerFactory<netanvil_dns::DnsRequestSpec> =
                 Box::new(|_| Box::new(netanvil_dns::DnsNoopTransformer));
 

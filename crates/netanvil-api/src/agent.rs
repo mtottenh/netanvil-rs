@@ -354,19 +354,7 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
         (cmd_rx, agent.shared_state.clone())
     };
 
-    // Build plugin generator factory if config includes a plugin (HTTP only)
-    let plugin_factory = test_config.plugin.as_ref().and_then(|pc| {
-        match build_plugin_factory(pc, &test_config.targets) {
-            Ok(factory) => {
-                tracing::info!(plugin_type = ?pc.plugin_type, "loaded plugin generator");
-                Some(factory)
-            }
-            Err(e) => {
-                tracing::error!("failed to load plugin: {e}");
-                None
-            }
-        }
-    });
+    let plugin_config = test_config.plugin.clone();
 
     let inner = inner.clone();
     let request_timeout = test_config.connections.request_timeout;
@@ -394,6 +382,7 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
                     &framing,
                     request_size,
                     response_size,
+                    plugin_config.as_ref(),
                 ),
                 Some(netanvil_types::ProtocolConfig::Udp {
                     payload_hex,
@@ -405,6 +394,7 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
                     progress_state,
                     &payload_hex,
                     expect_response,
+                    plugin_config.as_ref(),
                 ),
                 Some(netanvil_types::ProtocolConfig::Dns {
                     domains,
@@ -418,9 +408,25 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
                     &domains,
                     &query_type,
                     recursion,
+                    plugin_config.as_ref(),
                 ),
                 None => {
                     // Default HTTP path
+                    let plugin_factory = plugin_config.as_ref().and_then(|pc| {
+                        match build_http_plugin_factory(pc, &test_config.targets) {
+                            Ok(factory) => {
+                                tracing::info!(
+                                    plugin_type = ?pc.plugin_type,
+                                    "loaded HTTP plugin generator"
+                                );
+                                Some(factory)
+                            }
+                            Err(e) => {
+                                tracing::error!("failed to load plugin: {e}");
+                                None
+                            }
+                        }
+                    });
                     run_http_test(
                         test_config,
                         request_timeout,
@@ -500,68 +506,71 @@ fn run_tcp_test(
     framing_str: &str,
     request_size: u16,
     response_size: u32,
+    plugin: Option<&netanvil_types::PluginConfig>,
 ) -> netanvil_types::Result<TestResult> {
     use netanvil_tcp::*;
 
-    let payload = decode_hex_bytes(payload_hex);
-    let mode = match mode_str {
-        "echo" => TcpTestMode::Echo,
-        "rr" => TcpTestMode::RR,
-        "sink" | "stream" => TcpTestMode::Sink,
-        "source" | "maerts" => TcpTestMode::Source,
-        "bidir" => TcpTestMode::Bidir,
-        _ => TcpTestMode::Echo,
-    };
-    let framing = if framing_str == "raw" || framing_str.is_empty() {
-        TcpFraming::Raw
-    } else if let Some(rest) = framing_str.strip_prefix("delimiter:") {
-        TcpFraming::Delimiter(rest.replace("\\r", "\r").replace("\\n", "\n").into_bytes())
-    } else if framing_str == "delimiter" {
-        TcpFraming::Delimiter(b"\r\n".to_vec())
-    } else if let Some(rest) = framing_str.strip_prefix("length-prefix:") {
-        TcpFraming::LengthPrefixed {
-            width: rest.parse().unwrap_or(4),
-        }
-    } else if let Some(rest) = framing_str.strip_prefix("fixed:") {
-        TcpFraming::FixedSize(rest.parse().unwrap_or(1024))
-    } else {
-        TcpFraming::Raw
-    };
-
-    let targets: Vec<std::net::SocketAddr> = config
-        .targets
-        .iter()
-        .filter_map(|t| {
-            t.strip_prefix("tcp://")
-                .and_then(|a| a.parse().ok())
-                .or_else(|| t.parse().ok())
-        })
-        .collect();
-
-    if targets.is_empty() {
-        return Err(netanvil_types::NetAnvilError::Other(
-            "no valid TCP targets".into(),
-        ));
-    }
-
-    let expect_response = mode == TcpTestMode::Echo || mode == TcpTestMode::RR;
     let max_conns = config.connections.max_connections_per_core;
     let policy = config.connections.connection_policy.clone();
 
     let gen_factory: netanvil_core::GenericGeneratorFactory<TcpRequestSpec> =
-        Box::new(move |_core_id| {
-            Box::new(
-                SimpleTcpGenerator::new(
-                    targets.clone(),
-                    payload.clone(),
-                    framing.clone(),
-                    expect_response,
+        if let Some(factory) = plugin.and_then(|pc| build_tcp_plugin_factory(pc, &config.targets)) {
+            factory
+        } else {
+            let payload = decode_hex_bytes(payload_hex);
+            let mode = match mode_str {
+                "echo" => TcpTestMode::Echo,
+                "rr" => TcpTestMode::RR,
+                "sink" | "stream" => TcpTestMode::Sink,
+                "source" | "maerts" => TcpTestMode::Source,
+                "bidir" => TcpTestMode::Bidir,
+                _ => TcpTestMode::Echo,
+            };
+            let framing = if framing_str == "raw" || framing_str.is_empty() {
+                TcpFraming::Raw
+            } else if let Some(rest) = framing_str.strip_prefix("delimiter:") {
+                TcpFraming::Delimiter(
+                    rest.replace("\\r", "\r").replace("\\n", "\n").into_bytes(),
                 )
-                .with_mode(mode)
-                .with_request_size(request_size)
-                .with_response_size(response_size),
-            )
-        });
+            } else if framing_str == "delimiter" {
+                TcpFraming::Delimiter(b"\r\n".to_vec())
+            } else if let Some(rest) = framing_str.strip_prefix("length-prefix:") {
+                TcpFraming::LengthPrefixed {
+                    width: rest.parse().unwrap_or(4),
+                }
+            } else if let Some(rest) = framing_str.strip_prefix("fixed:") {
+                TcpFraming::FixedSize(rest.parse().unwrap_or(1024))
+            } else {
+                TcpFraming::Raw
+            };
+
+            let targets: Vec<std::net::SocketAddr> = config
+                .targets
+                .iter()
+                .filter_map(|t| {
+                    t.strip_prefix("tcp://")
+                        .and_then(|a| a.parse().ok())
+                        .or_else(|| t.parse().ok())
+                })
+                .collect();
+
+            let expect_response = mode == TcpTestMode::Echo || mode == TcpTestMode::RR;
+
+            Box::new(move |_core_id| {
+                Box::new(
+                    SimpleTcpGenerator::new(
+                        targets.clone(),
+                        payload.clone(),
+                        framing.clone(),
+                        expect_response,
+                    )
+                    .with_mode(mode)
+                    .with_request_size(request_size)
+                    .with_response_size(response_size),
+                )
+            })
+        };
+
     let trans_factory: netanvil_core::GenericTransformerFactory<TcpRequestSpec> =
         Box::new(|_| Box::new(TcpNoopTransformer));
 
@@ -586,34 +595,34 @@ fn run_udp_test(
     progress_state: SharedState,
     payload_hex: &str,
     expect_response: bool,
+    plugin: Option<&netanvil_types::PluginConfig>,
 ) -> netanvil_types::Result<TestResult> {
     use netanvil_udp::*;
 
-    let payload = decode_hex_bytes(payload_hex);
-    let targets: Vec<std::net::SocketAddr> = config
-        .targets
-        .iter()
-        .filter_map(|t| {
-            t.strip_prefix("udp://")
-                .and_then(|a| a.parse().ok())
-                .or_else(|| t.parse().ok())
-        })
-        .collect();
-
-    if targets.is_empty() {
-        return Err(netanvil_types::NetAnvilError::Other(
-            "no valid UDP targets".into(),
-        ));
-    }
-
     let gen_factory: netanvil_core::GenericGeneratorFactory<UdpRequestSpec> =
-        Box::new(move |_core_id| {
-            Box::new(SimpleUdpGenerator::new(
-                targets.clone(),
-                payload.clone(),
-                expect_response,
-            ))
-        });
+        if let Some(factory) = plugin.and_then(|pc| build_udp_plugin_factory(pc, &config.targets)) {
+            factory
+        } else {
+            let payload = decode_hex_bytes(payload_hex);
+            let targets: Vec<std::net::SocketAddr> = config
+                .targets
+                .iter()
+                .filter_map(|t| {
+                    t.strip_prefix("udp://")
+                        .and_then(|a| a.parse().ok())
+                        .or_else(|| t.parse().ok())
+                })
+                .collect();
+
+            Box::new(move |_core_id| {
+                Box::new(SimpleUdpGenerator::new(
+                    targets.clone(),
+                    payload.clone(),
+                    expect_response,
+                ))
+            })
+        };
+
     let trans_factory: netanvil_core::GenericTransformerFactory<UdpRequestSpec> =
         Box::new(|_| Box::new(UdpNoopTransformer));
 
@@ -638,40 +647,41 @@ fn run_dns_test(
     domains_csv: &str,
     query_type_str: &str,
     recursion: bool,
+    plugin: Option<&netanvil_types::PluginConfig>,
 ) -> netanvil_types::Result<TestResult> {
     use netanvil_dns::*;
 
-    let domains: Vec<String> = domains_csv
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
-    let query_type = DnsQueryType::from_str_name(query_type_str).unwrap_or(DnsQueryType::A);
-
-    let targets: Vec<std::net::SocketAddr> = config
-        .targets
-        .iter()
-        .filter_map(|t| {
-            t.strip_prefix("dns://")
-                .and_then(|a| a.parse().ok())
-                .or_else(|| t.parse().ok())
-        })
-        .collect();
-
-    if targets.is_empty() {
-        return Err(netanvil_types::NetAnvilError::Other(
-            "no valid DNS targets".into(),
-        ));
-    }
-
     let gen_factory: netanvil_core::GenericGeneratorFactory<DnsRequestSpec> =
-        Box::new(move |_core_id| {
-            Box::new(SimpleDnsGenerator::new(
-                targets.clone(),
-                domains.clone(),
-                query_type,
-                recursion,
-            ))
-        });
+        if let Some(factory) = plugin.and_then(|pc| build_dns_plugin_factory(pc, &config.targets)) {
+            factory
+        } else {
+            let domains: Vec<String> = domains_csv
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+            let query_type =
+                DnsQueryType::from_str_name(query_type_str).unwrap_or(DnsQueryType::A);
+
+            let targets: Vec<std::net::SocketAddr> = config
+                .targets
+                .iter()
+                .filter_map(|t| {
+                    t.strip_prefix("dns://")
+                        .and_then(|a| a.parse().ok())
+                        .or_else(|| t.parse().ok())
+                })
+                .collect();
+
+            Box::new(move |_core_id| {
+                Box::new(SimpleDnsGenerator::new(
+                    targets.clone(),
+                    domains.clone(),
+                    query_type,
+                    recursion,
+                ))
+            })
+        };
+
     let trans_factory: netanvil_core::GenericTransformerFactory<DnsRequestSpec> =
         Box::new(|_| Box::new(DnsNoopTransformer));
 
@@ -710,8 +720,8 @@ fn json_response(status: u16, value: &impl serde::Serialize) -> HttpResponse {
     HttpResponse { status, body }
 }
 
-/// Build a generator factory from an embedded PluginConfig.
-fn build_plugin_factory(
+/// Build an HTTP generator factory from an embedded PluginConfig.
+fn build_http_plugin_factory(
     pc: &netanvil_types::PluginConfig,
     targets: &[String],
 ) -> Result<netanvil_core::GeneratorFactory, String> {
@@ -748,5 +758,119 @@ fn build_plugin_factory(
                 ) as Box<dyn RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
             }))
         }
+    }
+}
+
+/// Build a TCP generator factory from an embedded PluginConfig.
+fn build_tcp_plugin_factory(
+    pc: &netanvil_types::PluginConfig,
+    targets: &[String],
+) -> Option<netanvil_core::GenericGeneratorFactory<netanvil_types::TcpRequestSpec>> {
+    if pc.plugin_type == PluginType::Hybrid {
+        tracing::warn!("hybrid plugins are HTTP-only; ignoring for TCP");
+        return None;
+    }
+    match pc.plugin_type {
+        PluginType::Lua => {
+            let script = String::from_utf8(pc.source.clone()).ok()?;
+            let targets = targets.to_vec();
+            Some(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin_luajit::LuaJitGenerator::<netanvil_types::TcpRequestSpec>::new(
+                        &script, &targets,
+                    )
+                    .expect("LuaJIT init failed"),
+                )
+            }))
+        }
+        PluginType::Wasm => {
+            let (engine, module) = netanvil_plugin::compile_wasm_module(&pc.source).ok()?;
+            let targets = targets.to_vec();
+            Some(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin::WasmGenerator::<netanvil_types::TcpRequestSpec>::new(
+                        &engine, &module, &targets,
+                    )
+                    .expect("WASM init failed"),
+                )
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// Build a UDP generator factory from an embedded PluginConfig.
+fn build_udp_plugin_factory(
+    pc: &netanvil_types::PluginConfig,
+    targets: &[String],
+) -> Option<netanvil_core::GenericGeneratorFactory<netanvil_types::UdpRequestSpec>> {
+    if pc.plugin_type == PluginType::Hybrid {
+        tracing::warn!("hybrid plugins are HTTP-only; ignoring for UDP");
+        return None;
+    }
+    match pc.plugin_type {
+        PluginType::Lua => {
+            let script = String::from_utf8(pc.source.clone()).ok()?;
+            let targets = targets.to_vec();
+            Some(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin_luajit::LuaJitGenerator::<netanvil_types::UdpRequestSpec>::new(
+                        &script, &targets,
+                    )
+                    .expect("LuaJIT init failed"),
+                )
+            }))
+        }
+        PluginType::Wasm => {
+            let (engine, module) = netanvil_plugin::compile_wasm_module(&pc.source).ok()?;
+            let targets = targets.to_vec();
+            Some(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin::WasmGenerator::<netanvil_types::UdpRequestSpec>::new(
+                        &engine, &module, &targets,
+                    )
+                    .expect("WASM init failed"),
+                )
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// Build a DNS generator factory from an embedded PluginConfig.
+fn build_dns_plugin_factory(
+    pc: &netanvil_types::PluginConfig,
+    targets: &[String],
+) -> Option<netanvil_core::GenericGeneratorFactory<netanvil_types::DnsRequestSpec>> {
+    if pc.plugin_type == PluginType::Hybrid {
+        tracing::warn!("hybrid plugins are HTTP-only; ignoring for DNS");
+        return None;
+    }
+    match pc.plugin_type {
+        PluginType::Lua => {
+            let script = String::from_utf8(pc.source.clone()).ok()?;
+            let targets = targets.to_vec();
+            Some(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin_luajit::LuaJitGenerator::<netanvil_types::DnsRequestSpec>::new(
+                        &script, &targets,
+                    )
+                    .expect("LuaJIT init failed"),
+                )
+            }))
+        }
+        PluginType::Wasm => {
+            let (engine, module) = netanvil_plugin::compile_wasm_module(&pc.source).ok()?;
+            let targets = targets.to_vec();
+            Some(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin::WasmGenerator::<netanvil_types::DnsRequestSpec>::new(
+                        &engine, &module, &targets,
+                    )
+                    .expect("WASM init failed"),
+                )
+            }))
+        }
+        _ => None,
     }
 }

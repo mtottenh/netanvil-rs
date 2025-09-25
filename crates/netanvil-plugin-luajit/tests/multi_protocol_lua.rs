@@ -182,11 +182,14 @@ fn lua_dns_with_dnssec() {
 }
 
 #[test]
-fn lua_dns_defaults_to_a_record() {
+fn lua_dns_defaults_to_a_record_with_recursion() {
+    // When query_type and recursion are omitted, defaults should apply:
+    // query_type → A, recursion → true.
+    // This tests the nil-vs-false distinction for Lua booleans.
     let script = r#"
         function init(targets) end
         function generate(ctx)
-            return { query_name = "minimal.example.com", recursion = true }
+            return { query_name = "minimal.example.com" }
         end
     "#;
 
@@ -196,7 +199,27 @@ fn lua_dns_defaults_to_a_record() {
 
     let spec = gen.generate(&mock_ctx(1, 0));
     assert_eq!(spec.query_name, "minimal.example.com");
-    assert_eq!(spec.query_type, netanvil_types::DnsQueryType::A); // default when omitted
+    assert_eq!(spec.query_type, netanvil_types::DnsQueryType::A);
+    assert!(spec.recursion, "recursion should default to true when omitted");
+    assert!(!spec.dnssec, "dnssec should default to false when omitted");
+}
+
+#[test]
+fn lua_dns_explicit_false_recursion_honored() {
+    // Explicit `recursion = false` should NOT be overridden by the default.
+    let script = r#"
+        function init(targets) end
+        function generate(ctx)
+            return { query_name = "no-recurse.example.com", recursion = false }
+        end
+    "#;
+
+    let targets = vec![];
+    let mut gen =
+        LuaJitGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
+
+    let spec = gen.generate(&mock_ctx(1, 0));
+    assert!(!spec.recursion, "explicit false must be honored");
 }
 
 // ─── TCP ─────────────────────────────────────────────────────────────────────

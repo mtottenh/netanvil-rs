@@ -364,8 +364,15 @@ impl FromLuaPlugin for netanvil_types::DnsRequestSpec {
             .get("query_name")
             .map_err(|e| PluginError::InvalidResponse(format!("query_name: {e}")))?;
         let query_type_str: String = table.get("query_type").unwrap_or_else(|_| "A".into());
-        let recursion: bool = table.get("recursion").unwrap_or(true);
-        let dnssec: bool = table.get("dnssec").unwrap_or(false);
+        // Use LuaValue to distinguish nil (missing) from false (explicit).
+        let recursion: bool = match table.get::<LuaValue>("recursion") {
+            Ok(LuaValue::Boolean(b)) => b,
+            _ => true, // default: recursion enabled
+        };
+        let dnssec: bool = match table.get::<LuaValue>("dnssec") {
+            Ok(LuaValue::Boolean(b)) => b,
+            _ => false, // default: DNSSEC disabled
+        };
 
         let query_type = netanvil_types::DnsQueryType::from_str_name(&query_type_str)
             .unwrap_or(netanvil_types::DnsQueryType::A);

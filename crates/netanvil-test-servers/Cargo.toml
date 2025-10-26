@@ -23,5 +23,26 @@ name = "udp-echo"
 path = "src/bin/udp_echo.rs"
 
 [[bin]]
+name = "dns-echo"
+path = "src/bin/dns_echo.rs"
+
+[[bin]]
 name = "netanvil-test-server"
 path = "src/bin/test_server.rs"
+
+[package.metadata.deb]
+maintainer = "NetAnvil-RS Contributors"
+copyright = "2024, NetAnvil-RS Contributors"
+depends = "$auto"
+section = "utils"
+priority = "optional"
+extended-description = """\
+TCP echo, UDP echo, and DNS echo servers for load testing with netanvil-rs. \
+The TCP server supports multiple modes: echo, request-response, sink, source, \
+and bidirectional. Used as unit-under-test targets for distributed load tests."""
+assets = [
+    ["target/release/netanvil-test-server", "usr/bin/", "755"],
+    ["target/release/tcp-echo", "usr/bin/", "755"],
+    ["target/release/udp-echo", "usr/bin/", "755"],
+    ["target/release/dns-echo", "usr/bin/", "755"],
+]

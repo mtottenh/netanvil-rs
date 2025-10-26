@@ -3,7 +3,7 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(
     name = "netanvil-test-server",
-    about = "Multi-protocol test server (TCP + UDP, compio-based)"
+    about = "Multi-protocol test server (TCP + UDP + DNS, compio-based)"
 )]
 struct Args {
     /// TCP listen address (e.g. 0.0.0.0:9000). Omit to disable TCP.
@@ -13,6 +13,10 @@ struct Args {
     /// UDP listen address (e.g. 0.0.0.0:9001). Omit to disable UDP.
     #[arg(long, default_value = "127.0.0.1:9001")]
     udp_listen: Option<String>,
+
+    /// DNS listen address (e.g. 0.0.0.0:9053). Omit to disable DNS.
+    #[arg(long)]
+    dns_listen: Option<String>,
 }
 
 fn main() {
@@ -35,7 +39,15 @@ fn main() {
         None
     };
 
-    if _tcp.is_none() && _udp.is_none() {
+    let _dns = if let Some(ref addr) = args.dns_listen {
+        let handle = netanvil_test_servers::dns::start_dns_echo_on(addr);
+        eprintln!("DNS test server listening on {}", handle.addr);
+        Some(handle)
+    } else {
+        None
+    };
+
+    if _tcp.is_none() && _udp.is_none() && _dns.is_none() {
         eprintln!("No listeners configured.");
         std::process::exit(1);
     }

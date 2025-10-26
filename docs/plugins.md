@@ -6,41 +6,147 @@ from zero-overhead declarative configuration to full per-request programmability
 ## Quick Start
 
 ```bash
-# Hybrid: Lua configures patterns, native Rust executes (fastest)
+# Hybrid: Lua configures patterns, native Rust executes (fastest, HTTP only)
 netanvil-cli test --url http://api.example.com --plugin config.lua --plugin-type hybrid
 
-# Lua: per-request scripting via LuaJIT
+# Lua: per-request scripting via LuaJIT (any protocol)
 netanvil-cli test --url http://api.example.com --plugin generator.lua
+netanvil-cli test --url dns://8.8.8.8:53 --plugin dns_enumeration.lua
+netanvil-cli test --url tcp://echo-server:7000 --plugin tcp_generator.lua
 
-# WASM: compiled module (Rust, C, Go, etc.)
+# WASM: compiled module (Rust, C, Go, etc.) (any protocol)
 netanvil-cli test --url http://api.example.com --plugin generator.wasm
+
+# Rhai: Rust-native scripting (any protocol)
+netanvil-cli test --url udp://syslog:514 --plugin syslog_generator.rhai --plugin-type rhai
 ```
 
-The `--plugin-type` flag accepts `hybrid`, `lua`, or `wasm`. If omitted, it is
-auto-detected from the file extension (`.lua` defaults to per-request Lua,
-`.wasm` to WASM).
+The `--plugin-type` flag accepts `hybrid`, `lua`, `rhai`, or `wasm`. If omitted,
+it is auto-detected from the file extension (`.lua` defaults to per-request Lua,
+`.wasm` to WASM, `.rhai` to Rhai).
+
+The protocol is auto-detected from the `--url` scheme: `http://` or `https://`
+for HTTP, `dns://` for DNS, `tcp://` for TCP, `udp://` for UDP. The plugin's
+`generate()` function must return a table matching the detected protocol (see
+[Multi-Protocol Plugins](#multi-protocol-plugins) below).
 
 ## Plugin Types at a Glance
 
-| Capability                        | Hybrid       | Lua (LuaJIT)  | WASM (wasmtime) |
-|-----------------------------------|--------------|----------------|-----------------|
-| Per-call overhead                 | ~576ns       | ~2.1us         | ~878ns          |
-| Max RPS/core                      | 50K+         | ~40K           | ~100K+          |
-| Conditional logic per request     | No           | Yes            | Yes             |
-| Stateful across requests          | Counter only | Yes (globals)  | Yes (globals)   |
-| Dynamic HTTP method per request   | No           | Yes            | Yes             |
-| Dynamic headers per request       | No           | Yes            | Yes             |
-| Session simulation                | No           | Yes            | Yes             |
-| External data (files, tables)     | No           | Yes            | Yes             |
-| Language                          | Lua (config) | Lua 5.1        | Any -> WASM     |
-| Sandboxing                        | N/A          | None           | Full (WASI)     |
-| Debugging                         | Easy         | print() + logs | Limited         |
+| Capability                        | Hybrid       | Lua (LuaJIT)  | Rhai            | WASM (wasmtime) |
+|-----------------------------------|--------------|----------------|-----------------|-----------------|
+| Protocol support                  | HTTP only    | All (HTTP, DNS, TCP, UDP) | All (HTTP, DNS, TCP, UDP) | All (HTTP, DNS, TCP, UDP) |
+| Per-call overhead                 | ~576ns       | ~2.1us         | ~4.2us          | ~878ns          |
+| Max RPS/core                      | 50K+         | ~40K           | ~20K            | ~100K+          |
+| Conditional logic per request     | No           | Yes            | Yes             | Yes             |
+| Stateful across requests          | Counter only | Yes (globals)  | Yes (scope)     | Yes (globals)   |
+| Dynamic HTTP method per request   | No           | Yes            | Yes             | Yes             |
+| Dynamic headers per request       | No           | Yes            | Yes             | Yes             |
+| Session simulation                | No           | Yes            | Yes             | Yes             |
+| External data (files, tables)     | No           | Yes            | Limited         | Yes             |
+| Language                          | Lua (config) | Lua 5.1        | Rhai (Rust-like)| Any -> WASM     |
+| Sandboxing                        | N/A          | None           | Partial (no I/O)| Full (WASI)     |
+| Debugging                         | Easy         | print() + logs | print() + logs  | Limited         |
 
-## Hybrid Plugin
+## Multi-Protocol Plugins
 
-The hybrid plugin is the **fastest** option. A Lua script runs **once** at setup
-to produce a declarative `GeneratorConfig`. The hot path then executes in pure
-native Rust — no scripting engine is invoked per request.
+Plugins are not limited to HTTP. Lua, Rhai, and WASM plugins can generate
+requests for any supported protocol: HTTP, DNS, TCP, and UDP. The protocol is
+determined by the `--url` scheme, and the plugin's `generate()` function must
+return a table (or struct) matching that protocol.
+
+### Protocol Detection
+
+The URL scheme tells netanvil-rs which protocol executor to use and which return
+table shape to expect from the plugin:
+
+| URL scheme            | Protocol | Plugin return shape                                |
+|-----------------------|----------|----------------------------------------------------|
+| `http://`, `https://` | HTTP     | `{method, url, headers, body}`                     |
+| `dns://`              | DNS      | `{query_name, query_type, recursion, dnssec}`      |
+| `tcp://`              | TCP      | `{payload}`                                        |
+| `udp://`              | UDP      | `{payload}`                                        |
+
+The same plugin script can only target one protocol per test run. A Lua plugin
+that returns DNS tables will not work if `--url` is `http://...`.
+
+### Return Table Shapes (Lua / Rhai)
+
+**HTTP:**
+```lua
+return {
+    method = "GET",                     -- HTTP method (required)
+    url = "http://example.com/path",    -- full URL (required)
+    headers = {{"Key", "Value"}},       -- list of {key, value} pairs (optional)
+    body = nil,                         -- string or nil (optional)
+}
+```
+
+**DNS:**
+```lua
+return {
+    query_name = "www.example.com",     -- domain to query (required)
+    query_type = "A",                   -- A, AAAA, MX, CNAME, TXT, NS, SOA, PTR, SRV, ANY (default: "A")
+    recursion = true,                   -- set RD flag (default: true)
+    dnssec = false,                     -- set DO flag (default: false)
+}
+```
+
+**TCP:**
+```lua
+return {
+    payload = "PING\r\n",              -- bytes to send (required)
+}
+```
+
+**UDP:**
+```lua
+return {
+    payload = "PING\r\n",              -- bytes to send (required)
+}
+```
+
+For TCP and UDP, the plugin controls only the payload. Target address, framing
+mode, and response settings come from the test configuration (`--url` and CLI
+flags). The transformer fills in the remaining fields after the plugin generates
+its spec.
+
+> **Note on DNS boolean defaults:** When a Lua plugin omits a boolean field like
+> `recursion`, Lua's `nil` coerces to `false`. We handle this correctly for DNS
+> queries: omitting `recursion` defaults to `true` (via `LuaValue::Boolean`
+> matching that distinguishes `nil` from `false`). Plugin authors should still be
+> explicit with boolean fields for clarity.
+
+### Protocol Support by Plugin Type
+
+| Plugin type | HTTP | DNS | TCP | UDP |
+|-------------|------|-----|-----|-----|
+| Hybrid      | Yes  | No  | No  | No  |
+| Lua (LuaJIT)| Yes | Yes | Yes | Yes |
+| Rhai        | Yes  | Yes | Yes | Yes |
+| WASM        | Yes  | Yes | Yes | Yes |
+
+Hybrid plugins remain HTTP-only because they produce a declarative
+`GeneratorConfig` with HTTP-specific fields (method, URL patterns, headers). The
+other plugin types use protocol-generic conversion traits (`FromLuaPlugin`,
+`FromRhaiPlugin`, `FromPostcard`) that dispatch to the appropriate spec type
+based on the detected protocol.
+
+### Distributed Mode
+
+In distributed mode, the leader embeds the plugin script/module in the test
+configuration sent to agents. Each agent instantiates the plugin locally and
+uses it to generate requests for whatever protocol the test targets. No special
+configuration is needed — if the plugin works in standalone mode, it works in
+distributed mode.
+
+---
+
+## Hybrid Plugin (HTTP Only)
+
+The hybrid plugin is the **fastest** option but is **HTTP-only**. A Lua script
+runs **once** at setup to produce a declarative `GeneratorConfig`. The hot path
+then executes in pure native Rust — no scripting engine is invoked per request.
+For DNS, TCP, or UDP protocols, use Lua, Rhai, or WASM plugins instead.
 
 ### What It Can Do
 
@@ -246,6 +352,94 @@ GET  /api/v1/products/22491    Authorization: Bearer tok-000260d9  (no body)
 - Conditional URL paths (`/auth/login` vs `/products/N` vs `/orders`)
 - Computed body content that depends on internal state
 - Session step tracking
+
+### Example: DNS Subdomain Enumeration
+
+Lua plugins work with non-HTTP protocols too. This example generates DNS queries
+across a set of subdomains with weighted query type distribution — useful for
+testing DNS server performance under varied query patterns.
+
+```lua
+-- dns_enumeration.lua
+-- Usage: netanvil-cli test --url dns://8.8.8.8:53 --plugin dns_enumeration.lua
+
+local counter = 0
+
+local subdomains = {
+    "www", "api", "cdn", "mail", "smtp", "imap", "ns1", "ns2",
+    "staging", "dev", "beta", "auth", "login", "dashboard",
+    "static", "assets", "media", "img", "video", "docs",
+}
+
+local domains = { "example.com", "example.org", "example.net" }
+
+-- Query type distribution: realistic mix weighted toward A records.
+local query_types = {
+    { type = "A",     weight = 50 },
+    { type = "AAAA",  weight = 20 },
+    { type = "MX",    weight = 10 },
+    { type = "TXT",   weight = 10 },
+    { type = "CNAME", weight = 5 },
+    { type = "NS",    weight = 5 },
+}
+
+-- Precompute cumulative weights
+local total_weight = 0
+local cumulative = {}
+for i, qt in ipairs(query_types) do
+    total_weight = total_weight + qt.weight
+    cumulative[i] = total_weight
+end
+
+function init(_target_list)
+    counter = 0
+end
+
+function generate(ctx)
+    counter = counter + 1
+
+    local sub = subdomains[((counter - 1) % #subdomains) + 1]
+    local domain = domains[((counter - 1) % #domains) + 1]
+    local fqdn = sub .. "." .. domain
+
+    -- Weighted query type selection
+    local roll = (counter % total_weight) + 1
+    local qtype = query_types[1].type
+    for i, cw in ipairs(cumulative) do
+        if roll <= cw then
+            qtype = query_types[i].type
+            break
+        end
+    end
+
+    return {
+        query_name = fqdn,
+        query_type = qtype,
+        recursion = true,
+        dnssec = false,
+    }
+end
+```
+
+```bash
+netanvil-cli test --url dns://8.8.8.8:53 \
+  --plugin dns_enumeration.lua \
+  --rps 20000 --duration 60s --cores 4
+```
+
+This generates a varied DNS workload:
+```
+A     www.example.com         RD=1  DO=0
+AAAA  api.example.org         RD=1  DO=0
+A     cdn.example.net         RD=1  DO=0
+MX    mail.example.com        RD=1  DO=0
+A     smtp.example.org        RD=1  DO=0
+TXT   imap.example.net        RD=1  DO=0
+```
+
+The plugin returns DNS-shaped tables instead of HTTP-shaped ones. The `--url
+dns://...` scheme tells netanvil-rs to use the DNS executor, and the plugin's
+return table is interpreted as `{query_name, query_type, recursion, dnssec}`.
 
 ---
 
@@ -640,32 +834,50 @@ netanvil-cli test --url http://your-target:8080 \
 ## Choosing a Plugin Type
 
 ```
-Do you need per-request logic?
+Is the protocol HTTP?
   |
-  No --> Use HYBRID (fastest, simplest)
+  No (DNS, TCP, UDP) --> Do you need per-request logic?
+  |                        |
+  |                        No --> Use native generator (no plugin needed)
+  |                        |
+  |                        Yes --> Do you need crypto or non-Lua languages?
+  |                                  |
+  |                                  No --> Use LUA
+  |                                  |
+  |                                  Yes --> Use WASM
   |
-  Yes --> Do you need crypto, complex data structures, or non-Lua languages?
-            |
-            No --> Use LUA (easiest to write, fast enough)
-            |
-            Yes --> Use WASM (most powerful, but harder workflow)
+  Yes (HTTP) --> Do you need per-request logic?
+                   |
+                   No --> Use HYBRID (fastest, simplest)
+                   |
+                   Yes --> Do you need crypto, complex data structures, or non-Lua languages?
+                             |
+                             No --> Use LUA (easiest to write, fast enough)
+                             |
+                             Yes --> Use WASM (most powerful, but harder workflow)
 ```
 
 ### Decision Matrix
 
 | Scenario                                         | Recommended |
 |--------------------------------------------------|-------------|
-| Hit 3 endpoints with static headers              | Hybrid      |
+| Hit 3 HTTP endpoints with static headers         | Hybrid      |
 | Weighted URL distribution with body template     | Hybrid      |
 | Rotate through user pool with auth tokens        | Lua         |
 | Mixed GET/POST based on session state             | Lua         |
 | A/B test with 80/20 traffic split                | Lua         |
 | Conditional request bodies                        | Lua         |
+| DNS subdomain enumeration with weighted types    | Lua         |
+| TCP echo testing with varied payloads            | Lua         |
+| UDP syslog message generation                     | Lua         |
+| DNS zone transfer stress testing (varied types)  | Lua         |
 | HMAC-signed requests                              | WASM        |
 | Bloom filter / HyperLogLog deduplication         | WASM        |
 | Protocol buffer serialization                     | WASM        |
 | Plugin written in Go, C, or Zig                   | WASM        |
 | Untrusted third-party plugin                      | WASM        |
+| DNS with custom binary payload construction      | WASM        |
+| TCP with protocol-specific binary framing        | WASM        |
 | Multi-phase test (warmup -> steady -> spike)     | Lua or WASM |
 
 ## Performance
@@ -680,7 +892,9 @@ Benchmarked with `cargo bench -p netanvil-plugin`:
 | LuaJIT      | 2.06us            | 10.1x              | 10.3%               |
 | Rhai        | 4.2us             | 20.7x              | 21.0%               |
 
-All plugin types leave >79% of the per-request budget for actual HTTP execution.
+All plugin types leave >79% of the per-request budget for actual protocol execution
+(HTTP, DNS, TCP, or UDP). Benchmarks measure generation overhead only; actual
+protocol execution latency varies by protocol.
 
 ## Plugin API Reference
 
@@ -716,7 +930,42 @@ function update_targets(new)   -- called when targets change mid-test
 
 **ctx fields:** `request_id` (u64), `core_id` (int), `is_sampled` (bool), `session_id` (int or nil)
 
-**return table:** `method` (string), `url` (string), `headers` (list of {key, value}), `body` (string or nil)
+**Return table** (shape depends on protocol detected from `--url`):
+
+HTTP (`http://`, `https://`):
+```lua
+{ method = "GET", url = "http://...", headers = {{"K","V"}}, body = nil }
+```
+
+DNS (`dns://`):
+```lua
+{ query_name = "example.com", query_type = "A", recursion = true, dnssec = false }
+```
+
+TCP (`tcp://`):
+```lua
+{ payload = "PING\r\n" }
+```
+
+UDP (`udp://`):
+```lua
+{ payload = "PING\r\n" }
+```
+
+### Rhai Plugin
+
+Must define a `generate(ctx)` function. The script receives `targets` and
+`counter` as global scope variables.
+
+**ctx fields:** same as Lua (`request_id`, `core_id`, `is_sampled`, `session_id`)
+
+**Return map:** same shapes as Lua above, using Rhai object map syntax.
+
+```rhai
+fn generate(ctx) {
+    #{ method: "GET", url: `http://example.com/${ctx.request_id}`, headers: [], body: () }
+}
+```
 
 ### WASM Plugin
 
@@ -743,8 +992,20 @@ update_targets(input_len: i32) -> i32 -- update targets with postcard-encoded li
   | 13     | [u8;3] | _pad         | Alignment padding                        |
   | 16     | u64    | session_id   | Valid only if flags bit 1 is set         |
 
-- **Spec output** (guest -> host): `postcard`-encoded struct with fields
-  `{method, url, headers, body}`. The host reads directly from guest memory.
+- **Spec output** (guest -> host): `postcard`-encoded struct. The host reads
+  directly from guest memory and deserializes using the appropriate
+  `FromPostcard` impl based on the detected protocol:
+
+  | Protocol | Struct fields                                      |
+  |----------|----------------------------------------------------|
+  | HTTP     | `{method, url, headers, body}`                     |
+  | DNS      | `{query_name, query_type, recursion, dnssec}`      |
+  | TCP      | `{payload}` (or `{payload_str}`)                   |
+  | UDP      | `{payload}` (or `{payload_str}`)                   |
+
+  The postcard encoding works the same regardless of protocol — the host
+  deserializes into `HttpRequestSpec`, `DnsRequestSpec`, `TcpRequestSpec`, or
+  `UdpRequestSpec` depending on the URL scheme.
 
 - **Target lists** (init/update_targets): `postcard`-encoded `Vec<String>`.
 

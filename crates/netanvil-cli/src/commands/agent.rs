@@ -8,6 +8,7 @@ pub fn run(
     tls_ca: Option<String>,
     tls_cert: Option<String>,
     tls_key: Option<String>,
+    metrics_port: Option<u16>,
 ) -> Result<()> {
     let cores = if cores == 0 {
         std::thread::available_parallelism()
@@ -17,7 +18,7 @@ pub fn run(
         cores
     };
 
-    let server = if let (Some(ca), Some(cert), Some(key)) = (tls_ca, tls_cert, tls_key) {
+    let mut server = if let (Some(ca), Some(cert), Some(key)) = (tls_ca, tls_cert, tls_key) {
         let tls = netanvil_types::TlsConfig {
             ca_cert: ca,
             cert,
@@ -31,6 +32,11 @@ pub fn run(
         AgentServer::new(listen, cores)
             .context(format!("failed to start agent on port {listen}"))?
     };
+
+    if let Some(port) = metrics_port {
+        server.set_metrics_port(port);
+    }
+
     server.run(); // blocks until Ctrl+C
 
     Ok(())

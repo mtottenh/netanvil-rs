@@ -237,6 +237,12 @@ enum Commands {
         /// Path to this agent's private key PEM
         #[arg(long)]
         tls_key: Option<String>,
+
+        /// Plain HTTP port for Prometheus metrics scraping.
+        /// When running with mTLS, Prometheus can scrape this port
+        /// without client certificates. Only serves /metrics/prometheus.
+        #[arg(long)]
+        metrics_port: Option<u16>,
     },
 
     /// Run as distributed test leader, coordinating agent nodes
@@ -530,7 +536,8 @@ fn main() -> Result<()> {
             tls_ca,
             tls_cert,
             tls_key,
-        } => commands::agent::run(listen, cores, tls_ca, tls_cert, tls_key)?,
+            metrics_port,
+        } => commands::agent::run(listen, cores, tls_ca, tls_cert, tls_key, metrics_port)?,
 
         Commands::Leader {
             workers,

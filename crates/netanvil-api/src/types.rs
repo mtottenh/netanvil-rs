@@ -16,6 +16,8 @@ struct SharedStateInner {
     pub metrics: Option<MetricsView>,
     /// Signals pushed via PUT /signal. Read by the coordinator each tick.
     pub pushed_signals: Vec<(String, f64)>,
+    /// Node identifier, included as a label in Prometheus metrics.
+    pub node_id: Option<String>,
 }
 
 impl Default for SharedState {
@@ -29,6 +31,16 @@ impl SharedState {
         Self {
             inner: Arc::new(Mutex::new(SharedStateInner::default())),
         }
+    }
+
+    /// Set the node identifier for Prometheus metric labels.
+    pub fn set_node_id(&self, id: String) {
+        self.inner.lock().unwrap().node_id = Some(id);
+    }
+
+    /// Get the node identifier (if set).
+    pub fn get_node_id(&self) -> Option<String> {
+        self.inner.lock().unwrap().node_id.clone()
     }
 
     /// Update from a ProgressUpdate (called by the coordinator callback).

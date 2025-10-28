@@ -39,11 +39,15 @@ struct AgentInner {
 /// Agent server: long-lived HTTP server that accepts tests on demand.
 ///
 /// Create with `new()` for plain HTTP or `with_tls()` for mTLS.
+/// When running mTLS, an optional plain HTTP metrics-only listener can be
+/// started on a separate port so Prometheus can scrape without client certs.
 pub struct AgentServer {
     /// Plain HTTP server (used when no TLS configured).
     http_server: Option<tiny_http::Server>,
     /// mTLS server (used when TLS configured).
     mtls_server: Option<MtlsServer>,
+    /// Optional plain HTTP port for Prometheus metrics when running mTLS.
+    metrics_port: Option<u16>,
     inner: Arc<Mutex<AgentInner>>,
 }
 
@@ -59,6 +63,7 @@ impl AgentServer {
         Ok(Self {
             http_server: Some(server),
             mtls_server: None,
+            metrics_port: None,
             inner,
         })
     }
@@ -74,12 +79,32 @@ impl AgentServer {
         Ok(Self {
             http_server: None,
             mtls_server: Some(server),
+            metrics_port: None,
             inner,
         })
     }
 
+    /// Set a plain HTTP port for Prometheus metrics scraping.
+    /// Only meaningful when running in mTLS mode — in plain HTTP mode,
+    /// `/metrics/prometheus` is already available on the main port.
+    pub fn set_metrics_port(&mut self, port: u16) {
+        self.metrics_port = Some(port);
+    }
+
     /// Run the agent server (blocking). Call from the main thread.
     pub fn run(&self) {
+        // Set node_id on shared state so Prometheus metrics include it.
+        {
+            let agent = self.inner.lock().unwrap();
+            agent.shared_state.set_node_id(agent.node_id.0.clone());
+        }
+
+        // If a metrics-only port is configured, spawn a plain HTTP server
+        // for Prometheus scraping (useful when the main server uses mTLS).
+        if let Some(port) = self.metrics_port {
+            self.spawn_metrics_server(port);
+        }
+
         if let Some(ref http) = self.http_server {
             tracing::info!("agent listening on {} (plain HTTP)", http.server_addr());
             self.run_http(http);
@@ -87,6 +112,41 @@ impl AgentServer {
             tracing::info!("agent listening (mTLS)");
             self.run_mtls(mtls);
         }
+    }
+
+    /// Spawn a plain HTTP server on a background thread that only serves
+    /// `/metrics/prometheus`. Used so Prometheus can scrape mTLS agents.
+    fn spawn_metrics_server(&self, port: u16) {
+        let addr = format!("0.0.0.0:{port}");
+        let server = match tiny_http::Server::http(&addr) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(port, "failed to start metrics-only server: {e}");
+                return;
+            }
+        };
+
+        tracing::info!(port, "metrics-only server listening (plain HTTP)");
+
+        let inner = self.inner.clone();
+        std::thread::Builder::new()
+            .name("agent-metrics-http".into())
+            .spawn(move || {
+                for request in server.incoming_requests() {
+                    let path = request.url().to_string();
+                    match path.as_str() {
+                        "/metrics/prometheus" | "/metrics" => {
+                            let agent = inner.lock().unwrap();
+                            handlers::handle_get_metrics_prometheus(
+                                request,
+                                &agent.shared_state,
+                            );
+                        }
+                        _ => handlers::handle_not_found(request),
+                    }
+                }
+            })
+            .unwrap_or_else(|e| panic!("failed to spawn metrics server thread: {e}"));
     }
 
     // --- Plain HTTP mode (tiny_http) ----------------------------------------

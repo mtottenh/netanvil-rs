@@ -24,6 +24,7 @@ netanvil-plugin = { workspace = true }
 netanvil-plugin-luajit = { workspace = true }
 netanvil-harness = { workspace = true }
 flume = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
@@ -33,3 +34,20 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 mlua = { version = "0.10", features = ["luajit", "vendored", "send"] }
 tempfile = "3"
+
+[package.metadata.deb]
+maintainer = "NetAnvil-RS Contributors"
+copyright = "2024, NetAnvil-RS Contributors"
+depends = "$auto"
+section = "utils"
+priority = "optional"
+extended-description = """\
+High-performance network load testing framework built on \
+thread-per-core architecture with io_uring. Features coordinated \
+omission prevention, accurate HDR histogram percentiles, pluggable \
+rate control (PID, step, composite), and multi-protocol support \
+(HTTP/1.1, HTTP/2, TCP, UDP, DNS). Extensible via WASM, Lua, and \
+Rhai plugins."""
+assets = [
+    ["target/release/netanvil-cli", "usr/bin/", "755"],
+]

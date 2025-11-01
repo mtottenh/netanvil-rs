@@ -6,6 +6,7 @@
 
 pub mod coordinator;
 pub mod http_cluster;
+pub mod leader_server;
 pub mod signal;
 
 pub use coordinator::{DistributedCoordinator, DistributedProgressUpdate, DistributedTestResult};
@@ -13,4 +14,5 @@ pub use http_cluster::{
     HttpMetricsFetcher, HttpNodeCommander, MtlsMetricsFetcher, MtlsNodeCommander,
     MtlsStaticDiscovery, StaticDiscovery,
 };
+pub use leader_server::{LeaderMetricsState, LeaderServer};
 pub use signal::HttpSignalPoller;

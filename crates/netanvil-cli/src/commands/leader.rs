@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 
 use netanvil_distributed::{
     DistributedCoordinator, HttpMetricsFetcher, HttpNodeCommander, HttpSignalPoller,
-    MtlsMetricsFetcher, MtlsNodeCommander, MtlsStaticDiscovery, StaticDiscovery,
+    LeaderMetricsState, LeaderServer, MtlsMetricsFetcher, MtlsNodeCommander, MtlsStaticDiscovery,
+    StaticDiscovery,
 };
 use netanvil_types::{ConnectionConfig, SchedulerConfig, TestConfig};
 
@@ -53,7 +54,10 @@ pub fn run(
     ramp_warmup: String,
     ramp_multiplier: f64,
     ramp_max_errors: f64,
+    metrics_port: Option<u16>,
+    output: String,
 ) -> Result<()> {
+    let output_format = crate::output::OutputFormat::parse(&output).map_err(|e| anyhow::anyhow!(e))?;
     let duration = parse_duration(&duration).context("invalid --duration")?;
     let timeout = parse_duration(&timeout).context("invalid --timeout")?;
     let autotune_dur =
@@ -193,11 +197,22 @@ pub fn run(
         _ => None,
     };
 
+    // Start leader metrics server if requested
+    let metrics_state = metrics_port.map(|port| {
+        let state = LeaderMetricsState::new();
+        let server = LeaderServer::new(state.clone());
+        server
+            .spawn(port)
+            .unwrap_or_else(|e| tracing::error!(port, "failed to start leader metrics server: {e}"));
+        state
+    });
+
     // Helper to configure and run a coordinator (generic over trait impls).
     fn run_coordinator<D, M, C>(
         mut coordinator: DistributedCoordinator<D, M, C>,
         external_metrics_url: Option<&str>,
         external_metrics_field: Option<&str>,
+        metrics_state: Option<LeaderMetricsState>,
     ) -> netanvil_distributed::DistributedTestResult
     where
         D: netanvil_types::NodeDiscovery,
@@ -209,7 +224,10 @@ pub fn run(
         {
             coordinator.set_signal_source(poller.into_source());
         }
-        coordinator.on_progress(|update| {
+        coordinator.on_progress(move |update| {
+            if let Some(ref state) = metrics_state {
+                state.update(update);
+            }
             eprint!(
                 "\r  [{:.1}s] {:.0} RPS target | {} requests | {} errors | {} nodes",
                 update.elapsed.as_secs_f64(),
@@ -236,6 +254,7 @@ pub fn run(
             coordinator,
             external_metrics_url.as_deref(),
             external_metrics_field.as_deref(),
+            metrics_state.clone(),
         )
     } else {
         let discovery = StaticDiscovery::new(workers);
@@ -247,26 +266,12 @@ pub fn run(
             coordinator,
             external_metrics_url.as_deref(),
             external_metrics_field.as_deref(),
+            metrics_state,
         )
     };
     eprintln!(); // newline after progress
 
-    tracing::info!(
-        total_requests = result.total_requests,
-        total_errors = result.total_errors,
-        duration_secs = result.duration.as_secs_f64(),
-        avg_rps = result.total_requests as f64 / result.duration.as_secs_f64(),
-        "distributed test complete"
-    );
-    for (id, metrics) in &result.nodes {
-        tracing::info!(
-            node = %id,
-            requests = metrics.total_requests,
-            rps = metrics.current_rps,
-            p99_ms = metrics.latency_p99_ms,
-            "node result"
-        );
-    }
+    crate::output::print_distributed_results(&result, output_format);
 
     Ok(())
 }

@@ -425,6 +425,15 @@ enum Commands {
         /// Maximum error rate (%) before forcing rate reduction in ramp mode
         #[arg(long, default_value = "5.0")]
         ramp_max_errors: f64,
+
+        /// Port for the leader's Prometheus metrics endpoint.
+        /// Exposes aggregated metrics at /metrics/prometheus for single-target scraping.
+        #[arg(long)]
+        metrics_port: Option<u16>,
+
+        /// Output format: "text" (human-readable to stderr) or "json" (machine-readable to stdout)
+        #[arg(long, default_value = "text")]
+        output: String,
     },
 }
 
@@ -583,6 +592,8 @@ fn main() -> Result<()> {
             ramp_warmup,
             ramp_multiplier,
             ramp_max_errors,
+            metrics_port,
+            output,
         } => commands::leader::run(
             workers,
             url,
@@ -625,6 +636,8 @@ fn main() -> Result<()> {
             ramp_warmup,
             ramp_multiplier,
             ramp_max_errors,
+            metrics_port,
+            output,
         )?,
     }
 

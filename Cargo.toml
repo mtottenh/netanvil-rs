@@ -10,6 +10,7 @@ members = [
     "crates/netanvil-plugin",
     "crates/netanvil-plugin-luajit",
     "crates/netanvil-plugin-lua54",
+    "crates/netanvil-plugin-v8",
     "crates/netanvil-tcp",
     "crates/netanvil-udp",
     "crates/netanvil-dns",
@@ -103,6 +104,7 @@ netanvil-distributed = { path = "crates/netanvil-distributed" }
 netanvil-plugin = { path = "crates/netanvil-plugin" }
 netanvil-plugin-luajit = { path = "crates/netanvil-plugin-luajit" }
 netanvil-plugin-lua54 = { path = "crates/netanvil-plugin-lua54" }
+netanvil-plugin-v8 = { path = "crates/netanvil-plugin-v8" }
 netanvil-tcp = { path = "crates/netanvil-tcp" }
 netanvil-udp = { path = "crates/netanvil-udp" }
 netanvil-dns = { path = "crates/netanvil-dns" }

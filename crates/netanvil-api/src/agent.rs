@@ -818,6 +818,28 @@ fn build_http_plugin_factory(
                 ) as Box<dyn RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
             }))
         }
+        PluginType::Js => {
+            #[cfg(feature = "v8")]
+            {
+                let script = String::from_utf8(pc.source.clone())
+                    .map_err(|e| format!("JS plugin not UTF-8: {e}"))?;
+                let targets = targets.to_vec();
+                Ok(Box::new(move |_core_id| {
+                    Box::new(
+                        netanvil_plugin_v8::V8Generator::new(&script, &targets)
+                            .expect("V8 init failed"),
+                    ) as Box<dyn RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
+                }))
+            }
+            #[cfg(not(feature = "v8"))]
+            {
+                Err(
+                    "V8/JS plugin support requires the 'v8' feature flag. \
+                     Rebuild with: cargo build --features v8"
+                        .into(),
+                )
+            }
+        }
     }
 }
 
@@ -852,6 +874,19 @@ fn build_tcp_plugin_factory(
                         &engine, &module, &targets,
                     )
                     .expect("WASM init failed"),
+                )
+            }))
+        }
+        #[cfg(feature = "v8")]
+        PluginType::Js => {
+            let script = String::from_utf8(pc.source.clone()).ok()?;
+            let targets = targets.to_vec();
+            Some(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin_v8::V8Generator::<netanvil_types::TcpRequestSpec>::new(
+                        &script, &targets,
+                    )
+                    .expect("V8 init failed"),
                 )
             }))
         }
@@ -893,6 +928,19 @@ fn build_udp_plugin_factory(
                 )
             }))
         }
+        #[cfg(feature = "v8")]
+        PluginType::Js => {
+            let script = String::from_utf8(pc.source.clone()).ok()?;
+            let targets = targets.to_vec();
+            Some(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin_v8::V8Generator::<netanvil_types::UdpRequestSpec>::new(
+                        &script, &targets,
+                    )
+                    .expect("V8 init failed"),
+                )
+            }))
+        }
         _ => None,
     }
 }
@@ -928,6 +976,19 @@ fn build_dns_plugin_factory(
                         &engine, &module, &targets,
                     )
                     .expect("WASM init failed"),
+                )
+            }))
+        }
+        #[cfg(feature = "v8")]
+        PluginType::Js => {
+            let script = String::from_utf8(pc.source.clone()).ok()?;
+            let targets = targets.to_vec();
+            Some(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin_v8::V8Generator::<netanvil_types::DnsRequestSpec>::new(
+                        &script, &targets,
+                    )
+                    .expect("V8 init failed"),
                 )
             }))
         }

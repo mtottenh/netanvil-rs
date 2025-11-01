@@ -17,7 +17,11 @@ netanvil-api = { workspace = true }
 netanvil-distributed = { workspace = true }
 netanvil-plugin = { workspace = true }
 netanvil-plugin-luajit = { workspace = true }
+netanvil-plugin-v8 = { workspace = true, optional = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 flume = { workspace = true }
 serde_json = { workspace = true }
+
+[features]
+v8 = ["netanvil-plugin-v8"]

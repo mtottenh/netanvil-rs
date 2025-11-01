@@ -225,8 +225,11 @@ pub fn detect_plugin_type(path: &str, explicit: &str) -> Result<PluginType> {
             "hybrid" => Ok(PluginType::Hybrid),
             "lua" | "luajit" => Ok(PluginType::Lua),
             "wasm" => Ok(PluginType::Wasm),
+            "js" | "v8" | "javascript" => Ok(PluginType::Js),
             other => {
-                anyhow::bail!("unknown --plugin-type: {other} (use 'hybrid', 'lua', or 'wasm')")
+                anyhow::bail!(
+                    "unknown --plugin-type: {other} (use 'hybrid', 'lua', 'wasm', or 'js')"
+                )
             }
         };
     }
@@ -235,6 +238,8 @@ pub fn detect_plugin_type(path: &str, explicit: &str) -> Result<PluginType> {
         Ok(PluginType::Wasm)
     } else if path.ends_with(".lua") {
         Ok(PluginType::Lua)
+    } else if path.ends_with(".js") {
+        Ok(PluginType::Js)
     } else {
         anyhow::bail!("cannot auto-detect plugin type for '{path}'. Use --plugin-type to specify.")
     }
@@ -286,6 +291,32 @@ pub fn build_plugin_factory(
                     as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
             }))
         }
+        PluginType::Js => {
+            #[cfg(feature = "v8")]
+            {
+                let script = std::fs::read_to_string(plugin_path)
+                    .context(format!("failed to read plugin: {plugin_path}"))?;
+                let targets = targets.to_vec();
+                Ok(Box::new(move |_core_id| {
+                    Box::new(
+                        netanvil_plugin_v8::V8Generator::new(&script, &targets)
+                            .expect("V8 generator init failed"),
+                    )
+                        as Box<
+                            dyn netanvil_types::RequestGenerator<
+                                Spec = netanvil_types::HttpRequestSpec,
+                            >,
+                        >
+                }))
+            }
+            #[cfg(not(feature = "v8"))]
+            {
+                anyhow::bail!(
+                    "V8/JS plugin support requires the 'v8' feature flag. \
+                     Rebuild with: cargo build --features v8"
+                )
+            }
+        }
     }
 }
 
@@ -335,6 +366,34 @@ pub fn build_tcp_plugin_factory(
                         dyn netanvil_types::RequestGenerator<Spec = netanvil_types::TcpRequestSpec>,
                     >
             }))
+        }
+        PluginType::Js => {
+            #[cfg(feature = "v8")]
+            {
+                let script = std::fs::read_to_string(plugin_path)
+                    .context(format!("failed to read plugin: {plugin_path}"))?;
+                let targets = targets.to_vec();
+                Ok(Box::new(move |_core_id| {
+                    Box::new(
+                        netanvil_plugin_v8::V8Generator::<netanvil_types::TcpRequestSpec>::new(
+                            &script, &targets,
+                        )
+                        .expect("V8 generator init failed"),
+                    )
+                        as Box<
+                            dyn netanvil_types::RequestGenerator<
+                                Spec = netanvil_types::TcpRequestSpec,
+                            >,
+                        >
+                }))
+            }
+            #[cfg(not(feature = "v8"))]
+            {
+                anyhow::bail!(
+                    "V8/JS plugin support requires the 'v8' feature flag. \
+                     Rebuild with: cargo build --features v8"
+                )
+            }
         }
     }
 }
@@ -386,6 +445,34 @@ pub fn build_udp_plugin_factory(
                     >
             }))
         }
+        PluginType::Js => {
+            #[cfg(feature = "v8")]
+            {
+                let script = std::fs::read_to_string(plugin_path)
+                    .context(format!("failed to read plugin: {plugin_path}"))?;
+                let targets = targets.to_vec();
+                Ok(Box::new(move |_core_id| {
+                    Box::new(
+                        netanvil_plugin_v8::V8Generator::<netanvil_types::UdpRequestSpec>::new(
+                            &script, &targets,
+                        )
+                        .expect("V8 generator init failed"),
+                    )
+                        as Box<
+                            dyn netanvil_types::RequestGenerator<
+                                Spec = netanvil_types::UdpRequestSpec,
+                            >,
+                        >
+                }))
+            }
+            #[cfg(not(feature = "v8"))]
+            {
+                anyhow::bail!(
+                    "V8/JS plugin support requires the 'v8' feature flag. \
+                     Rebuild with: cargo build --features v8"
+                )
+            }
+        }
     }
 }
 
@@ -435,6 +522,34 @@ pub fn build_dns_plugin_factory(
                         dyn netanvil_types::RequestGenerator<Spec = netanvil_types::DnsRequestSpec>,
                     >
             }))
+        }
+        PluginType::Js => {
+            #[cfg(feature = "v8")]
+            {
+                let script = std::fs::read_to_string(plugin_path)
+                    .context(format!("failed to read plugin: {plugin_path}"))?;
+                let targets = targets.to_vec();
+                Ok(Box::new(move |_core_id| {
+                    Box::new(
+                        netanvil_plugin_v8::V8Generator::<netanvil_types::DnsRequestSpec>::new(
+                            &script, &targets,
+                        )
+                        .expect("V8 generator init failed"),
+                    )
+                        as Box<
+                            dyn netanvil_types::RequestGenerator<
+                                Spec = netanvil_types::DnsRequestSpec,
+                            >,
+                        >
+                }))
+            }
+            #[cfg(not(feature = "v8"))]
+            {
+                anyhow::bail!(
+                    "V8/JS plugin support requires the 'v8' feature flag. \
+                     Rebuild with: cargo build --features v8"
+                )
+            }
         }
     }
 }

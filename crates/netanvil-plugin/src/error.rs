@@ -11,6 +11,9 @@ pub enum PluginError {
     #[error("Rhai error: {0}")]
     Rhai(String),
 
+    #[error("V8/JS error: {0}")]
+    V8(String),
+
     #[error("plugin returned invalid response: {0}")]
     InvalidResponse(String),
 

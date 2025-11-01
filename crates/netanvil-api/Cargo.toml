@@ -15,6 +15,7 @@ netanvil-udp = { workspace = true }
 netanvil-dns = { workspace = true }
 netanvil-plugin = { workspace = true }
 netanvil-plugin-luajit = { workspace = true }
+netanvil-plugin-v8 = { workspace = true, optional = true }
 tiny_http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -24,6 +25,9 @@ hostname = "0.4"
 rustls = "0.23"
 rustls-pemfile = "2"
 webpki-roots = "0.26"
+
+[features]
+v8 = ["netanvil-plugin-v8"]
 
 [dev-dependencies]
 netanvil-http = { workspace = true }

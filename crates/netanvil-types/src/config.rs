@@ -159,6 +159,8 @@ pub enum PluginType {
     Lua,
     /// WASM module per-request generator. ~2.7μs per call.
     Wasm,
+    /// V8 JavaScript per-request generator. Requires the `v8` feature flag.
+    Js,
 }
 
 impl TestConfig {

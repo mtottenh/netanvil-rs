@@ -31,6 +31,9 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+[features]
+v8 = ["netanvil-harness/v8", "netanvil-api/v8"]
+
 [dev-dependencies]
 mlua = { version = "0.10", features = ["luajit", "vendored", "send"] }
 tempfile = "3"

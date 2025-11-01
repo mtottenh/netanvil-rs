@@ -22,13 +22,14 @@ enum Commands {
         #[arg(long, required_unless_present = "plugin", num_args = 1..)]
         url: Vec<String>,
 
-        /// Path to a plugin script (.lua) or WASM module (.wasm).
+        /// Path to a plugin script (.lua, .js) or WASM module (.wasm).
         /// The plugin implements request generation logic.
         #[arg(long)]
         plugin: Option<String>,
 
         /// Plugin type: "hybrid" (Lua config → native hot path),
-        /// "lua" (LuaJIT per-request), or "wasm" (WASM per-request).
+        /// "lua" (LuaJIT per-request), "wasm" (WASM per-request),
+        /// or "js" (V8 JavaScript, requires --features v8).
         /// Auto-detected from file extension if omitted.
         #[arg(long, default_value = "auto")]
         plugin_type: String,
@@ -255,12 +256,12 @@ enum Commands {
         #[arg(long, required = true, num_args = 1..)]
         url: Vec<String>,
 
-        /// Path to a plugin script (.lua) or WASM module (.wasm).
+        /// Path to a plugin script (.lua, .js) or WASM module (.wasm).
         /// The plugin is read locally and sent to all agents.
         #[arg(long)]
         plugin: Option<String>,
 
-        /// Plugin type: "hybrid", "lua", or "wasm". Auto-detected from extension if omitted.
+        /// Plugin type: "hybrid", "lua", "wasm", or "js". Auto-detected from extension if omitted.
         #[arg(long, default_value = "auto")]
         plugin_type: String,
 

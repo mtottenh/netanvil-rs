@@ -1,0 +1,13 @@
+[package]
+name = "netanvil-plugin-v8"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "V8 JavaScript plugin runtime for netanvil-rs"
+
+[dependencies]
+netanvil-types = { workspace = true }
+netanvil-plugin = { workspace = true }
+http = { workspace = true }
+v8 = "147"

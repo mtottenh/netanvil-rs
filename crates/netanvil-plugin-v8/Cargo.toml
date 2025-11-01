@@ -11,3 +11,10 @@ netanvil-types = { workspace = true }
 netanvil-plugin = { workspace = true }
 http = { workspace = true }
 v8 = "147"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "v8_overhead"
+harness = false

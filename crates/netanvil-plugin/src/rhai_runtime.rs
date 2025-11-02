@@ -311,6 +311,42 @@ impl FromRhaiPlugin for netanvil_types::DnsRequestSpec {
     }
 }
 
+impl FromRhaiPlugin for netanvil_types::RedisRequestSpec {
+    fn from_rhai_map(map: &Map) -> std::result::Result<Self, PluginError> {
+        let command = map
+            .get("command")
+            .and_then(|v| v.clone().into_string().ok())
+            .ok_or_else(|| PluginError::InvalidResponse("missing 'command' in response".into()))?;
+
+        let args = match map.get("args") {
+            Some(v) => {
+                if let Ok(arr) = v.clone().into_array() {
+                    arr.into_iter()
+                        .filter_map(|item| item.into_string().ok())
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            }
+            None => Vec::new(),
+        };
+
+        Ok(netanvil_types::RedisRequestSpec {
+            target: "0.0.0.0:0".parse().unwrap(),
+            command,
+            args,
+        })
+    }
+
+    fn fallback() -> Self {
+        netanvil_types::RedisRequestSpec {
+            target: "127.0.0.1:6379".parse().unwrap(),
+            command: "PING".into(),
+            args: vec![],
+        }
+    }
+}
+
 impl FromRhaiPlugin for netanvil_types::UdpRequestSpec {
     fn from_rhai_map(map: &Map) -> std::result::Result<Self, PluginError> {
         let payload = map

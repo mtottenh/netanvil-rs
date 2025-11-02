@@ -372,6 +372,38 @@ impl FromPostcard for netanvil_types::UdpRequestSpec {
     }
 }
 
+/// Serializable Redis command spec returned by plugins.
+///
+/// Plugins return `{command, args}` — target, auth, and db come from
+/// test configuration and are filled in by the generator or transformer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginRedisSpec {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl FromPostcard for netanvil_types::RedisRequestSpec {
+    fn from_postcard_bytes(bytes: &[u8]) -> std::result::Result<Self, crate::error::PluginError> {
+        let plugin: PluginRedisSpec = postcard::from_bytes(bytes)
+            .map_err(|e| crate::error::PluginError::InvalidResponse(format!("postcard: {e}")))?;
+
+        Ok(netanvil_types::RedisRequestSpec {
+            target: "0.0.0.0:0".parse().unwrap(),
+            command: plugin.command,
+            args: plugin.args,
+        })
+    }
+
+    fn fallback() -> Self {
+        netanvil_types::RedisRequestSpec {
+            target: "127.0.0.1:6379".parse().unwrap(),
+            command: "PING".into(),
+            args: vec![],
+        }
+    }
+}
+
 impl FromPostcard for netanvil_types::HttpRequestSpec {
     fn from_postcard_bytes(bytes: &[u8]) -> std::result::Result<Self, crate::error::PluginError> {
         let plugin_spec: PluginHttpRequestSpec = postcard::from_bytes(bytes)
@@ -400,6 +432,7 @@ mod tests {
         assert!(netanvil_types::TcpRequestSpec::from_postcard_bytes(bad).is_err());
         assert!(netanvil_types::DnsRequestSpec::from_postcard_bytes(bad).is_err());
         assert!(netanvil_types::UdpRequestSpec::from_postcard_bytes(bad).is_err());
+        assert!(netanvil_types::RedisRequestSpec::from_postcard_bytes(bad).is_err());
     }
 
     #[test]

@@ -1,0 +1,15 @@
+[package]
+name = "netanvil-redis"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Redis RESP protocol executor for netanvil-rs load testing"
+
+[dependencies]
+netanvil-types = { workspace = true }
+compio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

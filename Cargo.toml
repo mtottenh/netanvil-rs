@@ -14,6 +14,7 @@ members = [
     "crates/netanvil-tcp",
     "crates/netanvil-udp",
     "crates/netanvil-dns",
+    "crates/netanvil-redis",
     "crates/netanvil-test-servers",
     "crates/netanvil-harness",
     "crates/netanvil-cli",
@@ -29,6 +30,7 @@ default-members = [
     "crates/netanvil-tcp",
     "crates/netanvil-udp",
     "crates/netanvil-dns",
+    "crates/netanvil-redis",
     "crates/netanvil-test-servers",
     "crates/netanvil-api",
     "crates/netanvil-distributed",
@@ -108,6 +110,7 @@ netanvil-plugin-v8 = { path = "crates/netanvil-plugin-v8" }
 netanvil-tcp = { path = "crates/netanvil-tcp" }
 netanvil-udp = { path = "crates/netanvil-udp" }
 netanvil-dns = { path = "crates/netanvil-dns" }
+netanvil-redis = { path = "crates/netanvil-redis" }
 netanvil-test-servers = { path = "crates/netanvil-test-servers" }
 netanvil-harness = { path = "crates/netanvil-harness" }
 netanvil-cli = { path = "crates/netanvil-cli" }

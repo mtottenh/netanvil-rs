@@ -399,6 +399,33 @@ impl FromLuaPlugin for netanvil_types::DnsRequestSpec {
     }
 }
 
+impl FromLuaPlugin for netanvil_types::RedisRequestSpec {
+    fn from_lua_table(table: &LuaTable) -> std::result::Result<Self, PluginError> {
+        let command: String = table
+            .get("command")
+            .map_err(|e| PluginError::InvalidResponse(format!("command: {e}")))?;
+
+        let args: Vec<String> = match table.get::<LuaTable>("args") {
+            Ok(t) => t.sequence_values::<String>().flatten().collect(),
+            Err(_) => vec![],
+        };
+
+        Ok(netanvil_types::RedisRequestSpec {
+            target: "0.0.0.0:0".parse().unwrap(),
+            command,
+            args,
+        })
+    }
+
+    fn fallback() -> Self {
+        netanvil_types::RedisRequestSpec {
+            target: "127.0.0.1:6379".parse().unwrap(),
+            command: "PING".into(),
+            args: vec![],
+        }
+    }
+}
+
 impl FromLuaPlugin for netanvil_types::UdpRequestSpec {
     fn from_lua_table(table: &LuaTable) -> std::result::Result<Self, PluginError> {
         let payload: Vec<u8> = if let Ok(s) = table.get::<String>("payload") {

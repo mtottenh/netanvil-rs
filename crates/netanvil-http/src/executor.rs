@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use netanvil_types::config::TlsClientConfig;
+use netanvil_types::config::{HttpVersion, TlsClientConfig};
 use netanvil_types::{
     ExecutionError, ExecutionResult, HttpRequestSpec, RequestContext, RequestExecutor,
     TimingBreakdown,
@@ -92,6 +92,34 @@ impl HttpExecutor {
         }
     }
 
+    /// Create an executor with HTTP version pinning and optional bandwidth throttling.
+    ///
+    /// When `http_version != Http1`, forces the ThrottledConnector path to
+    /// get ALPN and hyper builder control, even without explicit TLS config.
+    pub fn with_http_version(
+        http_version: HttpVersion,
+        bandwidth_bps: Option<u64>,
+        timeout: Duration,
+    ) -> Self {
+        if http_version == HttpVersion::Http1 && bandwidth_bps.is_none() {
+            return Self::with_timeout(timeout);
+        }
+
+        let connector = ThrottledConnector::new(bandwidth_bps);
+        let mut builder = hyper_util::client::legacy::Client::builder(cyper_core::CompioExecutor);
+        builder.set_host(true);
+        builder.timer(cyper_core::CompioTimer);
+        apply_http_version(&mut builder, http_version);
+        let client = builder.build(connector);
+        Self {
+            client: HttpClient::Throttled(client),
+            request_timeout: timeout,
+            capture_headers: false,
+            capture_body: false,
+            capture_body_pct: 0,
+        }
+    }
+
     /// Create an executor with TLS configuration and optional bandwidth throttling.
     ///
     /// Uses rustls with the ring crypto provider. All HTTPS connections go
@@ -102,16 +130,27 @@ impl HttpExecutor {
         bandwidth_bps: Option<u64>,
         timeout: Duration,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let compio_tls = build_tls_connector(tls_config)?;
+        Self::with_tls_and_version(tls_config, bandwidth_bps, timeout, HttpVersion::Http1)
+    }
+
+    /// Create an executor with TLS configuration, bandwidth throttling, and HTTP version.
+    pub fn with_tls_and_version(
+        tls_config: &TlsClientConfig,
+        bandwidth_bps: Option<u64>,
+        timeout: Duration,
+        http_version: HttpVersion,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let compio_tls = build_tls_connector(tls_config, http_version)?;
         let connector = ThrottledConnector::with_tls(
             bandwidth_bps,
             compio_tls,
             tls_config.sni_override.clone(),
         );
-        let client = hyper_util::client::legacy::Client::builder(cyper_core::CompioExecutor)
-            .set_host(true)
-            .timer(cyper_core::CompioTimer)
-            .build(connector);
+        let mut builder = hyper_util::client::legacy::Client::builder(cyper_core::CompioExecutor);
+        builder.set_host(true);
+        builder.timer(cyper_core::CompioTimer);
+        apply_http_version(&mut builder, http_version);
+        let client = builder.build(connector);
         Ok(Self {
             client: HttpClient::Throttled(client),
             request_timeout: timeout,
@@ -134,17 +173,22 @@ impl HttpExecutor {
 
     /// Create an executor with connection settings from TestConfig.
     ///
-    /// Handles noreuse (fd leaking) and dns_mode (address family filtering)
-    /// which require the ThrottledConnector path even without bandwidth limits.
+    /// Handles noreuse (fd leaking), dns_mode (address family filtering),
+    /// and HTTP version pinning, all of which require the ThrottledConnector
+    /// path even without bandwidth limits.
     pub fn with_connection_config(
         tls_config: Option<&TlsClientConfig>,
         bandwidth_bps: Option<u64>,
         timeout: Duration,
         noreuse: bool,
         dns_mode: Option<netanvil_types::config::DnsMode>,
+        http_version: HttpVersion,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let needs_custom_connector =
-            tls_config.is_some() || bandwidth_bps.is_some() || noreuse || dns_mode.is_some();
+        let needs_custom_connector = tls_config.is_some()
+            || bandwidth_bps.is_some()
+            || noreuse
+            || dns_mode.is_some()
+            || http_version != HttpVersion::Http1;
 
         if !needs_custom_connector {
             return Ok(Self::with_timeout(timeout));
@@ -152,7 +196,7 @@ impl HttpExecutor {
 
         let mut connector = match tls_config {
             Some(tls) => {
-                let compio_tls = build_tls_connector(tls)?;
+                let compio_tls = build_tls_connector(tls, http_version)?;
                 ThrottledConnector::with_tls(bandwidth_bps, compio_tls, tls.sni_override.clone())
             }
             None => ThrottledConnector::new(bandwidth_bps),
@@ -164,6 +208,7 @@ impl HttpExecutor {
         let mut builder = hyper_util::client::legacy::Client::builder(cyper_core::CompioExecutor);
         builder.set_host(true);
         builder.timer(cyper_core::CompioTimer);
+        apply_http_version(&mut builder, http_version);
 
         // When noreuse is active, disable connection pooling so each request
         // gets a fresh connection (the old one's fd leaks intentionally).
@@ -410,6 +455,28 @@ async fn do_execute_throttled(
         headers,
         body: if capture_body { Some(body_bytes) } else { None },
     })
+}
+
+/// Configure the hyper client builder for the requested HTTP version.
+///
+/// - `Http1` → no change (default is HTTP/1.1; ALPN set to h1.1 elsewhere)
+/// - `Http2` / `Http2c` → `.http2_only(true)` (use h2 prior knowledge or fail)
+/// - `Auto` → default (try h2, fall back to h1 based on ALPN)
+fn apply_http_version(
+    builder: &mut hyper_util::client::legacy::Builder,
+    http_version: HttpVersion,
+) {
+    match http_version {
+        HttpVersion::Http1 => {
+            // Default behavior: HTTP/1.1 only (ALPN set to h1.1 in TLS config)
+        }
+        HttpVersion::Http2 | HttpVersion::Http2c => {
+            builder.http2_only(true);
+        }
+        HttpVersion::Auto => {
+            // Default behavior: let ALPN negotiate
+        }
+    }
 }
 
 fn categorize_cyper_error(err: cyper::Error) -> ExecutionError {

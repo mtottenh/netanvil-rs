@@ -2,10 +2,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use netanvil_core::{GenericGeneratorFactory, GeneratorFactory};
+use netanvil_core::{GeneratorFactory, GenericGeneratorFactory};
 use netanvil_types::{
-    ConnectionPolicy, CountDistribution, PidTarget, PluginType, RateConfig, ResponseSignalConfig,
-    SchedulerConfig, SignalAggregation, TargetMetric,
+    ConnectionPolicy, CountDistribution, HttpVersion, PidTarget, PluginType, RateConfig,
+    ResponseSignalConfig, SchedulerConfig, SignalAggregation, TargetMetric,
 };
 
 pub fn parse_duration(s: &str) -> Result<Duration> {
@@ -218,6 +218,22 @@ pub fn format_bandwidth(bps: u64) -> String {
     }
 }
 
+/// Parse an HTTP version string from the CLI into an [`HttpVersion`] enum.
+///
+/// Accepted values: "1.1", "1", "http1" → Http1; "2", "h2" → Http2;
+/// "2c", "h2c" → Http2c; "auto" → Auto.
+pub fn parse_http_version(s: &str) -> Result<HttpVersion> {
+    match s.to_lowercase().trim() {
+        "1.1" | "1" | "http1" | "http/1.1" => Ok(HttpVersion::Http1),
+        "2" | "h2" | "http2" | "http/2" => Ok(HttpVersion::Http2),
+        "2c" | "h2c" | "http2c" => Ok(HttpVersion::Http2c),
+        "auto" | "negotiate" => Ok(HttpVersion::Auto),
+        other => anyhow::bail!(
+            "unknown HTTP version: '{other}'. Use \"1.1\", \"2\", \"2c\", or \"auto\""
+        ),
+    }
+}
+
 /// Detect plugin type from file extension or explicit --plugin-type flag.
 pub fn detect_plugin_type(path: &str, explicit: &str) -> Result<PluginType> {
     if explicit != "auto" {
@@ -344,9 +360,7 @@ pub fn build_tcp_plugin_factory(
                     )
                     .expect("LuaJIT generator init failed"),
                 )
-                    as Box<
-                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::TcpRequestSpec>,
-                    >
+                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::TcpRequestSpec>>
             }))
         }
         PluginType::Wasm => {
@@ -362,9 +376,7 @@ pub fn build_tcp_plugin_factory(
                     )
                     .expect("WASM generator init failed"),
                 )
-                    as Box<
-                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::TcpRequestSpec>,
-                    >
+                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::TcpRequestSpec>>
             }))
         }
         PluginType::Js => {
@@ -381,9 +393,7 @@ pub fn build_tcp_plugin_factory(
                         .expect("V8 generator init failed"),
                     )
                         as Box<
-                            dyn netanvil_types::RequestGenerator<
-                                Spec = netanvil_types::TcpRequestSpec,
-                            >,
+                            dyn netanvil_types::RequestGenerator<Spec = netanvil_types::TcpRequestSpec>,
                         >
                 }))
             }
@@ -422,9 +432,7 @@ pub fn build_udp_plugin_factory(
                     )
                     .expect("LuaJIT generator init failed"),
                 )
-                    as Box<
-                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::UdpRequestSpec>,
-                    >
+                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::UdpRequestSpec>>
             }))
         }
         PluginType::Wasm => {
@@ -440,9 +448,7 @@ pub fn build_udp_plugin_factory(
                     )
                     .expect("WASM generator init failed"),
                 )
-                    as Box<
-                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::UdpRequestSpec>,
-                    >
+                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::UdpRequestSpec>>
             }))
         }
         PluginType::Js => {
@@ -459,9 +465,7 @@ pub fn build_udp_plugin_factory(
                         .expect("V8 generator init failed"),
                     )
                         as Box<
-                            dyn netanvil_types::RequestGenerator<
-                                Spec = netanvil_types::UdpRequestSpec,
-                            >,
+                            dyn netanvil_types::RequestGenerator<Spec = netanvil_types::UdpRequestSpec>,
                         >
                 }))
             }
@@ -500,9 +504,7 @@ pub fn build_dns_plugin_factory(
                     )
                     .expect("LuaJIT generator init failed"),
                 )
-                    as Box<
-                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::DnsRequestSpec>,
-                    >
+                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::DnsRequestSpec>>
             }))
         }
         PluginType::Wasm => {
@@ -518,9 +520,7 @@ pub fn build_dns_plugin_factory(
                     )
                     .expect("WASM generator init failed"),
                 )
-                    as Box<
-                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::DnsRequestSpec>,
-                    >
+                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::DnsRequestSpec>>
             }))
         }
         PluginType::Js => {
@@ -537,9 +537,7 @@ pub fn build_dns_plugin_factory(
                         .expect("V8 generator init failed"),
                     )
                         as Box<
-                            dyn netanvil_types::RequestGenerator<
-                                Spec = netanvil_types::DnsRequestSpec,
-                            >,
+                            dyn netanvil_types::RequestGenerator<Spec = netanvil_types::DnsRequestSpec>,
                         >
                 }))
             }

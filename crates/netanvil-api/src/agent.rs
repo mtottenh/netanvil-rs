@@ -137,10 +137,7 @@ impl AgentServer {
                     match path.as_str() {
                         "/metrics/prometheus" | "/metrics" => {
                             let agent = inner.lock().unwrap();
-                            handlers::handle_get_metrics_prometheus(
-                                request,
-                                &agent.shared_state,
-                            );
+                            handlers::handle_get_metrics_prometheus(request, &agent.shared_state);
                         }
                         _ => handlers::handle_not_found(request),
                     }
@@ -470,6 +467,11 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
                     recursion,
                     plugin_config.as_ref(),
                 ),
+                Some(netanvil_types::ProtocolConfig::Redis { .. }) => {
+                    Err(netanvil_types::NetAnvilError::Config(
+                        "Redis protocol not yet supported in agent mode".into(),
+                    ))
+                }
                 None => {
                     // Default HTTP path
                     let plugin_factory = plugin_config.as_ref().and_then(|pc| {
@@ -529,16 +531,17 @@ fn run_http_test(
 ) -> netanvil_types::Result<TestResult> {
     let tls_client = config.tls_client.clone();
     let bandwidth_bps = config.bandwidth_limit_bps;
+    let http_version = config.http_version;
     let make_executor = move || -> HttpExecutor {
         match &tls_client {
-            Some(tls_config) => {
-                HttpExecutor::with_tls_config(tls_config, bandwidth_bps, request_timeout)
-                    .expect("TLS configuration error")
-            }
-            None => match bandwidth_bps {
-                Some(bps) => HttpExecutor::with_bandwidth_limit(bps, request_timeout),
-                None => HttpExecutor::with_timeout(request_timeout),
-            },
+            Some(tls_config) => HttpExecutor::with_tls_and_version(
+                tls_config,
+                bandwidth_bps,
+                request_timeout,
+                http_version,
+            )
+            .expect("TLS configuration error"),
+            None => HttpExecutor::with_http_version(http_version, bandwidth_bps, request_timeout),
         }
     };
     let mut builder = TestBuilder::new(config, make_executor)
@@ -573,63 +576,62 @@ fn run_tcp_test(
     let max_conns = config.connections.max_connections_per_core;
     let policy = config.connections.connection_policy.clone();
 
-    let gen_factory: netanvil_core::GenericGeneratorFactory<TcpRequestSpec> =
-        if let Some(factory) = plugin.and_then(|pc| build_tcp_plugin_factory(pc, &config.targets)) {
-            factory
-        } else {
-            let payload = decode_hex_bytes(payload_hex);
-            let mode = match mode_str {
-                "echo" => TcpTestMode::Echo,
-                "rr" => TcpTestMode::RR,
-                "sink" | "stream" => TcpTestMode::Sink,
-                "source" | "maerts" => TcpTestMode::Source,
-                "bidir" => TcpTestMode::Bidir,
-                _ => TcpTestMode::Echo,
-            };
-            let framing = if framing_str == "raw" || framing_str.is_empty() {
-                TcpFraming::Raw
-            } else if let Some(rest) = framing_str.strip_prefix("delimiter:") {
-                TcpFraming::Delimiter(
-                    rest.replace("\\r", "\r").replace("\\n", "\n").into_bytes(),
-                )
-            } else if framing_str == "delimiter" {
-                TcpFraming::Delimiter(b"\r\n".to_vec())
-            } else if let Some(rest) = framing_str.strip_prefix("length-prefix:") {
-                TcpFraming::LengthPrefixed {
-                    width: rest.parse().unwrap_or(4),
-                }
-            } else if let Some(rest) = framing_str.strip_prefix("fixed:") {
-                TcpFraming::FixedSize(rest.parse().unwrap_or(1024))
-            } else {
-                TcpFraming::Raw
-            };
-
-            let targets: Vec<std::net::SocketAddr> = config
-                .targets
-                .iter()
-                .filter_map(|t| {
-                    t.strip_prefix("tcp://")
-                        .and_then(|a| a.parse().ok())
-                        .or_else(|| t.parse().ok())
-                })
-                .collect();
-
-            let expect_response = mode == TcpTestMode::Echo || mode == TcpTestMode::RR;
-
-            Box::new(move |_core_id| {
-                Box::new(
-                    SimpleTcpGenerator::new(
-                        targets.clone(),
-                        payload.clone(),
-                        framing.clone(),
-                        expect_response,
-                    )
-                    .with_mode(mode)
-                    .with_request_size(request_size)
-                    .with_response_size(response_size),
-                )
-            })
+    let gen_factory: netanvil_core::GenericGeneratorFactory<TcpRequestSpec> = if let Some(factory) =
+        plugin.and_then(|pc| build_tcp_plugin_factory(pc, &config.targets))
+    {
+        factory
+    } else {
+        let payload = decode_hex_bytes(payload_hex);
+        let mode = match mode_str {
+            "echo" => TcpTestMode::Echo,
+            "rr" => TcpTestMode::RR,
+            "sink" | "stream" => TcpTestMode::Sink,
+            "source" | "maerts" => TcpTestMode::Source,
+            "bidir" => TcpTestMode::Bidir,
+            _ => TcpTestMode::Echo,
         };
+        let framing = if framing_str == "raw" || framing_str.is_empty() {
+            TcpFraming::Raw
+        } else if let Some(rest) = framing_str.strip_prefix("delimiter:") {
+            TcpFraming::Delimiter(rest.replace("\\r", "\r").replace("\\n", "\n").into_bytes())
+        } else if framing_str == "delimiter" {
+            TcpFraming::Delimiter(b"\r\n".to_vec())
+        } else if let Some(rest) = framing_str.strip_prefix("length-prefix:") {
+            TcpFraming::LengthPrefixed {
+                width: rest.parse().unwrap_or(4),
+            }
+        } else if let Some(rest) = framing_str.strip_prefix("fixed:") {
+            TcpFraming::FixedSize(rest.parse().unwrap_or(1024))
+        } else {
+            TcpFraming::Raw
+        };
+
+        let targets: Vec<std::net::SocketAddr> = config
+            .targets
+            .iter()
+            .filter_map(|t| {
+                t.strip_prefix("tcp://")
+                    .and_then(|a| a.parse().ok())
+                    .or_else(|| t.parse().ok())
+            })
+            .collect();
+
+        let expect_response = mode == TcpTestMode::Echo || mode == TcpTestMode::RR;
+
+        Box::new(move |_core_id| {
+            Box::new(
+                SimpleTcpGenerator::new(
+                    targets.clone(),
+                    payload.clone(),
+                    framing.clone(),
+                    expect_response,
+                )
+                .with_mode(mode)
+                .with_request_size(request_size)
+                .with_response_size(response_size),
+            )
+        })
+    };
 
     let trans_factory: netanvil_core::GenericTransformerFactory<TcpRequestSpec> =
         Box::new(|_| Box::new(TcpNoopTransformer));
@@ -659,29 +661,30 @@ fn run_udp_test(
 ) -> netanvil_types::Result<TestResult> {
     use netanvil_udp::*;
 
-    let gen_factory: netanvil_core::GenericGeneratorFactory<UdpRequestSpec> =
-        if let Some(factory) = plugin.and_then(|pc| build_udp_plugin_factory(pc, &config.targets)) {
-            factory
-        } else {
-            let payload = decode_hex_bytes(payload_hex);
-            let targets: Vec<std::net::SocketAddr> = config
-                .targets
-                .iter()
-                .filter_map(|t| {
-                    t.strip_prefix("udp://")
-                        .and_then(|a| a.parse().ok())
-                        .or_else(|| t.parse().ok())
-                })
-                .collect();
-
-            Box::new(move |_core_id| {
-                Box::new(SimpleUdpGenerator::new(
-                    targets.clone(),
-                    payload.clone(),
-                    expect_response,
-                ))
+    let gen_factory: netanvil_core::GenericGeneratorFactory<UdpRequestSpec> = if let Some(factory) =
+        plugin.and_then(|pc| build_udp_plugin_factory(pc, &config.targets))
+    {
+        factory
+    } else {
+        let payload = decode_hex_bytes(payload_hex);
+        let targets: Vec<std::net::SocketAddr> = config
+            .targets
+            .iter()
+            .filter_map(|t| {
+                t.strip_prefix("udp://")
+                    .and_then(|a| a.parse().ok())
+                    .or_else(|| t.parse().ok())
             })
-        };
+            .collect();
+
+        Box::new(move |_core_id| {
+            Box::new(SimpleUdpGenerator::new(
+                targets.clone(),
+                payload.clone(),
+                expect_response,
+            ))
+        })
+    };
 
     let trans_factory: netanvil_core::GenericTransformerFactory<UdpRequestSpec> =
         Box::new(|_| Box::new(UdpNoopTransformer));
@@ -711,36 +714,36 @@ fn run_dns_test(
 ) -> netanvil_types::Result<TestResult> {
     use netanvil_dns::*;
 
-    let gen_factory: netanvil_core::GenericGeneratorFactory<DnsRequestSpec> =
-        if let Some(factory) = plugin.and_then(|pc| build_dns_plugin_factory(pc, &config.targets)) {
-            factory
-        } else {
-            let domains: Vec<String> = domains_csv
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect();
-            let query_type =
-                DnsQueryType::from_str_name(query_type_str).unwrap_or(DnsQueryType::A);
+    let gen_factory: netanvil_core::GenericGeneratorFactory<DnsRequestSpec> = if let Some(factory) =
+        plugin.and_then(|pc| build_dns_plugin_factory(pc, &config.targets))
+    {
+        factory
+    } else {
+        let domains: Vec<String> = domains_csv
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect();
+        let query_type = DnsQueryType::from_str_name(query_type_str).unwrap_or(DnsQueryType::A);
 
-            let targets: Vec<std::net::SocketAddr> = config
-                .targets
-                .iter()
-                .filter_map(|t| {
-                    t.strip_prefix("dns://")
-                        .and_then(|a| a.parse().ok())
-                        .or_else(|| t.parse().ok())
-                })
-                .collect();
-
-            Box::new(move |_core_id| {
-                Box::new(SimpleDnsGenerator::new(
-                    targets.clone(),
-                    domains.clone(),
-                    query_type,
-                    recursion,
-                ))
+        let targets: Vec<std::net::SocketAddr> = config
+            .targets
+            .iter()
+            .filter_map(|t| {
+                t.strip_prefix("dns://")
+                    .and_then(|a| a.parse().ok())
+                    .or_else(|| t.parse().ok())
             })
-        };
+            .collect();
+
+        Box::new(move |_core_id| {
+            Box::new(SimpleDnsGenerator::new(
+                targets.clone(),
+                domains.clone(),
+                query_type,
+                recursion,
+            ))
+        })
+    };
 
     let trans_factory: netanvil_core::GenericTransformerFactory<DnsRequestSpec> =
         Box::new(|_| Box::new(DnsNoopTransformer));
@@ -828,16 +831,15 @@ fn build_http_plugin_factory(
                     Box::new(
                         netanvil_plugin_v8::V8Generator::new(&script, &targets)
                             .expect("V8 init failed"),
-                    ) as Box<dyn RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
+                    )
+                        as Box<dyn RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
                 }))
             }
             #[cfg(not(feature = "v8"))]
             {
-                Err(
-                    "V8/JS plugin support requires the 'v8' feature flag. \
+                Err("V8/JS plugin support requires the 'v8' feature flag. \
                      Rebuild with: cargo build --features v8"
-                        .into(),
-                )
+                    .into())
             }
         }
     }

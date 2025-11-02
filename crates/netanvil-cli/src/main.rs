@@ -137,6 +137,11 @@ enum Commands {
         #[arg(long)]
         api_port: Option<u16>,
 
+        /// HTTP version: "1.1" (default), "2" (h2 over TLS), "2c" (h2 cleartext),
+        /// "auto" (ALPN negotiation). Only applies to HTTP targets.
+        #[arg(long, default_value = "1.1")]
+        http_version: String,
+
         /// Bandwidth limit for modem speed simulation. Throttles TCP reads to
         /// create real server-side backpressure. Accepts human-friendly values:
         /// "56k" (56 kbps), "384k", "1m" (1 Mbps), "10m", or raw bps "56000".
@@ -357,6 +362,11 @@ enum Commands {
         #[arg(long)]
         tls_key: Option<String>,
 
+        /// HTTP version: "1.1" (default), "2" (h2 over TLS), "2c" (h2 cleartext),
+        /// "auto" (ALPN negotiation). Only applies to HTTP targets.
+        #[arg(long, default_value = "1.1")]
+        http_version: String,
+
         /// Extract numeric value from a response header for PID rate control.
         /// Format: "Header-Name" or "Header-Name:aggregation" (mean/max/last).
         /// Repeatable for multiple signals.
@@ -477,6 +487,7 @@ fn main() -> Result<()> {
             conn_lifetime,
             output,
             api_port,
+            http_version,
             bandwidth,
             response_signals,
             payload,
@@ -522,6 +533,7 @@ fn main() -> Result<()> {
             conn_lifetime,
             output,
             api_port,
+            http_version,
             bandwidth,
             response_signals,
             payload,
@@ -577,6 +589,7 @@ fn main() -> Result<()> {
             tls_ca,
             tls_cert,
             tls_key,
+            http_version,
             response_signals,
             payload,
             payload_hex,
@@ -623,6 +636,7 @@ fn main() -> Result<()> {
             tls_ca,
             tls_cert,
             tls_key,
+            http_version,
             response_signals,
             payload,
             payload_hex,

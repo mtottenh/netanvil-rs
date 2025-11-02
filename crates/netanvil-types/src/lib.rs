@@ -10,6 +10,7 @@ pub mod dns_spec;
 pub mod error;
 pub mod metrics;
 pub mod node;
+pub mod redis_spec;
 pub mod request;
 pub mod tcp_spec;
 pub mod traits;
@@ -17,9 +18,9 @@ pub mod udp_spec;
 
 pub use command::{ScheduledRequest, TimerCommand, WorkerCommand};
 pub use config::{
-    ConnectionConfig, ConnectionPolicy, CountDistribution, PidConstraint, PidGains, PidTarget,
-    PluginConfig, PluginType, ProtocolConfig, RateConfig, ResponseSignalConfig, SchedulerConfig,
-    SignalAggregation, TargetMetric, TestConfig, TlsConfig,
+    ConnectionConfig, ConnectionPolicy, CountDistribution, HttpVersion, PidConstraint, PidGains,
+    PidTarget, PluginConfig, PluginType, ProtocolConfig, RateConfig, ResponseSignalConfig,
+    SchedulerConfig, SignalAggregation, TargetMetric, TestConfig, TlsConfig,
 };
 pub use distributed::{MetricsFetcher, NodeCommander, NodeDiscovery, RemoteMetrics};
 pub use dns_spec::{DnsQueryType, DnsRequestSpec};
@@ -28,6 +29,7 @@ pub use metrics::{
     MetricsSnapshot, MetricsSummary, RateDecision, SaturationAssessment, SaturationInfo,
 };
 pub use node::{NodeId, NodeInfo, NodeState};
+pub use redis_spec::RedisRequestSpec;
 pub use request::{
     ExecutionError, ExecutionResult, HttpRequestSpec, ProtocolSpec, RequestContext, TimingBreakdown,
 };

@@ -39,6 +39,7 @@ pub fn run(
     conn_lifetime: Option<String>,
     output: String,
     api_port: Option<u16>,
+    http_version: String,
     bandwidth: Option<String>,
     response_signals: Vec<String>,
     payload: Option<String>,
@@ -63,6 +64,7 @@ pub fn run(
         .map(parse_bandwidth)
         .transpose()
         .context("invalid --bandwidth")?;
+    let http_version = parse_http_version(&http_version).context("invalid --http-version")?;
     let autotune_dur =
         parse_duration(&pid_autotune_duration).context("invalid --pid-autotune-duration")?;
     let scheduler = parse_scheduler(&scheduler).context("invalid --scheduler")?;
@@ -116,6 +118,7 @@ pub fn run(
         control_interval: Duration::from_millis(100),
         error_status_threshold: error_threshold,
         bandwidth_limit_bps: bandwidth_bps,
+        http_version,
         response_signal_headers: parse_response_signals(&response_signals)?,
         ..Default::default()
     };
@@ -354,18 +357,23 @@ pub fn run(
         }
 
         DetectedProtocol::Http => {
-            // Build executor factory -- with TLS config, bandwidth throttling, or default
+            // Build executor factory -- with TLS config, bandwidth throttling,
+            // HTTP version pinning, or default
             let tls_client = config.tls_client.clone();
             let make_executor = move || -> HttpExecutor {
                 match &tls_client {
-                    Some(tls_config) => {
-                        HttpExecutor::with_tls_config(tls_config, bandwidth_bps, request_timeout)
-                            .expect("TLS configuration error")
-                    }
-                    None => match bandwidth_bps {
-                        Some(bps) => HttpExecutor::with_bandwidth_limit(bps, request_timeout),
-                        None => HttpExecutor::with_timeout(request_timeout),
-                    },
+                    Some(tls_config) => HttpExecutor::with_tls_and_version(
+                        tls_config,
+                        bandwidth_bps,
+                        request_timeout,
+                        http_version,
+                    )
+                    .expect("TLS configuration error"),
+                    None => HttpExecutor::with_http_version(
+                        http_version,
+                        bandwidth_bps,
+                        request_timeout,
+                    ),
                 }
             };
 

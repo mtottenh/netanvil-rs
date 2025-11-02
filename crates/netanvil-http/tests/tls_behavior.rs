@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use netanvil_http::{build_tls_connector, HttpExecutor};
-use netanvil_types::config::TlsClientConfig;
+use netanvil_types::config::{HttpVersion, TlsClientConfig};
 use netanvil_types::{HttpRequestSpec, RequestContext, RequestExecutor};
 
 // ---------------------------------------------------------------------------
@@ -222,7 +222,7 @@ fn build_connector_with_no_verify_succeeds() {
         cipher_list: None,
         disable_session_resumption: false,
     };
-    let result = build_tls_connector(&config);
+    let result = build_tls_connector(&config, HttpVersion::Http1);
     assert!(result.is_ok(), "should succeed: {:?}", result.err());
 }
 
@@ -240,7 +240,7 @@ fn build_connector_with_custom_ca_succeeds() {
         cipher_list: None,
         disable_session_resumption: false,
     };
-    let result = build_tls_connector(&config);
+    let result = build_tls_connector(&config, HttpVersion::Http1);
     assert!(result.is_ok(), "should succeed: {:?}", result.err());
 }
 
@@ -258,7 +258,7 @@ fn build_connector_with_client_cert_succeeds() {
         cipher_list: None,
         disable_session_resumption: false,
     };
-    let result = build_tls_connector(&config);
+    let result = build_tls_connector(&config, HttpVersion::Http1);
     assert!(result.is_ok(), "should succeed: {:?}", result.err());
 }
 
@@ -273,7 +273,7 @@ fn build_connector_with_valid_cipher_filter_succeeds() {
         cipher_list: Some("ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384".to_string()),
         disable_session_resumption: false,
     };
-    let result = build_tls_connector(&config);
+    let result = build_tls_connector(&config, HttpVersion::Http1);
     assert!(result.is_ok(), "should succeed: {:?}", result.err());
 }
 
@@ -288,7 +288,7 @@ fn build_connector_with_single_cipher_succeeds() {
         cipher_list: Some("ECDHE-RSA-AES128-GCM-SHA256".to_string()),
         disable_session_resumption: false,
     };
-    let result = build_tls_connector(&config);
+    let result = build_tls_connector(&config, HttpVersion::Http1);
     assert!(result.is_ok(), "should succeed: {:?}", result.err());
 }
 
@@ -303,7 +303,7 @@ fn build_connector_with_tls13_cipher_succeeds() {
         cipher_list: Some("TLS_AES_256_GCM_SHA384".to_string()),
         disable_session_resumption: false,
     };
-    let result = build_tls_connector(&config);
+    let result = build_tls_connector(&config, HttpVersion::Http1);
     assert!(result.is_ok(), "should succeed: {:?}", result.err());
 }
 
@@ -318,7 +318,7 @@ fn build_connector_with_invalid_cipher_fails() {
         cipher_list: Some("RC4-MD5".to_string()),
         disable_session_resumption: false,
     };
-    let result = build_tls_connector(&config);
+    let result = build_tls_connector(&config, HttpVersion::Http1);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(
@@ -343,7 +343,7 @@ fn build_connector_with_mixed_valid_and_invalid_ciphers_warns_but_succeeds() {
         cipher_list: Some("ECDHE-RSA-AES128-GCM-SHA256:RC4-MD5".to_string()),
         disable_session_resumption: false,
     };
-    let result = build_tls_connector(&config);
+    let result = build_tls_connector(&config, HttpVersion::Http1);
     assert!(
         result.is_ok(),
         "should succeed with partial match: {:?}",
@@ -362,7 +362,7 @@ fn build_connector_with_session_resumption_disabled_succeeds() {
         cipher_list: None,
         disable_session_resumption: true,
     };
-    let result = build_tls_connector(&config);
+    let result = build_tls_connector(&config, HttpVersion::Http1);
     assert!(result.is_ok(), "should succeed: {:?}", result.err());
 }
 
@@ -377,7 +377,7 @@ fn build_connector_with_nonexistent_ca_cert_fails() {
         cipher_list: None,
         disable_session_resumption: false,
     };
-    let result = build_tls_connector(&config);
+    let result = build_tls_connector(&config, HttpVersion::Http1);
     assert!(result.is_err());
     assert!(
         result.unwrap_err().to_string().contains("reading CA cert"),
@@ -396,7 +396,7 @@ fn build_connector_with_nonexistent_client_cert_fails() {
         cipher_list: None,
         disable_session_resumption: false,
     };
-    let result = build_tls_connector(&config);
+    let result = build_tls_connector(&config, HttpVersion::Http1);
     assert!(result.is_err());
     assert!(
         result

@@ -74,6 +74,10 @@ pub struct TestConfig {
     /// Serializable for transmission from leader to agent nodes.
     #[serde(default)]
     pub protocol: Option<ProtocolConfig>,
+    /// HTTP version selection for load traffic.
+    /// Controls ALPN negotiation and hyper client HTTP/2 settings.
+    #[serde(default)]
+    pub http_version: HttpVersion,
     /// TLS configuration for load traffic connections to the target.
     /// When set, all HTTPS connections use the specified client certs,
     /// verification settings, SNI, and cipher preferences.
@@ -136,6 +140,17 @@ pub enum ProtocolConfig {
         /// Whether to set the RD (recursion desired) flag.
         recursion: bool,
     },
+    /// Redis test configuration.
+    Redis {
+        /// Optional AUTH password.
+        password: Option<String>,
+        /// Database number (SELECT).
+        db: Option<u16>,
+        /// Default command if no plugin specified.
+        command: String,
+        /// Default args if no plugin specified.
+        args: Vec<String>,
+    },
 }
 
 /// Plugin configuration embedded in TestConfig.
@@ -161,6 +176,24 @@ pub enum PluginType {
     Wasm,
     /// V8 JavaScript per-request generator. Requires the `v8` feature flag.
     Js,
+}
+
+/// HTTP version to use for load traffic connections.
+///
+/// Controls ALPN negotiation and hyper client configuration. This is a
+/// transport-level setting — plugins produce version-agnostic `HttpRequestSpec`
+/// and the executor handles version negotiation transparently.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HttpVersion {
+    /// HTTP/1.1 only. ALPN: ["http/1.1"]. Default behavior.
+    #[default]
+    Http1,
+    /// HTTP/2 only (TLS). ALPN: ["h2"]. Fails if server doesn't support h2.
+    Http2,
+    /// HTTP/2 cleartext (h2c). No TLS. Uses HTTP/2 prior knowledge.
+    Http2c,
+    /// Let ALPN negotiate. ALPN: ["h2", "http/1.1"].
+    Auto,
 }
 
 impl TestConfig {
@@ -200,6 +233,7 @@ impl Default for TestConfig {
             graceful_shutdown: true,
             plugin: None,
             protocol: None,
+            http_version: HttpVersion::default(),
             tls_client: None,
             target_bytes: None,
             tracked_response_headers: Vec::new(),

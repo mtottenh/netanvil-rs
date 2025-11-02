@@ -17,7 +17,7 @@ rustls-pemfile = "2"
 rustls-native-certs = "0.8"
 http = { workspace = true }
 hyper = "1"
-hyper-util = { version = "0.1", features = ["client-legacy"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2"] }
 tower-service = "0.3"
 send_wrapper = { version = "0.6", features = ["futures"] }
 futures-util = "0.3"

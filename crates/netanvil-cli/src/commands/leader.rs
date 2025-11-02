@@ -40,6 +40,7 @@ pub fn run(
     tls_ca: Option<String>,
     tls_cert: Option<String>,
     tls_key: Option<String>,
+    http_version: String,
     response_signals: Vec<String>,
     payload: Option<String>,
     payload_hex: Option<String>,
@@ -57,12 +58,14 @@ pub fn run(
     metrics_port: Option<u16>,
     output: String,
 ) -> Result<()> {
-    let output_format = crate::output::OutputFormat::parse(&output).map_err(|e| anyhow::anyhow!(e))?;
+    let output_format =
+        crate::output::OutputFormat::parse(&output).map_err(|e| anyhow::anyhow!(e))?;
     let duration = parse_duration(&duration).context("invalid --duration")?;
     let timeout = parse_duration(&timeout).context("invalid --timeout")?;
     let autotune_dur =
         parse_duration(&pid_autotune_duration).context("invalid --pid-autotune-duration")?;
     let ramp_warmup_dur = parse_duration(&ramp_warmup).context("invalid --ramp-warmup")?;
+    let http_version = parse_http_version(&http_version).context("invalid --http-version")?;
     let headers: Vec<(String, String)> = headers
         .iter()
         .map(|h| parse_header(h))
@@ -126,6 +129,7 @@ pub fn run(
         external_metrics_url: external_metrics_url.clone(),
         external_metrics_field: external_metrics_field.clone(),
         bandwidth_limit_bps: None,
+        http_version,
         plugin: plugin_config,
         response_signal_headers: parse_response_signals(&response_signals)?,
         ..Default::default()
@@ -201,9 +205,9 @@ pub fn run(
     let metrics_state = metrics_port.map(|port| {
         let state = LeaderMetricsState::new();
         let server = LeaderServer::new(state.clone());
-        server
-            .spawn(port)
-            .unwrap_or_else(|e| tracing::error!(port, "failed to start leader metrics server: {e}"));
+        server.spawn(port).unwrap_or_else(|e| {
+            tracing::error!(port, "failed to start leader metrics server: {e}")
+        });
         state
     });
 

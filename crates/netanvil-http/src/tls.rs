@@ -13,15 +13,22 @@ use rustls::crypto::ring::default_provider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, Error as TlsError, SignatureScheme};
 
-use netanvil_types::config::TlsClientConfig;
+use netanvil_types::config::{HttpVersion, TlsClientConfig};
 
 /// Build a `compio::tls::TlsConnector` from a [`TlsClientConfig`].
 ///
 /// Uses rustls with the ring crypto provider. The returned connector
 /// can be passed to [`ThrottledConnector::with_tls`] for use in the
 /// HTTP executor pipeline.
+///
+/// The `http_version` parameter controls ALPN protocol negotiation:
+/// - `Http1` → `["http/1.1"]`
+/// - `Http2` → `["h2"]`
+/// - `Auto` → `["h2", "http/1.1"]`
+/// - `Http2c` → empty (cleartext, no TLS needed)
 pub fn build_tls_connector(
     config: &TlsClientConfig,
+    http_version: HttpVersion,
 ) -> Result<compio::tls::TlsConnector, Box<dyn std::error::Error + Send + Sync>> {
     // --- Crypto provider (with optional cipher filtering) ---
     let provider = if let Some(ref cipher_str) = config.cipher_list {
@@ -73,7 +80,12 @@ pub fn build_tls_connector(
     }
 
     // --- ALPN ---
-    client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    client_config.alpn_protocols = match http_version {
+        HttpVersion::Http1 => vec![b"http/1.1".to_vec()],
+        HttpVersion::Http2 => vec![b"h2".to_vec()],
+        HttpVersion::Auto => vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+        HttpVersion::Http2c => vec![], // cleartext h2c — no TLS, no ALPN
+    };
 
     Ok(compio::tls::TlsConnector::from(Arc::new(client_config)))
 }

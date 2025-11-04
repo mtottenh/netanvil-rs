@@ -13,7 +13,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tiny_http = { workspace = true }
 flume = { workspace = true }
-rustls = "0.23"
+rustls = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
 
 [dev-dependencies]

@@ -77,16 +77,21 @@ pub fn build_server_config(tls: &TlsConfig) -> Result<Arc<rustls::ServerConfig>,
             .map_err(|e| format!("add CA cert: {e}"))?;
     }
 
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+
     // Require client certificates, verified against our CA
-    let client_verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
-        .build()
-        .map_err(|e| format!("build client verifier: {e}"))?;
+    let client_verifier =
+        WebPkiClientVerifier::builder_with_provider(Arc::new(root_store), provider.clone())
+            .build()
+            .map_err(|e| format!("build client verifier: {e}"))?;
 
     // Load server cert + key
     let server_certs = load_certs(&tls.cert)?;
     let server_key = load_key(&tls.key)?;
 
-    let config = rustls::ServerConfig::builder()
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("protocol versions: {e}"))?
         .with_client_cert_verifier(client_verifier)
         .with_single_cert(server_certs, server_key)
         .map_err(|e| format!("server config: {e}"))?;
@@ -109,10 +114,14 @@ pub fn build_client_config(tls: &TlsConfig) -> Result<Arc<rustls::ClientConfig>,
     let client_certs = load_certs(&tls.cert)?;
     let client_key = load_key(&tls.key)?;
 
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_client_auth_cert(client_certs, client_key)
-        .map_err(|e| format!("client config: {e}"))?;
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| format!("protocol versions: {e}"))?
+    .with_root_certificates(root_store)
+    .with_client_auth_cert(client_certs, client_key)
+    .map_err(|e| format!("client config: {e}"))?;
 
     Ok(Arc::new(config))
 }

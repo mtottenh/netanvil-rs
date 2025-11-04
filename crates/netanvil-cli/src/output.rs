@@ -128,9 +128,18 @@ impl From<&DistributedTestResult> for DistributedTestSummary {
             .collect();
 
         // Conservative: max across nodes
-        let p50 = nodes.iter().map(|n| n.latency_p50_ms).fold(0.0f64, f64::max);
-        let p90 = nodes.iter().map(|n| n.latency_p90_ms).fold(0.0f64, f64::max);
-        let p99 = nodes.iter().map(|n| n.latency_p99_ms).fold(0.0f64, f64::max);
+        let p50 = nodes
+            .iter()
+            .map(|n| n.latency_p50_ms)
+            .fold(0.0f64, f64::max);
+        let p90 = nodes
+            .iter()
+            .map(|n| n.latency_p90_ms)
+            .fold(0.0f64, f64::max);
+        let p99 = nodes
+            .iter()
+            .map(|n| n.latency_p99_ms)
+            .fold(0.0f64, f64::max);
 
         Self {
             total_requests: r.total_requests,

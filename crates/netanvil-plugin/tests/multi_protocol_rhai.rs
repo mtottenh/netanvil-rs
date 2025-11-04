@@ -33,8 +33,7 @@ fn rhai_http_basic() {
     "#;
 
     let targets = vec!["http://example.com".into()];
-    let mut gen =
-        RhaiGenerator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = RhaiGenerator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(42, 3));
     assert_eq!(spec.method, http::Method::GET);
@@ -60,8 +59,7 @@ fn rhai_dns_basic() {
     "#;
 
     let targets = vec![];
-    let mut gen =
-        RhaiGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = RhaiGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(1, 0));
     assert_eq!(spec.query_name, "example.com");
@@ -79,8 +77,7 @@ fn rhai_dns_minimal_defaults() {
     "#;
 
     let targets = vec![];
-    let mut gen =
-        RhaiGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = RhaiGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(1, 0));
     assert_eq!(spec.query_name, "minimal.test");
@@ -99,8 +96,7 @@ fn rhai_tcp_payload() {
     "#;
 
     let targets = vec![];
-    let mut gen =
-        RhaiGenerator::<netanvil_types::TcpRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = RhaiGenerator::<netanvil_types::TcpRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(1, 0));
     assert_eq!(spec.payload, b"PING\r\n");
@@ -115,8 +111,7 @@ fn rhai_tcp_empty_payload() {
     "#;
 
     let targets = vec![];
-    let mut gen =
-        RhaiGenerator::<netanvil_types::TcpRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = RhaiGenerator::<netanvil_types::TcpRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(1, 0));
     assert!(spec.payload.is_empty());
@@ -133,8 +128,7 @@ fn rhai_udp_payload() {
     "#;
 
     let targets = vec![];
-    let mut gen =
-        RhaiGenerator::<netanvil_types::UdpRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = RhaiGenerator::<netanvil_types::UdpRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(1, 0));
     assert_eq!(spec.payload, b"HELLO");

@@ -37,8 +37,7 @@ fn lua_http_basic_get() {
     "#;
 
     let targets = vec!["http://example.com".into()];
-    let mut gen =
-        LuaJitGenerator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = LuaJitGenerator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(42, 3));
     assert_eq!(spec.method, http::Method::GET);
@@ -63,8 +62,7 @@ fn lua_http_post_with_body() {
     "#;
 
     let targets = vec!["http://api.example.com".into()];
-    let mut gen =
-        LuaJitGenerator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = LuaJitGenerator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(99, 0));
     assert_eq!(spec.method, http::Method::POST);
@@ -87,8 +85,7 @@ fn lua_http_uses_init_targets() {
     "#;
 
     let targets = vec!["http://myhost:8080".into()];
-    let mut gen =
-        LuaJitGenerator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = LuaJitGenerator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(1, 0));
     assert_eq!(spec.url, "http://myhost:8080/test");
@@ -111,8 +108,7 @@ fn lua_dns_basic_query() {
     "#;
 
     let targets = vec!["dns://8.8.8.8:53".into()];
-    let mut gen =
-        LuaJitGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = LuaJitGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(1, 0));
     assert_eq!(spec.query_name, "example.com");
@@ -139,8 +135,7 @@ fn lua_dns_varied_query_types() {
     "#;
 
     let targets = vec![];
-    let mut gen =
-        LuaJitGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = LuaJitGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
 
     let spec1 = gen.generate(&mock_ctx(1, 0));
     assert_eq!(spec1.query_name, "test-1.example.org");
@@ -172,8 +167,7 @@ fn lua_dns_with_dnssec() {
     "#;
 
     let targets = vec![];
-    let mut gen =
-        LuaJitGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = LuaJitGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(1, 0));
     assert_eq!(spec.query_name, "secure.example.com");
@@ -194,13 +188,15 @@ fn lua_dns_defaults_to_a_record_with_recursion() {
     "#;
 
     let targets = vec![];
-    let mut gen =
-        LuaJitGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = LuaJitGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(1, 0));
     assert_eq!(spec.query_name, "minimal.example.com");
     assert_eq!(spec.query_type, netanvil_types::DnsQueryType::A);
-    assert!(spec.recursion, "recursion should default to true when omitted");
+    assert!(
+        spec.recursion,
+        "recursion should default to true when omitted"
+    );
     assert!(!spec.dnssec, "dnssec should default to false when omitted");
 }
 
@@ -215,8 +211,7 @@ fn lua_dns_explicit_false_recursion_honored() {
     "#;
 
     let targets = vec![];
-    let mut gen =
-        LuaJitGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = LuaJitGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(1, 0));
     assert!(!spec.recursion, "explicit false must be honored");
@@ -234,8 +229,7 @@ fn lua_tcp_string_payload() {
     "#;
 
     let targets = vec!["tcp://localhost:6379".into()];
-    let mut gen =
-        LuaJitGenerator::<netanvil_types::TcpRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = LuaJitGenerator::<netanvil_types::TcpRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(1, 0));
     assert_eq!(spec.payload, b"PING\r\n");
@@ -253,8 +247,7 @@ fn lua_tcp_dynamic_payload() {
     "#;
 
     let targets = vec![];
-    let mut gen =
-        LuaJitGenerator::<netanvil_types::TcpRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = LuaJitGenerator::<netanvil_types::TcpRequestSpec>::new(script, &targets).unwrap();
 
     let spec1 = gen.generate(&mock_ctx(1, 0));
     assert_eq!(spec1.payload, b"CMD 1\r\n");
@@ -273,8 +266,7 @@ fn lua_tcp_empty_payload_fallback() {
     "#;
 
     let targets = vec![];
-    let mut gen =
-        LuaJitGenerator::<netanvil_types::TcpRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = LuaJitGenerator::<netanvil_types::TcpRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(1, 0));
     assert!(spec.payload.is_empty());
@@ -292,8 +284,7 @@ fn lua_udp_string_payload() {
     "#;
 
     let targets = vec!["udp://localhost:9999".into()];
-    let mut gen =
-        LuaJitGenerator::<netanvil_types::UdpRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = LuaJitGenerator::<netanvil_types::UdpRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(1, 0));
     assert_eq!(spec.payload, b"HELLO");
@@ -311,8 +302,7 @@ fn lua_udp_dynamic_payload() {
     "#;
 
     let targets = vec![];
-    let mut gen =
-        LuaJitGenerator::<netanvil_types::UdpRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = LuaJitGenerator::<netanvil_types::UdpRequestSpec>::new(script, &targets).unwrap();
 
     let spec1 = gen.generate(&mock_ctx(1, 0));
     assert_eq!(spec1.payload, b"SEQ:0001");
@@ -341,8 +331,7 @@ fn lua_context_fields_available_in_all_protocols() {
     "#;
 
     let targets = vec![];
-    let mut gen =
-        LuaJitGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = LuaJitGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
 
     // Should not panic — ctx fields are all present
     let spec = gen.generate(&mock_ctx(12345, 7));
@@ -356,8 +345,7 @@ fn lua_dns_enumeration_example_generates_valid_specs() {
     let script = include_str!("../../netanvil-plugin/examples/scripts/dns_enumeration.lua");
 
     let targets = vec!["dns://8.8.8.8:53".into()];
-    let mut gen =
-        LuaJitGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
+    let mut gen = LuaJitGenerator::<netanvil_types::DnsRequestSpec>::new(script, &targets).unwrap();
 
     // Generate several specs and verify they're well-formed
     for i in 1..=100 {

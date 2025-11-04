@@ -165,33 +165,22 @@ fn format_prometheus(p: &DistributedProgressUpdate) -> String {
         "# HELP netanvil_latency_p50_seconds 50th percentile latency (max across agents).\n",
     );
     out.push_str("# TYPE netanvil_latency_p50_seconds gauge\n");
-    out.push_str(&format!(
-        "netanvil_latency_p50_seconds {:.6}\n",
-        p50 / 1000.0
-    ));
+    out.push_str(&format!("netanvil_latency_p50_seconds {:.6}\n", p50 / 1000.0));
 
     out.push_str(
         "# HELP netanvil_latency_p90_seconds 90th percentile latency (max across agents).\n",
     );
     out.push_str("# TYPE netanvil_latency_p90_seconds gauge\n");
-    out.push_str(&format!(
-        "netanvil_latency_p90_seconds {:.6}\n",
-        p90 / 1000.0
-    ));
+    out.push_str(&format!("netanvil_latency_p90_seconds {:.6}\n", p90 / 1000.0));
 
     out.push_str(
         "# HELP netanvil_latency_p99_seconds 99th percentile latency (max across agents).\n",
     );
     out.push_str("# TYPE netanvil_latency_p99_seconds gauge\n");
-    out.push_str(&format!(
-        "netanvil_latency_p99_seconds {:.6}\n",
-        p99 / 1000.0
-    ));
+    out.push_str(&format!("netanvil_latency_p99_seconds {:.6}\n", p99 / 1000.0));
 
     // -- Per-node breakdown --
-    out.push_str(
-        "# HELP netanvil_node_requests_total Total requests per agent node.\n",
-    );
+    out.push_str("# HELP netanvil_node_requests_total Total requests per agent node.\n");
     out.push_str("# TYPE netanvil_node_requests_total counter\n");
     for (id, m) in &p.per_node {
         out.push_str(&format!(
@@ -209,9 +198,7 @@ fn format_prometheus(p: &DistributedProgressUpdate) -> String {
         ));
     }
 
-    out.push_str(
-        "# HELP netanvil_node_latency_p99_seconds p99 latency per agent node.\n",
-    );
+    out.push_str("# HELP netanvil_node_latency_p99_seconds p99 latency per agent node.\n");
     out.push_str("# TYPE netanvil_node_latency_p99_seconds gauge\n");
     for (id, m) in &p.per_node {
         out.push_str(&format!(

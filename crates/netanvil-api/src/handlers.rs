@@ -95,10 +95,7 @@ pub fn build_prometheus_body(state: &SharedState) -> String {
 
             out.push_str("# HELP netanvil_errors_total Total errors.\n");
             out.push_str("# TYPE netanvil_errors_total counter\n");
-            out.push_str(&format!(
-                "netanvil_errors_total{label} {}\n",
-                m.total_errors
-            ));
+            out.push_str(&format!("netanvil_errors_total{label} {}\n", m.total_errors));
 
             // Throughput counters
             out.push_str("# HELP netanvil_bytes_sent_total Total bytes sent to targets.\n");
@@ -108,9 +105,7 @@ pub fn build_prometheus_body(state: &SharedState) -> String {
                 m.bytes_sent
             ));
 
-            out.push_str(
-                "# HELP netanvil_bytes_received_total Total bytes received from targets.\n",
-            );
+            out.push_str("# HELP netanvil_bytes_received_total Total bytes received from targets.\n");
             out.push_str("# TYPE netanvil_bytes_received_total counter\n");
             out.push_str(&format!(
                 "netanvil_bytes_received_total{label} {}\n",
@@ -131,10 +126,7 @@ pub fn build_prometheus_body(state: &SharedState) -> String {
 
             out.push_str("# HELP netanvil_error_rate Current error rate (0-1).\n");
             out.push_str("# TYPE netanvil_error_rate gauge\n");
-            out.push_str(&format!(
-                "netanvil_error_rate{label} {:.6}\n",
-                m.error_rate
-            ));
+            out.push_str(&format!("netanvil_error_rate{label} {:.6}\n", m.error_rate));
 
             out.push_str("# HELP netanvil_elapsed_seconds Test elapsed time.\n");
             out.push_str("# TYPE netanvil_elapsed_seconds gauge\n");

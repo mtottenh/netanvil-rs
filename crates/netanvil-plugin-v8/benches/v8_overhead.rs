@@ -112,8 +112,7 @@ fn bench_on_response_percall(c: &mut Criterion) {
     });
 
     // With headers
-    let script_headers =
-        include_str!("../../netanvil-plugin/examples/scripts/response_handler.js");
+    let script_headers = include_str!("../../netanvil-plugin/examples/scripts/response_handler.js");
     let mut gen_headers: V8Generator<HttpRequestSpec> =
         V8Generator::new(script_headers, &targets()).expect("V8 init");
 
@@ -146,8 +145,7 @@ fn bench_instance_creation(c: &mut Criterion) {
     });
 
     // With on_response + response_config
-    let resp_script =
-        include_str!("../../netanvil-plugin/examples/scripts/response_handler.js");
+    let resp_script = include_str!("../../netanvil-plugin/examples/scripts/response_handler.js");
     group.bench_function("with_on_response", |b| {
         b.iter(|| {
             black_box(V8Generator::<HttpRequestSpec>::new(resp_script, &tgts).unwrap());
@@ -167,8 +165,7 @@ fn bench_throughput(c: &mut Criterion) {
 
     // Generate only
     let gen_script = include_str!("../../netanvil-plugin/examples/scripts/generator.js");
-    let mut gen: V8Generator<HttpRequestSpec> =
-        V8Generator::new(gen_script, &targets()).unwrap();
+    let mut gen: V8Generator<HttpRequestSpec> = V8Generator::new(gen_script, &targets()).unwrap();
 
     group.bench_function("generate_only", |b| {
         b.iter(|| {
@@ -197,8 +194,7 @@ fn bench_throughput(c: &mut Criterion) {
     });
 
     // Generate + on_response (with headers)
-    let resp_hdr_script =
-        include_str!("../../netanvil-plugin/examples/scripts/response_handler.js");
+    let resp_hdr_script = include_str!("../../netanvil-plugin/examples/scripts/response_handler.js");
     let mut gen_resp_hdr: V8Generator<HttpRequestSpec> =
         V8Generator::new(resp_hdr_script, &targets()).unwrap();
 
@@ -222,8 +218,7 @@ fn bench_throughput(c: &mut Criterion) {
 
 fn bench_wants_responses(c: &mut Criterion) {
     let script = include_str!("../../netanvil-plugin/examples/scripts/response_handler.js");
-    let gen: V8Generator<HttpRequestSpec> =
-        V8Generator::new(script, &targets()).expect("V8 init");
+    let gen: V8Generator<HttpRequestSpec> = V8Generator::new(script, &targets()).expect("V8 init");
 
     c.bench_function("v8_wants_responses_check", |b| {
         b.iter(|| {

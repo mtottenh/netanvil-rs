@@ -66,10 +66,7 @@ fn with_isolate<R>(f: impl FnOnce(&mut v8::OwnedIsolate) -> R) -> R {
 // V8 helpers — all use the v147 PinScope / scope!() API.
 // ---------------------------------------------------------------------------
 
-fn v8_string<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    s: &str,
-) -> v8::Local<'s, v8::String> {
+fn v8_string<'s>(scope: &mut v8::PinScope<'s, '_>, s: &str) -> v8::Local<'s, v8::String> {
     v8::String::new(scope, s).expect("v8::String::new failed")
 }
 
@@ -111,44 +108,25 @@ fn get_bool_property(
     Some(val.boolean_value(scope))
 }
 
-fn set_string_property(
-    scope: &mut v8::PinScope<'_, '_>,
-    obj: &v8::Object,
-    key: &str,
-    value: &str,
-) {
+fn set_string_property(scope: &mut v8::PinScope<'_, '_>, obj: &v8::Object, key: &str, value: &str) {
     let k = v8_string(scope, key);
     let v = v8_string(scope, value);
     obj.set(scope, k.into(), v.into());
 }
 
-fn set_number_property(
-    scope: &mut v8::PinScope<'_, '_>,
-    obj: &v8::Object,
-    key: &str,
-    value: f64,
-) {
+fn set_number_property(scope: &mut v8::PinScope<'_, '_>, obj: &v8::Object, key: &str, value: f64) {
     let k = v8_string(scope, key);
     let v = v8::Number::new(scope, value);
     obj.set(scope, k.into(), v.into());
 }
 
-fn set_bool_property(
-    scope: &mut v8::PinScope<'_, '_>,
-    obj: &v8::Object,
-    key: &str,
-    value: bool,
-) {
+fn set_bool_property(scope: &mut v8::PinScope<'_, '_>, obj: &v8::Object, key: &str, value: bool) {
     let k = v8_string(scope, key);
     let v = v8::Boolean::new(scope, value);
     obj.set(scope, k.into(), v.into());
 }
 
-fn set_null_property(
-    scope: &mut v8::PinScope<'_, '_>,
-    obj: &v8::Object,
-    key: &str,
-) {
+fn set_null_property(scope: &mut v8::PinScope<'_, '_>, obj: &v8::Object, key: &str) {
     let k = v8_string(scope, key);
     let v = v8::null(scope);
     obj.set(scope, k.into(), v.into());
@@ -383,9 +361,7 @@ impl<S: FromV8Plugin> netanvil_types::RequestGenerator for V8Generator<S> {
                 if self.response_cfg.headers {
                     if let Some(ref headers_global) = self.headers_object {
                         let ht = headers_global.open(scope);
-                        if let Some(names) =
-                            ht.get_own_property_names(scope, Default::default())
-                        {
+                        if let Some(names) = ht.get_own_property_names(scope, Default::default()) {
                             for i in 0..names.length() {
                                 if let Some(key) = names.get_index(scope, i) {
                                     ht.delete(scope, key);
@@ -658,8 +634,7 @@ mod tests {
             }
         "#;
         let targets = vec!["http://localhost:8080".to_string()];
-        let mut gen =
-            V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
+        let mut gen = V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
         let ctx = netanvil_types::RequestContext {
             request_id: 42,
             core_id: 1,
@@ -687,8 +662,7 @@ mod tests {
                 };
             }
         "#;
-        let mut gen =
-            V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &[]).unwrap();
+        let mut gen = V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &[]).unwrap();
         let ctx = netanvil_types::RequestContext {
             request_id: 7,
             core_id: 0,
@@ -711,8 +685,7 @@ mod tests {
                 return { method: "GET", url: "http://x.com", headers: [], body: null };
             }
         "#;
-        let gen =
-            V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &[]).unwrap();
+        let gen = V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &[]).unwrap();
         assert!(!gen.wants_responses());
     }
 
@@ -724,8 +697,7 @@ mod tests {
             }
             function on_response(result) {}
         "#;
-        let gen =
-            V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &[]).unwrap();
+        let gen = V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &[]).unwrap();
         assert!(gen.wants_responses());
     }
 
@@ -738,8 +710,7 @@ mod tests {
             function on_response(result) {}
             function response_config() { return { headers: false, body: true }; }
         "#;
-        let gen =
-            V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &[]).unwrap();
+        let gen = V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &[]).unwrap();
         assert!(gen.wants_responses());
         assert!(!gen.response_cfg.headers);
         assert!(gen.response_cfg.body);
@@ -755,11 +726,9 @@ mod tests {
             }
             function update_targets(t) { targets = t; }
         "#;
-        let mut gen = V8Generator::<netanvil_types::HttpRequestSpec>::new(
-            script,
-            &["http://old.com".into()],
-        )
-        .unwrap();
+        let mut gen =
+            V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &["http://old.com".into()])
+                .unwrap();
         let ctx = netanvil_types::RequestContext {
             request_id: 0,
             core_id: 0,
@@ -778,8 +747,7 @@ mod tests {
         let script = r#"
             function generate(ctx) { return "not an object"; }
         "#;
-        let mut gen =
-            V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &[]).unwrap();
+        let mut gen = V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &[]).unwrap();
         let ctx = netanvil_types::RequestContext {
             request_id: 0,
             core_id: 0,
@@ -819,10 +787,8 @@ mod tests {
             actual_time: std::time::Instant::now(),
             session_id: None,
         };
-        let mut gen_a =
-            V8Generator::<netanvil_types::HttpRequestSpec>::new(script_a, &[]).unwrap();
-        let mut gen_b =
-            V8Generator::<netanvil_types::HttpRequestSpec>::new(script_b, &[]).unwrap();
+        let mut gen_a = V8Generator::<netanvil_types::HttpRequestSpec>::new(script_a, &[]).unwrap();
+        let mut gen_b = V8Generator::<netanvil_types::HttpRequestSpec>::new(script_b, &[]).unwrap();
         assert_eq!(gen_a.generate(&ctx).url, "http://A");
         assert_eq!(gen_b.generate(&ctx).url, "http://B");
         assert_eq!(gen_a.generate(&ctx).url, "http://A");

@@ -125,6 +125,15 @@ impl<G: RequestGenerator + ?Sized> RequestGenerator for Box<G> {
     }
 }
 
+impl EventRecorder for Box<dyn EventRecorder> {
+    fn record(&self, result: &ExecutionResult) {
+        (**self).record(result)
+    }
+    fn flush(&self) {
+        (**self).flush()
+    }
+}
+
 impl<T: RequestTransformer + ?Sized> RequestTransformer for Box<T> {
     type Spec = T::Spec;
     fn transform(&self, spec: Self::Spec, context: &RequestContext) -> Self::Spec {
@@ -133,6 +142,34 @@ impl<T: RequestTransformer + ?Sized> RequestTransformer for Box<T> {
     fn update_metadata(&self, metadata: Vec<(String, String)>) {
         (**self).update_metadata(metadata)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-request event recording trait: streams individual request records.
+// Separate from MetricsCollector (which produces aggregates).
+// ---------------------------------------------------------------------------
+
+/// Records per-request events to a streaming sink (Arrow IPC file, etc.).
+///
+/// One instance per I/O worker core. Uses `&self` with interior mutability
+/// (same contract as `MetricsCollector`). Called on the hot path — keep fast.
+///
+/// Implementations: `NoopEventRecorder` (netanvil-types), `ArrowEventRecorder` (netanvil-events)
+pub trait EventRecorder {
+    /// Record a completed request event.
+    fn record(&self, result: &ExecutionResult);
+    /// Flush buffered records to the underlying sink.
+    fn flush(&self);
+}
+
+/// No-op event recorder. Zero overhead when event logging is disabled.
+pub struct NoopEventRecorder;
+
+impl EventRecorder for NoopEventRecorder {
+    #[inline(always)]
+    fn record(&self, _result: &ExecutionResult) {}
+    #[inline(always)]
+    fn flush(&self) {}
 }
 
 // ---------------------------------------------------------------------------

@@ -18,9 +18,9 @@ pub mod udp_spec;
 
 pub use command::{ScheduledRequest, TimerCommand, WorkerCommand};
 pub use config::{
-    ConnectionConfig, ConnectionPolicy, CountDistribution, HttpVersion, PidConstraint, PidGains,
-    PidTarget, PluginConfig, PluginType, ProtocolConfig, RateConfig, ResponseSignalConfig,
-    SchedulerConfig, SignalAggregation, TargetMetric, TestConfig, TlsConfig,
+    ConnectionConfig, ConnectionPolicy, CountDistribution, EventLogOutput, HttpVersion,
+    PidConstraint, PidGains, PidTarget, PluginConfig, PluginType, ProtocolConfig, RateConfig,
+    ResponseSignalConfig, SchedulerConfig, SignalAggregation, TargetMetric, TestConfig, TlsConfig,
 };
 pub use distributed::{MetricsFetcher, NodeCommander, NodeDiscovery, RemoteMetrics};
 pub use dns_spec::{DnsQueryType, DnsRequestSpec};
@@ -35,8 +35,8 @@ pub use request::{
 };
 pub use tcp_spec::{TcpFraming, TcpRequestSpec, TcpTestMode};
 pub use traits::{
-    HttpGenerator, HttpTransformer, MetricsCollector, RateController, RequestExecutor,
-    RequestGenerator, RequestScheduler, RequestTransformer,
+    EventRecorder, HttpGenerator, HttpTransformer, MetricsCollector, NoopEventRecorder,
+    RateController, RequestExecutor, RequestGenerator, RequestScheduler, RequestTransformer,
 };
 pub use udp_spec::UdpRequestSpec;
 

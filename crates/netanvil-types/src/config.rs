@@ -102,6 +102,26 @@ pub struct TestConfig {
     /// for use with `TargetMetric::External { name }`.
     #[serde(default)]
     pub response_signal_headers: Vec<ResponseSignalConfig>,
+    /// Per-request event log configuration.
+    /// When set, each I/O worker core writes an Arrow IPC file with one row
+    /// per completed request (timing, status, bytes, errors).
+    #[serde(default)]
+    pub event_log: Option<EventLogOutput>,
+}
+
+/// Per-request event log output configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventLogOutput {
+    /// Directory path for per-core Arrow IPC files.
+    /// Created automatically if it doesn't exist.
+    pub output_dir: String,
+    /// Fraction of requests to log (0.0-1.0). Default: 1.0 (log all).
+    #[serde(default = "default_sample_rate")]
+    pub sample_rate: f64,
+}
+
+fn default_sample_rate() -> f64 {
+    1.0
 }
 
 /// Protocol-specific configuration for non-HTTP tests.
@@ -239,6 +259,7 @@ impl Default for TestConfig {
             tracked_response_headers: Vec::new(),
             md5_check_enabled: false,
             response_signal_headers: Vec::new(),
+            event_log: None,
         }
     }
 }

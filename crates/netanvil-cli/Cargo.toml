@@ -20,6 +20,7 @@ netanvil-distributed = { workspace = true }
 netanvil-tcp = { workspace = true }
 netanvil-udp = { workspace = true }
 netanvil-dns = { workspace = true }
+netanvil-redis = { workspace = true }
 netanvil-plugin = { workspace = true }
 netanvil-plugin-luajit = { workspace = true }
 netanvil-harness = { workspace = true }

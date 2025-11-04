@@ -467,11 +467,22 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
                     recursion,
                     plugin_config.as_ref(),
                 ),
-                Some(netanvil_types::ProtocolConfig::Redis { .. }) => {
-                    Err(netanvil_types::NetAnvilError::Config(
-                        "Redis protocol not yet supported in agent mode".into(),
-                    ))
-                }
+                Some(netanvil_types::ProtocolConfig::Redis {
+                    password,
+                    db,
+                    command,
+                    args,
+                }) => run_redis_test(
+                    test_config,
+                    request_timeout,
+                    cmd_rx,
+                    progress_state,
+                    password.as_deref(),
+                    db,
+                    &command,
+                    &args,
+                    plugin_config.as_ref(),
+                ),
                 None => {
                     // Default HTTP path
                     let plugin_factory = plugin_config.as_ref().and_then(|pc| {
@@ -988,6 +999,123 @@ fn build_dns_plugin_factory(
             Some(Box::new(move |_core_id| {
                 Box::new(
                     netanvil_plugin_v8::V8Generator::<netanvil_types::DnsRequestSpec>::new(
+                        &script, &targets,
+                    )
+                    .expect("V8 init failed"),
+                )
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// Run a Redis test.
+#[allow(clippy::too_many_arguments)]
+fn run_redis_test(
+    config: TestConfig,
+    timeout: std::time::Duration,
+    cmd_rx: flume::Receiver<WorkerCommand>,
+    progress_state: SharedState,
+    password: Option<&str>,
+    db: Option<u16>,
+    command: &str,
+    args: &[String],
+    plugin: Option<&netanvil_types::PluginConfig>,
+) -> netanvil_types::Result<TestResult> {
+    use netanvil_redis::*;
+
+    let targets: Vec<std::net::SocketAddr> = config
+        .targets
+        .iter()
+        .filter_map(|t| {
+            t.strip_prefix("redis://")
+                .and_then(|a| a.parse().ok())
+                .or_else(|| t.parse().ok())
+        })
+        .collect();
+
+    if targets.is_empty() {
+        return Err(netanvil_types::NetAnvilError::Other(
+            "no valid Redis targets".into(),
+        ));
+    }
+
+    let gen_factory: netanvil_core::GenericGeneratorFactory<RedisRequestSpec> =
+        if let Some(factory) =
+            plugin.and_then(|pc| build_redis_plugin_factory(pc, &config.targets))
+        {
+            factory
+        } else {
+            let command = command.to_string();
+            let args = args.to_vec();
+            Box::new(move |_core_id| {
+                Box::new(SimpleRedisGenerator::new(
+                    targets.clone(),
+                    command.clone(),
+                    args.clone(),
+                ))
+            })
+        };
+
+    let trans_factory: netanvil_core::GenericTransformerFactory<RedisRequestSpec> =
+        Box::new(|_| Box::new(RedisNoopTransformer));
+
+    let password = password.map(|s| s.to_string());
+
+    netanvil_core::GenericTestBuilder::new(
+        config,
+        move || RedisExecutor::with_auth(timeout, password.clone(), db),
+        gen_factory,
+        trans_factory,
+    )
+    .on_progress(move |update| {
+        progress_state.update_from_progress(update);
+    })
+    .external_commands(cmd_rx)
+    .run()
+}
+
+/// Build a Redis generator factory from an embedded PluginConfig.
+fn build_redis_plugin_factory(
+    pc: &netanvil_types::PluginConfig,
+    targets: &[String],
+) -> Option<netanvil_core::GenericGeneratorFactory<netanvil_types::RedisRequestSpec>> {
+    if pc.plugin_type == PluginType::Hybrid {
+        tracing::warn!("hybrid plugins are HTTP-only; ignoring for Redis");
+        return None;
+    }
+    match pc.plugin_type {
+        PluginType::Lua => {
+            let script = String::from_utf8(pc.source.clone()).ok()?;
+            let targets = targets.to_vec();
+            Some(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin_luajit::LuaJitGenerator::<netanvil_types::RedisRequestSpec>::new(
+                        &script, &targets,
+                    )
+                    .expect("LuaJIT init failed"),
+                )
+            }))
+        }
+        PluginType::Wasm => {
+            let (engine, module) = netanvil_plugin::compile_wasm_module(&pc.source).ok()?;
+            let targets = targets.to_vec();
+            Some(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin::WasmGenerator::<netanvil_types::RedisRequestSpec>::new(
+                        &engine, &module, &targets,
+                    )
+                    .expect("WASM init failed"),
+                )
+            }))
+        }
+        #[cfg(feature = "v8")]
+        PluginType::Js => {
+            let script = String::from_utf8(pc.source.clone()).ok()?;
+            let targets = targets.to_vec();
+            Some(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin_v8::V8Generator::<netanvil_types::RedisRequestSpec>::new(
                         &script, &targets,
                     )
                     .expect("V8 init failed"),

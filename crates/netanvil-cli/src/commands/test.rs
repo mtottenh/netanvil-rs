@@ -356,6 +356,47 @@ pub fn run(
             .context("DNS load test failed")?
         }
 
+        DetectedProtocol::Redis => {
+            let targets = parse_socket_targets(&config.targets, "redis://")
+                .context("invalid Redis target address")?;
+
+            eprintln!("  protocol: Redis, targets: {}", targets.len());
+
+            config.error_status_threshold = 0; // Redis uses its own error model
+
+            let gen_factory: netanvil_core::GenericGeneratorFactory<
+                netanvil_redis::RedisRequestSpec,
+            > = if let Some(ref plugin_path) = plugin {
+                let ptype = detect_plugin_type(plugin_path, &plugin_type)?;
+                tracing::info!(plugin = %plugin_path, plugin_type = ?ptype, "loaded Redis plugin");
+                build_redis_plugin_factory(plugin_path, ptype, &config.targets)?
+            } else {
+                // Default: PING command
+                Box::new(move |_core_id| {
+                    Box::new(netanvil_redis::SimpleRedisGenerator::new(
+                        targets.clone(),
+                        "PING".into(),
+                        vec![],
+                    ))
+                })
+            };
+            let trans_factory: netanvil_core::GenericTransformerFactory<
+                netanvil_redis::RedisRequestSpec,
+            > = Box::new(|_| Box::new(netanvil_redis::RedisNoopTransformer));
+
+            GenericTestBuilder::new(
+                config,
+                move || netanvil_redis::RedisExecutor::new(request_timeout),
+                gen_factory,
+                trans_factory,
+            )
+            .on_progress(|update| {
+                eprint!("\r{}", ProgressLine::new(update));
+            })
+            .run()
+            .context("Redis load test failed")?
+        }
+
         DetectedProtocol::Http => {
             // Build executor factory -- with TLS config, bandwidth throttling,
             // HTTP version pinning, or default

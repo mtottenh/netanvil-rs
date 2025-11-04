@@ -171,6 +171,15 @@ pub fn run(
             });
             config.error_status_threshold = 0;
         }
+        DetectedProtocol::Redis => {
+            config.protocol = Some(netanvil_types::ProtocolConfig::Redis {
+                password: None,
+                db: None,
+                command: "PING".into(),
+                args: vec![],
+            });
+            config.error_status_threshold = 0;
+        }
         DetectedProtocol::Http => {
             // No change needed -- config.protocol stays None (default HTTP)
         }

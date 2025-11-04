@@ -552,6 +552,84 @@ pub fn build_dns_plugin_factory(
     }
 }
 
+/// Build a Redis generator factory from a plugin file.
+///
+/// Same pattern as [`build_plugin_factory`] but produces generators for
+/// [`netanvil_types::RedisRequestSpec`] instead of HTTP.
+pub fn build_redis_plugin_factory(
+    plugin_path: &str,
+    plugin_type: PluginType,
+    targets: &[String],
+) -> Result<GenericGeneratorFactory<netanvil_types::RedisRequestSpec>> {
+    match plugin_type {
+        PluginType::Hybrid => {
+            anyhow::bail!("hybrid plugins are only supported for HTTP")
+        }
+        PluginType::Lua => {
+            let script = std::fs::read_to_string(plugin_path)
+                .context(format!("failed to read plugin: {plugin_path}"))?;
+            let targets = targets.to_vec();
+            Ok(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin_luajit::LuaJitGenerator::<netanvil_types::RedisRequestSpec>::new(
+                        &script, &targets,
+                    )
+                    .expect("LuaJIT generator init failed"),
+                )
+                    as Box<
+                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::RedisRequestSpec>,
+                    >
+            }))
+        }
+        PluginType::Wasm => {
+            let wasm_bytes = std::fs::read(plugin_path)
+                .context(format!("failed to read WASM module: {plugin_path}"))?;
+            let (engine, module) = netanvil_plugin::compile_wasm_module(&wasm_bytes)
+                .map_err(|e| anyhow::anyhow!("WASM compile error: {e}"))?;
+            let targets = targets.to_vec();
+            Ok(Box::new(move |_core_id| {
+                Box::new(
+                    netanvil_plugin::WasmGenerator::<netanvil_types::RedisRequestSpec>::new(
+                        &engine, &module, &targets,
+                    )
+                    .expect("WASM generator init failed"),
+                )
+                    as Box<
+                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::RedisRequestSpec>,
+                    >
+            }))
+        }
+        PluginType::Js => {
+            #[cfg(feature = "v8")]
+            {
+                let script = std::fs::read_to_string(plugin_path)
+                    .context(format!("failed to read plugin: {plugin_path}"))?;
+                let targets = targets.to_vec();
+                Ok(Box::new(move |_core_id| {
+                    Box::new(
+                        netanvil_plugin_v8::V8Generator::<netanvil_types::RedisRequestSpec>::new(
+                            &script, &targets,
+                        )
+                        .expect("V8 generator init failed"),
+                    )
+                        as Box<
+                            dyn netanvil_types::RequestGenerator<
+                                Spec = netanvil_types::RedisRequestSpec,
+                            >,
+                        >
+                }))
+            }
+            #[cfg(not(feature = "v8"))]
+            {
+                anyhow::bail!(
+                    "V8/JS plugin support requires the 'v8' feature flag. \
+                     Rebuild with: cargo build --features v8"
+                )
+            }
+        }
+    }
+}
+
 pub fn build_pid_gains(
     pid_kp: Option<f64>,
     pid_ki: Option<f64>,
@@ -687,6 +765,7 @@ pub enum DetectedProtocol {
     Tcp,
     Udp,
     Dns,
+    Redis,
 }
 
 pub fn detect_protocol(urls: &[String]) -> DetectedProtocol {
@@ -697,6 +776,8 @@ pub fn detect_protocol(urls: &[String]) -> DetectedProtocol {
         DetectedProtocol::Udp
     } else if first.starts_with("dns://") {
         DetectedProtocol::Dns
+    } else if first.starts_with("redis://") {
+        DetectedProtocol::Redis
     } else {
         DetectedProtocol::Http
     }

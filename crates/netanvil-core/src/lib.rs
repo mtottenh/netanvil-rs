@@ -25,6 +25,10 @@ pub type ProgressCallback = Box<dyn FnMut(&coordinator::ProgressUpdate)>;
 pub type GenericGeneratorFactory<S> =
     Box<dyn Fn(usize) -> Box<dyn netanvil_types::RequestGenerator<Spec = S>> + Send>;
 
+/// A factory closure that creates an [`netanvil_types::EventRecorder`] per core.
+pub type EventRecorderFactory =
+    Box<dyn Fn(usize) -> Box<dyn netanvil_types::EventRecorder> + Send>;
+
 /// A factory closure that creates a [`netanvil_types::RequestTransformer`] per core (generic).
 pub type GenericTransformerFactory<S> =
     Box<dyn Fn(usize) -> Box<dyn netanvil_types::RequestTransformer<Spec = S>> + Send>;

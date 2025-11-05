@@ -11,8 +11,8 @@ use crate::timer_thread::{self, TimerThreadHandle, FIRE_CHANNEL_CAPACITY};
 use crate::transformer::{ConnectionPolicyTransformer, HeaderTransformer, NoopTransformer};
 use netanvil_metrics::HdrMetricsCollector;
 use netanvil_types::{
-    ConnectionPolicy, RequestExecutor, RequestGenerator, RequestScheduler, RequestTransformer,
-    SchedulerConfig, TestConfig,
+    ConnectionPolicy, EventRecorder, NoopEventRecorder, RequestExecutor, RequestGenerator,
+    RequestScheduler, RequestTransformer, SchedulerConfig, TestConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -138,6 +138,7 @@ where
     on_progress: Option<crate::ProgressCallback>,
     external_command_rx: Option<flume::Receiver<netanvil_types::WorkerCommand>>,
     pushed_signal_source: Option<crate::SignalSourceFn>,
+    event_recorder_factory: Option<crate::EventRecorderFactory>,
 }
 
 impl<E, F> TestBuilder<E, F>
@@ -155,6 +156,7 @@ where
             on_progress: None,
             external_command_rx: None,
             pushed_signal_source: None,
+            event_recorder_factory: None,
         }
     }
 
@@ -213,6 +215,12 @@ where
         self
     }
 
+    /// Set a per-request event recorder factory. Called once per I/O worker core.
+    pub fn event_recorder_factory(mut self, factory: crate::EventRecorderFactory) -> Self {
+        self.event_recorder_factory = Some(factory);
+        self
+    }
+
     /// Build and run the test. Blocks until completion.
     pub fn run(self) -> netanvil_types::Result<TestResult> {
         run_test_impl(
@@ -223,6 +231,7 @@ where
             self.on_progress,
             self.external_command_rx,
             self.pushed_signal_source,
+            self.event_recorder_factory,
         )
     }
 }
@@ -267,6 +276,7 @@ where
     on_progress: Option<crate::ProgressCallback>,
     external_command_rx: Option<flume::Receiver<netanvil_types::WorkerCommand>>,
     pushed_signal_source: Option<crate::SignalSourceFn>,
+    event_recorder_factory: Option<crate::EventRecorderFactory>,
 }
 
 impl<E, F> GenericTestBuilder<E, F>
@@ -289,6 +299,7 @@ where
             on_progress: None,
             external_command_rx: None,
             pushed_signal_source: None,
+            event_recorder_factory: None,
         }
     }
 
@@ -313,6 +324,12 @@ where
         self
     }
 
+    /// Set a per-request event recorder factory. Called once per I/O worker core.
+    pub fn event_recorder_factory(mut self, factory: crate::EventRecorderFactory) -> Self {
+        self.event_recorder_factory = Some(factory);
+        self
+    }
+
     /// Build and run the test. Blocks until completion.
     pub fn run(self) -> netanvil_types::Result<TestResult> {
         run_test_core(
@@ -323,6 +340,7 @@ where
             self.on_progress,
             self.external_command_rx,
             self.pushed_signal_source,
+            self.event_recorder_factory,
         )
     }
 }
@@ -340,6 +358,7 @@ fn run_test_impl<E, F>(
     on_progress: Option<crate::ProgressCallback>,
     external_command_rx: Option<flume::Receiver<netanvil_types::WorkerCommand>>,
     pushed_signal_source: Option<crate::SignalSourceFn>,
+    event_recorder_factory: Option<crate::EventRecorderFactory>,
 ) -> netanvil_types::Result<TestResult>
 where
     E: RequestExecutor<Spec = netanvil_types::HttpRequestSpec> + 'static,
@@ -389,6 +408,7 @@ where
         on_progress,
         external_command_rx,
         pushed_signal_source,
+        event_recorder_factory,
     )
 }
 
@@ -405,6 +425,7 @@ fn run_test_core<E, F>(
     on_progress: Option<crate::ProgressCallback>,
     external_command_rx: Option<flume::Receiver<netanvil_types::WorkerCommand>>,
     pushed_signal_source: Option<crate::SignalSourceFn>,
+    event_recorder_factory: Option<crate::EventRecorderFactory>,
 ) -> netanvil_types::Result<TestResult>
 where
     E: RequestExecutor + 'static,
@@ -491,6 +512,8 @@ where
         &generator_factory as *const crate::GenericGeneratorFactory<E::Spec> as usize;
     let transformer_factory_ptr =
         &transformer_factory as *const crate::GenericTransformerFactory<E::Spec> as usize;
+    let event_recorder_factory_ptr =
+        &event_recorder_factory as *const Option<crate::EventRecorderFactory> as usize;
 
     for core_id in 0..num_cores {
         let (metrics_tx, metrics_rx) = flume::unbounded();
@@ -524,6 +547,9 @@ where
                 let transformer_factory = unsafe {
                     &*(transformer_factory_ptr as *const crate::GenericTransformerFactory<E::Spec>)
                 };
+                let event_recorder_factory = unsafe {
+                    &*(event_recorder_factory_ptr as *const Option<crate::EventRecorderFactory>)
+                };
 
                 let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
                 rt.block_on(async {
@@ -537,6 +563,12 @@ where
                         config.response_signal_headers.clone(),
                     );
 
+                    let event_recorder: Rc<dyn EventRecorder> =
+                        match event_recorder_factory {
+                            Some(factory) => Rc::from(factory(core_id)),
+                            None => Rc::new(NoopEventRecorder),
+                        };
+
                     io_worker_loop(
                         crate::io_worker::IoWorkerConfig {
                             fire_rx,
@@ -549,6 +581,7 @@ where
                         Rc::new(transformer),
                         Rc::new(executor),
                         Rc::new(collector),
+                        event_recorder,
                     )
                     .await;
                 });

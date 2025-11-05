@@ -14,8 +14,9 @@ use netanvil_core::timer_thread::{self, FIRE_CHANNEL_CAPACITY};
 use netanvil_core::{ConstantRateScheduler, NoopTransformer, SimpleGenerator};
 use netanvil_metrics::HdrMetricsCollector;
 use netanvil_types::{
-    ExecutionResult, HttpRequestSpec, MetricsSnapshot, RequestContext, RequestExecutor,
-    RequestScheduler, ScheduledRequest, TimerCommand, TimingBreakdown,
+    EventRecorder, ExecutionResult, HttpRequestSpec, MetricsSnapshot, NoopEventRecorder,
+    RequestContext, RequestExecutor, RequestScheduler, ScheduledRequest, TimerCommand,
+    TimingBreakdown,
 };
 
 // ---------------------------------------------------------------------------
@@ -125,6 +126,7 @@ fn spawn_full_architecture(
                         Rc::new(NoopTransformer),
                         Rc::new(executor),
                         Rc::new(collector),
+                        Rc::new(NoopEventRecorder) as Rc<dyn EventRecorder>,
                     )
                     .await;
                 });
@@ -412,6 +414,7 @@ fn timer_plus_workers_coordinated_omission_tracking() {
             Rc::new(NoopTransformer),
             exec_rc.clone(),
             Rc::new(collector),
+            Rc::new(NoopEventRecorder) as Rc<dyn EventRecorder>,
         )
         .await;
 

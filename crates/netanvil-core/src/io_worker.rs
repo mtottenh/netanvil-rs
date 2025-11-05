@@ -10,8 +10,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use netanvil_types::{
-    ExecutionResult, MetricsCollector, MetricsSnapshot, RequestContext, RequestExecutor,
-    RequestGenerator, RequestTransformer, ScheduledRequest,
+    EventRecorder, ExecutionResult, MetricsCollector, MetricsSnapshot, RequestContext,
+    RequestExecutor, RequestGenerator, RequestTransformer, ScheduledRequest,
 };
 
 /// Infrastructure channels and config for an I/O worker.
@@ -40,6 +40,7 @@ pub async fn io_worker_loop<G, T, E, M>(
     transformer: Rc<T>,
     executor: Rc<E>,
     metrics: Rc<M>,
+    event_recorder: Rc<dyn EventRecorder>,
 ) where
     G: RequestGenerator,
     T: RequestTransformer<Spec = G::Spec> + 'static,
@@ -100,6 +101,7 @@ pub async fn io_worker_loop<G, T, E, M>(
             &transformer,
             &executor,
             &metrics,
+            &event_recorder,
             &response_tx,
             &mut request_seq,
             core_id,
@@ -129,6 +131,7 @@ pub async fn io_worker_loop<G, T, E, M>(
                 &transformer,
                 &executor,
                 &metrics,
+                &event_recorder,
                 &response_tx,
                 &mut request_seq,
                 core_id,
@@ -139,7 +142,8 @@ pub async fn io_worker_loop<G, T, E, M>(
                     drained,
                     "received stop during drain, exiting"
                 );
-                // Send final snapshot before exiting
+                // Flush events and send final snapshot before exiting
+                event_recorder.flush();
                 let snapshot = metrics.snapshot();
                 let _ = metrics_tx.try_send(snapshot);
                 return;
@@ -155,7 +159,7 @@ pub async fn io_worker_loop<G, T, E, M>(
             tracing::trace!(core_id, drained, request_seq, "drained burst");
         }
 
-        // Periodic metrics reporting
+        // Periodic metrics reporting + event flush
         if last_report.elapsed() >= metrics_interval {
             let snapshot = metrics.snapshot();
             tracing::debug!(
@@ -164,6 +168,7 @@ pub async fn io_worker_loop<G, T, E, M>(
                 "sending periodic metrics snapshot"
             );
             let _ = metrics_tx.try_send(snapshot);
+            event_recorder.flush();
             last_report = Instant::now();
         }
     }
@@ -182,6 +187,9 @@ pub async fn io_worker_loop<G, T, E, M>(
             generator.on_response(&result);
         }
     }
+
+    // Flush remaining event records
+    event_recorder.flush();
 
     // Send final snapshot
     let snapshot = metrics.snapshot();
@@ -203,6 +211,7 @@ fn handle_message<G, T, E, M>(
     transformer: &Rc<T>,
     executor: &Rc<E>,
     metrics: &Rc<M>,
+    event_recorder: &Rc<dyn EventRecorder>,
     response_tx: &Option<flume::Sender<ExecutionResult>>,
     seq: &mut u64,
     core_id: usize,
@@ -230,10 +239,12 @@ where
 
             let exec = executor.clone();
             let met = metrics.clone();
+            let evt = event_recorder.clone();
             let resp_tx = response_tx.clone();
             compio::runtime::spawn(async move {
                 let result = exec.execute(&spec, &context).await;
                 met.record(&result);
+                evt.record(&result);
                 if let Some(tx) = resp_tx {
                     let _ = tx.try_send(result); // drop on backpressure
                 }

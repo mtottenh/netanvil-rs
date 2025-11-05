@@ -11,8 +11,8 @@ use netanvil_core::io_worker::{io_worker_loop, IoWorkerConfig};
 use netanvil_core::NoopTransformer;
 use netanvil_metrics::HdrMetricsCollector;
 use netanvil_types::{
-    ExecutionResult, HttpRequestSpec, MetricsCollector, RequestContext, RequestExecutor,
-    RequestGenerator, ScheduledRequest, TimingBreakdown,
+    EventRecorder, ExecutionResult, HttpRequestSpec, MetricsCollector, NoopEventRecorder,
+    RequestContext, RequestExecutor, RequestGenerator, ScheduledRequest, TimingBreakdown,
 };
 
 // ---------------------------------------------------------------------------
@@ -199,6 +199,7 @@ fn response_callbacks_receive_statuses() {
             transformer,
             executor,
             metrics,
+            Rc::new(NoopEventRecorder) as Rc<dyn EventRecorder>,
         )
         .await;
     });
@@ -252,6 +253,7 @@ fn no_response_generator_has_zero_overhead() {
             transformer,
             executor,
             metrics,
+            Rc::new(NoopEventRecorder) as Rc<dyn EventRecorder>,
         )
         .await;
 

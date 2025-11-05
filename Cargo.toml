@@ -15,6 +15,7 @@ members = [
     "crates/netanvil-udp",
     "crates/netanvil-dns",
     "crates/netanvil-redis",
+    "crates/netanvil-events",
     "crates/netanvil-test-servers",
     "crates/netanvil-harness",
     "crates/netanvil-cli",
@@ -31,6 +32,7 @@ default-members = [
     "crates/netanvil-udp",
     "crates/netanvil-dns",
     "crates/netanvil-redis",
+    "crates/netanvil-events",
     "crates/netanvil-test-servers",
     "crates/netanvil-api",
     "crates/netanvil-distributed",
@@ -41,7 +43,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["NetAnvil-RS Contributors"]
 license = "MIT OR Apache-2.0"
@@ -107,6 +109,7 @@ netanvil-plugin = { path = "crates/netanvil-plugin" }
 netanvil-plugin-luajit = { path = "crates/netanvil-plugin-luajit" }
 netanvil-plugin-lua54 = { path = "crates/netanvil-plugin-lua54" }
 netanvil-plugin-v8 = { path = "crates/netanvil-plugin-v8" }
+netanvil-events = { path = "crates/netanvil-events" }
 netanvil-tcp = { path = "crates/netanvil-tcp" }
 netanvil-udp = { path = "crates/netanvil-udp" }
 netanvil-dns = { path = "crates/netanvil-dns" }

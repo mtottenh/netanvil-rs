@@ -1,0 +1,18 @@
+[package]
+name = "netanvil-events"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Per-request event logging (Arrow IPC) for netanvil-rs load testing"
+
+[dependencies]
+netanvil-types = { workspace = true }
+arrow-schema = "58"
+arrow-array = "58"
+arrow-ipc = "58"
+rand = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

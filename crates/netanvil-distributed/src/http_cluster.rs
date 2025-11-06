@@ -352,10 +352,14 @@ fn build_rustls_client_config(tls: &TlsConfig) -> Result<Arc<rustls::ClientConfi
     let client_certs = load_pem_certs(&tls.cert)?;
     let client_key = load_pem_key(&tls.key)?;
 
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_client_auth_cert(client_certs, client_key)
-        .map_err(|e| format!("client config: {e}"))?;
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| format!("protocol versions: {e}"))?
+    .with_root_certificates(root_store)
+    .with_client_auth_cert(client_certs, client_key)
+    .map_err(|e| format!("client config: {e}"))?;
 
     Ok(Arc::new(config))
 }

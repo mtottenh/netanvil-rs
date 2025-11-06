@@ -53,12 +53,14 @@ pub struct AgentServer {
 
 impl AgentServer {
     /// Create a plain HTTP agent (no TLS).
-    pub fn new(port: u16, cores: usize) -> std::io::Result<Self> {
-        let addr = format!("0.0.0.0:{port}");
-        let server = tiny_http::Server::http(&addr)
+    ///
+    /// `bind_addr` is the address to listen on (e.g. "0.0.0.0:9090" or "10.0.0.2:9090").
+    /// `node_id` is an optional human-readable identifier for metrics/logging.
+    pub fn new(bind_addr: &str, cores: usize, node_id: Option<String>) -> std::io::Result<Self> {
+        let server = tiny_http::Server::http(bind_addr)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::AddrInUse, e.to_string()))?;
 
-        let inner = make_inner(port, &addr, cores);
+        let inner = make_inner(bind_addr, cores, node_id);
 
         Ok(Self {
             http_server: Some(server),
@@ -69,12 +71,19 @@ impl AgentServer {
     }
 
     /// Create an mTLS agent with client certificate verification.
-    pub fn with_tls(port: u16, cores: usize, tls: &TlsConfig) -> std::io::Result<Self> {
-        let addr = format!("0.0.0.0:{port}");
-        let server = MtlsServer::new(&addr, tls)
+    ///
+    /// `bind_addr` is the address to listen on (e.g. "0.0.0.0:9090" or "10.0.0.2:9090").
+    /// `node_id` is an optional human-readable identifier for metrics/logging.
+    pub fn with_tls(
+        bind_addr: &str,
+        cores: usize,
+        node_id: Option<String>,
+        tls: &TlsConfig,
+    ) -> std::io::Result<Self> {
+        let server = MtlsServer::new(bind_addr, tls)
             .map_err(|e| std::io::Error::other(format!("mTLS setup: {e}")))?;
 
-        let inner = make_inner(port, &addr, cores);
+        let inner = make_inner(bind_addr, cores, node_id);
 
         Ok(Self {
             http_server: None,
@@ -372,14 +381,18 @@ impl AgentServer {
     }
 }
 
-fn make_inner(port: u16, addr: &str, cores: usize) -> Arc<Mutex<AgentInner>> {
-    let hostname = hostname::get()
-        .map(|h| h.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "unknown".into());
+fn make_inner(bind_addr: &str, cores: usize, node_id: Option<String>) -> Arc<Mutex<AgentInner>> {
+    let node_id = node_id.unwrap_or_else(|| {
+        let hostname = hostname::get()
+            .map(|h| h.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "unknown".into());
+        let port = bind_addr.rsplit(':').next().unwrap_or("9090");
+        format!("{hostname}:{port}")
+    });
 
     Arc::new(Mutex::new(AgentInner {
-        node_id: NodeId(format!("{hostname}:{port}")),
-        listen_addr: addr.to_string(),
+        node_id: NodeId(node_id),
+        listen_addr: bind_addr.to_string(),
         cores,
         state: NodeState::Idle,
         shared_state: SharedState::new(),
@@ -513,6 +526,7 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
             let mut agent = inner.lock().unwrap();
             agent.state = NodeState::Idle;
             agent.command_tx = None;
+            agent.shared_state.reset_metrics();
             match result {
                 Ok(r) => {
                     tracing::info!(

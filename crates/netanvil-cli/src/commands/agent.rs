@@ -2,14 +2,27 @@ use anyhow::{Context, Result};
 
 use netanvil_api::AgentServer;
 
+/// Parse a listen address string into a bind address.
+/// Accepts either a bare port ("9090") or addr:port ("10.0.0.2:9090").
+fn parse_listen_addr(listen: &str) -> String {
+    if listen.contains(':') {
+        listen.to_string()
+    } else {
+        format!("0.0.0.0:{listen}")
+    }
+}
+
 pub fn run(
-    listen: u16,
+    listen: String,
+    node_id: Option<String>,
     cores: usize,
     tls_ca: Option<String>,
     tls_cert: Option<String>,
     tls_key: Option<String>,
     metrics_port: Option<u16>,
 ) -> Result<()> {
+    let bind_addr = parse_listen_addr(&listen);
+
     let cores = if cores == 0 {
         std::thread::available_parallelism()
             .map(|n| n.get())
@@ -24,13 +37,13 @@ pub fn run(
             cert,
             key,
         };
-        tracing::info!(port = listen, cores, "starting agent (mTLS)");
-        AgentServer::with_tls(listen, cores, &tls)
-            .context(format!("failed to start mTLS agent on port {listen}"))?
+        tracing::info!(addr = %bind_addr, cores, node_id = node_id.as_deref().unwrap_or("-"), "starting agent (mTLS)");
+        AgentServer::with_tls(&bind_addr, cores, node_id, &tls)
+            .context(format!("failed to start mTLS agent on {bind_addr}"))?
     } else {
-        tracing::info!(port = listen, cores, "starting agent (plain HTTP)");
-        AgentServer::new(listen, cores)
-            .context(format!("failed to start agent on port {listen}"))?
+        tracing::info!(addr = %bind_addr, cores, node_id = node_id.as_deref().unwrap_or("-"), "starting agent (plain HTTP)");
+        AgentServer::new(&bind_addr, cores, node_id)
+            .context(format!("failed to start agent on {bind_addr}"))?
     };
 
     if let Some(port) = metrics_port {

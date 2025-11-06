@@ -15,7 +15,7 @@ fn start_agent(port: u16) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name(format!("agent-{port}"))
         .spawn(move || {
-            let server = AgentServer::new(port, 1).expect("start agent");
+            let server = AgentServer::new(&format!("127.0.0.1:{port}"), 1, None).expect("start agent");
             server.run();
         })
         .unwrap()

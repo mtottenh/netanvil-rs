@@ -10,6 +10,10 @@ mod parsing;
 #[command(about = "High-performance HTTP load testing")]
 #[command(version)]
 struct Cli {
+    /// Enable debug/trace logging (equivalent to RUST_LOG=debug)
+    #[arg(long, global = true)]
+    debug: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -220,13 +224,30 @@ enum Commands {
         /// Maximum error rate (%) before forcing rate reduction in ramp mode
         #[arg(long, default_value = "5.0")]
         ramp_max_errors: f64,
+
+        // ── Event logging flags ──
+        /// Directory for per-request Arrow IPC event logs. Each I/O worker core
+        /// writes an events_core_N.arrow file for post-test statistical analysis.
+        #[arg(long)]
+        event_log_dir: Option<String>,
+
+        /// Fraction of requests to include in the event log (0.0-1.0).
+        /// Default: 1.0 (log all requests). Use lower values at high RPS.
+        #[arg(long, default_value = "1.0")]
+        event_sample_rate: f64,
     },
 
     /// Run as a remotely controllable agent node
     Agent {
-        /// Port to listen on
+        /// Address to listen on: a port (9090) or addr:port (10.0.0.2:9090).
+        /// When only a port is given, binds to 0.0.0.0.
         #[arg(long, default_value = "9090")]
-        listen: u16,
+        listen: String,
+
+        /// Human-readable node identifier for metrics labels and logging.
+        /// Defaults to <hostname>:<port> if not specified.
+        #[arg(long)]
+        node_id: Option<String>,
 
         /// Number of worker cores (0 = auto-detect)
         #[arg(long, default_value = "0")]
@@ -449,14 +470,27 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
+    // Install the ring crypto provider for rustls before any TLS usage.
+    // Without this, rustls 0.23 panics on auto-detection when no single
+    // provider feature is unambiguously enabled across the dependency tree.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
+    let cli = Cli::parse();
+
+    let default_level = if cli.debug {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
+    };
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
+                .add_directive(default_level.into()),
         )
         .init();
-
-    let cli = Cli::parse();
 
     match cli.command {
         Commands::Test {
@@ -505,6 +539,8 @@ fn main() -> Result<()> {
             ramp_warmup,
             ramp_multiplier,
             ramp_max_errors,
+            event_log_dir,
+            event_sample_rate,
         } => commands::test::run(
             url,
             plugin,
@@ -550,16 +586,19 @@ fn main() -> Result<()> {
             ramp_warmup,
             ramp_multiplier,
             ramp_max_errors,
+            event_log_dir,
+            event_sample_rate,
         )?,
 
         Commands::Agent {
             listen,
+            node_id,
             cores,
             tls_ca,
             tls_cert,
             tls_key,
             metrics_port,
-        } => commands::agent::run(listen, cores, tls_ca, tls_cert, tls_key, metrics_port)?,
+        } => commands::agent::run(listen, node_id, cores, tls_ca, tls_cert, tls_key, metrics_port)?,
 
         Commands::Leader {
             workers,

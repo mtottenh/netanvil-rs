@@ -24,6 +24,7 @@ netanvil-redis = { workspace = true }
 netanvil-plugin = { workspace = true }
 netanvil-plugin-luajit = { workspace = true }
 netanvil-harness = { workspace = true }
+netanvil-events = { workspace = true }
 flume = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -31,6 +32,7 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+rustls = { version = "0.23", features = ["ring"] }
 
 [features]
 v8 = ["netanvil-harness/v8", "netanvil-api/v8"]

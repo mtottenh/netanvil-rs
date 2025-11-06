@@ -56,6 +56,8 @@ pub fn run(
     ramp_warmup: String,
     ramp_multiplier: f64,
     ramp_max_errors: f64,
+    event_log_dir: Option<String>,
+    event_sample_rate: f64,
 ) -> Result<()> {
     let duration = parse_duration(&duration).context("invalid --duration")?;
     let timeout = parse_duration(&timeout).context("invalid --timeout")?;
@@ -169,6 +171,25 @@ pub fn run(
     );
 
     let request_timeout = timeout;
+
+    // Build event recorder factory if --event-log-dir is set
+    let event_recorder_factory: Option<netanvil_core::EventRecorderFactory> =
+        if let Some(ref dir) = event_log_dir {
+            let protocol_name = detect_protocol_name(&config);
+            let schema = netanvil_events::EventSchemaBuilder::new(protocol_name)
+                .with_all()
+                .sample_rate(event_sample_rate)
+                .build();
+            let anchor = netanvil_events::TimeAnchor::now();
+            eprintln!(
+                "  event log: {dir} (sample rate: {:.0}%)",
+                event_sample_rate * 100.0
+            );
+            Some(schema.into_factory(dir.clone(), anchor))
+        } else {
+            None
+        };
+
     let protocol = detect_protocol(&config.targets);
 
     let result = match protocol {
@@ -230,7 +251,7 @@ pub fn run(
             let trans_factory: netanvil_core::GenericTransformerFactory<netanvil_tcp::TcpRequestSpec> =
                 Box::new(|_| Box::new(netanvil_tcp::TcpNoopTransformer));
 
-            GenericTestBuilder::new(
+            let mut builder = GenericTestBuilder::new(
                 config,
                 move || {
                     netanvil_tcp::TcpExecutor::with_pool(
@@ -244,9 +265,11 @@ pub fn run(
             )
             .on_progress(|update| {
                 eprint!("\r{}", ProgressLine::new(update));
-            })
-            .run()
-            .context("TCP load test failed")?
+            });
+            if let Some(factory) = event_recorder_factory {
+                builder = builder.event_recorder_factory(factory);
+            }
+            builder.run().context("TCP load test failed")?
         }
 
         DetectedProtocol::Udp => {
@@ -288,7 +311,7 @@ pub fn run(
             let trans_factory: netanvil_core::GenericTransformerFactory<netanvil_udp::UdpRequestSpec> =
                 Box::new(|_| Box::new(netanvil_udp::UdpNoopTransformer));
 
-            GenericTestBuilder::new(
+            let mut builder = GenericTestBuilder::new(
                 config,
                 move || netanvil_udp::UdpExecutor::with_timeout(request_timeout),
                 gen_factory,
@@ -296,9 +319,11 @@ pub fn run(
             )
             .on_progress(|update| {
                 eprint!("\r{}", ProgressLine::new(update));
-            })
-            .run()
-            .context("UDP load test failed")?
+            });
+            if let Some(factory) = event_recorder_factory {
+                builder = builder.event_recorder_factory(factory);
+            }
+            builder.run().context("UDP load test failed")?
         }
 
         DetectedProtocol::Dns => {
@@ -343,7 +368,7 @@ pub fn run(
             let trans_factory: netanvil_core::GenericTransformerFactory<netanvil_dns::DnsRequestSpec> =
                 Box::new(|_| Box::new(netanvil_dns::DnsNoopTransformer));
 
-            GenericTestBuilder::new(
+            let mut builder = GenericTestBuilder::new(
                 config,
                 move || netanvil_dns::DnsExecutor::with_timeout(request_timeout),
                 gen_factory,
@@ -351,9 +376,11 @@ pub fn run(
             )
             .on_progress(|update| {
                 eprint!("\r{}", ProgressLine::new(update));
-            })
-            .run()
-            .context("DNS load test failed")?
+            });
+            if let Some(factory) = event_recorder_factory {
+                builder = builder.event_recorder_factory(factory);
+            }
+            builder.run().context("DNS load test failed")?
         }
 
         DetectedProtocol::Redis => {
@@ -384,7 +411,7 @@ pub fn run(
                 netanvil_redis::RedisRequestSpec,
             > = Box::new(|_| Box::new(netanvil_redis::RedisNoopTransformer));
 
-            GenericTestBuilder::new(
+            let mut builder = GenericTestBuilder::new(
                 config,
                 move || netanvil_redis::RedisExecutor::new(request_timeout),
                 gen_factory,
@@ -392,9 +419,11 @@ pub fn run(
             )
             .on_progress(|update| {
                 eprint!("\r{}", ProgressLine::new(update));
-            })
-            .run()
-            .context("Redis load test failed")?
+            });
+            if let Some(factory) = event_recorder_factory {
+                builder = builder.event_recorder_factory(factory);
+            }
+            builder.run().context("Redis load test failed")?
         }
 
         DetectedProtocol::Http => {
@@ -454,6 +483,9 @@ pub fn run(
                 if let Some(factory) = plugin_factory {
                     builder = builder.generator_factory(factory);
                 }
+                if let Some(factory) = event_recorder_factory {
+                    builder = builder.event_recorder_factory(factory);
+                }
 
                 builder.run().context("load test failed")?
             } else {
@@ -463,6 +495,9 @@ pub fn run(
 
                 if let Some(factory) = plugin_factory {
                     builder = builder.generator_factory(factory);
+                }
+                if let Some(factory) = event_recorder_factory {
+                    builder = builder.event_recorder_factory(factory);
                 }
 
                 builder.run().context("load test failed")?
@@ -476,4 +511,15 @@ pub fn run(
     output::print_results(&result, output_format);
 
     Ok(())
+}
+
+/// Derive the protocol name for event logging from the config.
+fn detect_protocol_name(config: &TestConfig) -> &'static str {
+    match &config.protocol {
+        Some(netanvil_types::ProtocolConfig::Tcp { .. }) => "tcp",
+        Some(netanvil_types::ProtocolConfig::Udp { .. }) => "udp",
+        Some(netanvil_types::ProtocolConfig::Dns { .. }) => "dns",
+        Some(netanvil_types::ProtocolConfig::Redis { .. }) => "redis",
+        None => "http",
+    }
 }

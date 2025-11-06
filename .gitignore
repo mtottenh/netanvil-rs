@@ -38,3 +38,14 @@ coverage/
 # Environment
 .env
 .env.local
+
+# Docker devcontainer
+.docker-home/
+
+# Ansible
+ansible/.certs/
+ansible/.state-*.json
+ansible/.latest-run-id
+ansible/.deb-paths.yml
+ansible/inventory/hosts-*
+ansible/results/

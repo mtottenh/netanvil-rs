@@ -92,6 +92,14 @@ impl SharedState {
         self.inner.lock().unwrap().status.state = "completed".into();
     }
 
+    /// Reset metrics to zero/empty. Called when a test ends so that
+    /// Prometheus gauges don't retain stale values from the last run.
+    pub fn reset_metrics(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.metrics = None;
+        inner.status = TestStatus::default();
+    }
+
     /// Push an external signal (e.g., from PUT /signal).
     /// Overwrites any existing signal with the same name.
     pub fn push_signal(&self, name: String, value: f64) {
@@ -211,4 +219,54 @@ pub struct UpdateMetadataRequest {
 pub struct PushSignalRequest {
     pub name: String,
     pub value: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use netanvil_core::ProgressUpdate;
+    use netanvil_types::{MetricsSummary, SaturationInfo};
+    use std::time::Duration;
+
+    #[test]
+    fn reset_metrics_zeroes_state_after_test() {
+        let state = SharedState::new();
+
+        // Simulate a running test with non-zero metrics.
+        state.update_from_progress(&ProgressUpdate {
+            elapsed: Duration::from_secs(10),
+            remaining: Duration::from_secs(50),
+            target_rps: 1000.0,
+            current_rps: 950.0,
+            total_requests: 9500,
+            total_errors: 12,
+            total_bytes_sent: 1_000_000,
+            total_bytes_received: 2_000_000,
+            window: MetricsSummary {
+                latency_p50_ns: 5_000_000,
+                latency_p90_ns: 10_000_000,
+                latency_p99_ns: 20_000_000,
+                ..Default::default()
+            },
+            latency_buckets: vec![(0.005, 100), (0.01, 500), (f64::INFINITY, 9500)],
+            saturation: SaturationInfo::default(),
+        });
+
+        // Verify metrics are populated.
+        let m = state.get_metrics().expect("metrics should be present");
+        assert!(m.total_requests > 0);
+        assert!(m.current_rps > 0.0);
+
+        // Reset (simulates test completion).
+        state.reset_metrics();
+
+        // Metrics should now be None (Prometheus handler returns empty).
+        assert!(state.get_metrics().is_none(), "metrics should be cleared");
+
+        // Status should be back to defaults.
+        let status = state.get_status();
+        assert_eq!(status.state, "");
+        assert_eq!(status.total_requests, 0);
+        assert_eq!(status.current_rps, 0.0);
+    }
 }

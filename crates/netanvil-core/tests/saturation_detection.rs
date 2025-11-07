@@ -195,11 +195,11 @@ fn aggregate_merges_scheduling_delay_fields() {
     use netanvil_metrics::AggregateMetrics;
 
     let now = Instant::now();
-    let hist = Histogram::<u64>::new_with_bounds(1, 60_000_000_000, 3).unwrap();
-    let hist_bytes = netanvil_metrics::encoding::encode_histogram(&hist).unwrap();
+    let empty_hist = || Histogram::<u64>::new_with_bounds(1, 60_000_000_000, 3).unwrap();
+    let empty_size_hist = || Histogram::<u64>::new_with_bounds(1, 1_073_741_824, 3).unwrap();
 
     let snap_a = MetricsSnapshot {
-        latency_histogram_bytes: hist_bytes.clone(),
+        latency_histogram: empty_hist(),
         total_requests: 100,
         total_errors: 0,
         bytes_sent: 0,
@@ -210,13 +210,13 @@ fn aggregate_merges_scheduling_delay_fields() {
         scheduling_delay_max_ns: 2_000_000, // 2ms max
         scheduling_delay_count_over_1ms: 3,
         header_value_counts: std::collections::HashMap::new(),
-        response_size_histogram_bytes: Vec::new(),
+        response_size_histogram: empty_size_hist(),
         md5_mismatches: 0,
         response_signals: std::collections::HashMap::new(),
     };
 
     let snap_b = MetricsSnapshot {
-        latency_histogram_bytes: hist_bytes,
+        latency_histogram: empty_hist(),
         total_requests: 50,
         total_errors: 0,
         bytes_sent: 0,
@@ -227,7 +227,7 @@ fn aggregate_merges_scheduling_delay_fields() {
         scheduling_delay_max_ns: 8_000_000,  // 8ms max
         scheduling_delay_count_over_1ms: 7,
         header_value_counts: std::collections::HashMap::new(),
-        response_size_histogram_bytes: Vec::new(),
+        response_size_histogram: empty_size_hist(),
         md5_mismatches: 0,
         response_signals: std::collections::HashMap::new(),
     };

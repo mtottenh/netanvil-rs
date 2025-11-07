@@ -6,8 +6,6 @@ use netanvil_types::config::SignalAggregation;
 use netanvil_types::metrics::ResponseSignalAccumulator;
 use netanvil_types::{MetricsSnapshot, MetricsSummary};
 
-use crate::encoding::decode_histogram;
-
 /// Aggregated metrics from multiple sources (cores or nodes).
 ///
 /// Merge is associative and commutative for counters. The histogram
@@ -76,9 +74,7 @@ impl Default for AggregateMetrics {
 impl AggregateMetrics {
     /// Merge a per-core snapshot into this aggregate.
     pub fn merge(&mut self, snapshot: &MetricsSnapshot) {
-        if let Ok(hist) = decode_histogram(&snapshot.latency_histogram_bytes) {
-            let _ = self.histogram.add(&hist);
-        }
+        let _ = self.histogram.add(&snapshot.latency_histogram);
 
         self.total_requests += snapshot.total_requests;
         self.total_errors += snapshot.total_errors;
@@ -104,9 +100,7 @@ impl AggregateMetrics {
         self.scheduling_delay_count_over_1ms += snapshot.scheduling_delay_count_over_1ms;
 
         // Merge response size histogram
-        if let Ok(size_hist) = decode_histogram(&snapshot.response_size_histogram_bytes) {
-            let _ = self.size_histogram.add(&size_hist);
-        }
+        let _ = self.size_histogram.add(&snapshot.response_size_histogram);
 
         // Merge header value counts by summing
         for (header, values) in &snapshot.header_value_counts {
@@ -257,7 +251,6 @@ impl AggregateMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoding::encode_histogram;
 
     fn make_snapshot(latencies_ms: &[u64], errors: u64) -> MetricsSnapshot {
         let mut hist = Histogram::<u64>::new_with_bounds(1, 60_000_000_000, 3).unwrap();
@@ -267,7 +260,7 @@ mod tests {
 
         let now = Instant::now();
         MetricsSnapshot {
-            latency_histogram_bytes: encode_histogram(&hist).unwrap(),
+            latency_histogram: hist,
             total_requests: latencies_ms.len() as u64,
             total_errors: errors,
             bytes_sent: 0,
@@ -278,7 +271,8 @@ mod tests {
             scheduling_delay_max_ns: 0,
             scheduling_delay_count_over_1ms: 0,
             header_value_counts: std::collections::HashMap::new(),
-            response_size_histogram_bytes: Vec::new(),
+            response_size_histogram: Histogram::<u64>::new_with_bounds(1, 1_073_741_824, 3)
+                .unwrap(),
             md5_mismatches: 0,
             response_signals: std::collections::HashMap::new(),
         }

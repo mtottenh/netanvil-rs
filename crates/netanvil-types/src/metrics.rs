@@ -1,11 +1,17 @@
 use std::time::{Duration, Instant};
 
+use hdrhistogram::Histogram;
+
 /// Per-core metrics snapshot. Sent from worker to coordinator.
-/// Contains a serialized HDR histogram and counters for a time window.
+/// Contains an HDR histogram and counters for a time window.
+///
+/// `Histogram<u64>` is `Send`, so snapshots cross flume channels
+/// without serialisation.  V2 encoding is only needed when histograms
+/// must travel over the network (distributed coordinator).
 #[derive(Debug, Clone)]
 pub struct MetricsSnapshot {
-    /// V2-serialized HDR histogram of latencies (nanoseconds)
-    pub latency_histogram_bytes: Vec<u8>,
+    /// HDR histogram of latencies (nanoseconds)
+    pub latency_histogram: Histogram<u64>,
     /// Total requests completed in this window
     pub total_requests: u64,
     /// Total errors in this window
@@ -30,8 +36,8 @@ pub struct MetricsSnapshot {
     /// Used for tracking response header distributions (e.g., X-Cache hit/miss).
     pub header_value_counts:
         std::collections::HashMap<String, std::collections::HashMap<String, u64>>,
-    /// V2-serialized HDR histogram of response sizes (bytes).
-    pub response_size_histogram_bytes: Vec<u8>,
+    /// HDR histogram of response sizes (bytes).
+    pub response_size_histogram: Histogram<u64>,
     /// Number of MD5 mismatches detected in this window.
     pub md5_mismatches: u64,
     /// Numeric signal values extracted from response headers this window.

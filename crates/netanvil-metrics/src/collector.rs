@@ -7,8 +7,6 @@ use netanvil_types::config::ResponseSignalConfig;
 use netanvil_types::metrics::ResponseSignalAccumulator;
 use netanvil_types::{ExecutionResult, MetricsCollector, MetricsSnapshot};
 
-use crate::encoding::encode_histogram;
-
 /// HDR histogram-based metrics collector for a single core.
 ///
 /// Uses `RefCell`/`Cell` for interior mutability — this is `!Send` by design.
@@ -231,11 +229,11 @@ impl MetricsCollector for HdrMetricsCollector {
 
     fn snapshot(&self) -> MetricsSnapshot {
         let now = Instant::now();
-        let hist = self.histogram.borrow();
-        let bytes = encode_histogram(&hist).unwrap_or_default();
 
-        let size_hist = self.size_histogram.borrow();
-        let size_bytes = encode_histogram(&size_hist).unwrap_or_default();
+        // Clone histograms (memcpy of counts Vec), then reset originals
+        // in-place so the allocation is reused for the next window.
+        let latency_hist = self.histogram.borrow().clone();
+        let size_hist = self.size_histogram.borrow().clone();
 
         // Clone and reset header counts
         let header_counts = {
@@ -246,7 +244,7 @@ impl MetricsCollector for HdrMetricsCollector {
         };
 
         let snapshot = MetricsSnapshot {
-            latency_histogram_bytes: bytes,
+            latency_histogram: latency_hist,
             total_requests: self.total_requests.get(),
             total_errors: self.total_errors.get(),
             bytes_sent: self.bytes_sent.get(),
@@ -257,7 +255,7 @@ impl MetricsCollector for HdrMetricsCollector {
             scheduling_delay_max_ns: self.scheduling_delay_max_ns.get(),
             scheduling_delay_count_over_1ms: self.scheduling_delay_count_over_1ms.get(),
             header_value_counts: header_counts,
-            response_size_histogram_bytes: size_bytes,
+            response_size_histogram: size_hist,
             md5_mismatches: self.md5_mismatches.get(),
             response_signals: {
                 let mut acc = self.response_signal_accumulators.borrow_mut();
@@ -267,9 +265,7 @@ impl MetricsCollector for HdrMetricsCollector {
             },
         };
 
-        // Reset for next window
-        drop(hist);
-        drop(size_hist);
+        // Reset for next window (keeps existing allocations)
         self.histogram.borrow_mut().reset();
         self.size_histogram.borrow_mut().reset();
         self.total_requests.set(0);
@@ -395,7 +391,6 @@ mod tests {
         // 2 real requests, but the delayed one generates an extra histogram entry
         assert_eq!(snapshot.total_requests, 2);
         // Histogram should have 3 entries (2 real + 1 corrected)
-        let hist = crate::encoding::decode_histogram(&snapshot.latency_histogram_bytes).unwrap();
-        assert_eq!(hist.len(), 3);
+        assert_eq!(snapshot.latency_histogram.len(), 3);
     }
 }

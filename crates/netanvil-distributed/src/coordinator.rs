@@ -98,16 +98,36 @@ where
 
         self.compute_weights(&nodes);
 
-        // Start test on all nodes
+        // Start test on all nodes, each with its weighted share of the
+        // initial rate baked into the config. This avoids a race between
+        // the engine starting and a follow-up PUT /rate arriving.
         let initial_rps = self.rate_controller.current_rate();
         for node in &nodes {
-            if let Err(e) = self.commander.start_test(node, &self.config) {
+            let weight = self.node_weights.get(&node.id).copied().unwrap_or(0.0);
+            let node_rps = initial_rps * weight;
+
+            let mut agent_config = self.config.clone();
+            agent_config.rate = netanvil_types::RateConfig::Static { rps: node_rps };
+
+            if let Err(e) = self.commander.start_test(node, &agent_config) {
                 tracing::error!(node = %node.id, "failed to start test: {e}");
                 self.discovery.mark_failed(&node.id);
             }
         }
 
-        // Distribute initial rate
+        // Re-discover after startup to exclude any agents that failed,
+        // then recompute weights for the tick loop.
+        let nodes = self.discovery.discover();
+        if nodes.is_empty() {
+            tracing::error!("all nodes failed during startup");
+            return DistributedTestResult {
+                total_requests: 0,
+                total_errors: 0,
+                duration: Duration::ZERO,
+                nodes: vec![],
+            };
+        }
+        self.compute_weights(&nodes);
         self.distribute_rate(&nodes, initial_rps);
 
         // Tick loop

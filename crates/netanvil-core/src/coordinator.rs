@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -10,6 +11,75 @@ use netanvil_types::{
 use crate::handle::IoWorkerHandle;
 use crate::result::TestResult;
 use crate::timer_thread::TimerThreadHandle;
+
+/// Sliding window for smoothing reported RPS / throughput.
+///
+/// Uses struct-of-arrays layout so aggregation iterates contiguous
+/// `&[u64]` slices — one cache line per counter field.
+struct SlidingWindow {
+    timestamps: VecDeque<Instant>,
+    total_requests: VecDeque<u64>,
+    total_errors: VecDeque<u64>,
+    bytes_sent: VecDeque<u64>,
+    bytes_received: VecDeque<u64>,
+    window_duration: Duration,
+}
+
+impl SlidingWindow {
+    fn new(window_duration: Duration) -> Self {
+        Self {
+            timestamps: VecDeque::new(),
+            total_requests: VecDeque::new(),
+            total_errors: VecDeque::new(),
+            bytes_sent: VecDeque::new(),
+            bytes_received: VecDeque::new(),
+            window_duration,
+        }
+    }
+
+    /// Push one tick's worth of counters.
+    fn push(&mut self, now: Instant, requests: u64, errors: u64, sent: u64, received: u64) {
+        self.timestamps.push_back(now);
+        self.total_requests.push_back(requests);
+        self.total_errors.push_back(errors);
+        self.bytes_sent.push_back(sent);
+        self.bytes_received.push_back(received);
+        self.evict(now);
+    }
+
+    /// Remove entries older than the window.
+    fn evict(&mut self, now: Instant) {
+        let cutoff = now - self.window_duration;
+        while let Some(&ts) = self.timestamps.front() {
+            if ts >= cutoff {
+                break;
+            }
+            self.timestamps.pop_front();
+            self.total_requests.pop_front();
+            self.total_errors.pop_front();
+            self.bytes_sent.pop_front();
+            self.bytes_received.pop_front();
+        }
+    }
+
+    /// Smoothed requests-per-second over the window.
+    fn request_rate(&self) -> f64 {
+        if self.timestamps.len() < 2 {
+            // With fewer than 2 entries we can't compute a time span;
+            // fall back to the raw tick value.
+            return self.total_requests.back().copied().unwrap_or(0) as f64
+                / self.window_duration.as_secs_f64().max(0.001);
+        }
+        let span = self
+            .timestamps
+            .back()
+            .unwrap()
+            .saturating_duration_since(*self.timestamps.front().unwrap());
+        let secs = span.as_secs_f64().max(0.001);
+        let total: u64 = self.total_requests.iter().sum();
+        total as f64 / secs
+    }
+}
 
 /// Snapshot of live progress during a test, emitted each tick.
 #[derive(Debug, Clone)]
@@ -107,6 +177,8 @@ pub struct Coordinator {
     warmup_complete: bool,
     /// Stop when cumulative bytes received reaches this.
     target_bytes: Option<u64>,
+    /// Sliding window for smoothing reported RPS (not fed to rate controller).
+    sliding_window: SlidingWindow,
 }
 
 impl Coordinator {
@@ -139,6 +211,7 @@ impl Coordinator {
             warmup_duration: None,
             warmup_complete: false,
             target_bytes: None,
+            sliding_window: SlidingWindow::new(Duration::from_secs(2)),
         }
     }
 
@@ -203,10 +276,16 @@ impl Coordinator {
     }
 
     /// Run the full coordinator loop. Blocks until the test completes.
-    pub fn run(&mut self) -> TestResult {
+    pub fn run(&mut self, ready_tx: Option<flume::Sender<()>>) -> TestResult {
         // Distribute initial rate
         let initial_rps = self.rate_controller.current_rate();
         self.distribute_rate(initial_rps);
+
+        // Signal that the coordinator is ready to process commands.
+        // Ignore send error: the receiver may have timed out and dropped.
+        if let Some(tx) = ready_tx {
+            let _ = tx.send(());
+        }
 
         loop {
             std::thread::sleep(self.control_interval);
@@ -307,9 +386,22 @@ impl Coordinator {
 
         let decision = self.rate_controller.update(&summary);
 
+        // Push this tick's counters into the sliding window for
+        // smoothed RPS reporting (API / Prometheus / CLI).
+        let now = Instant::now();
+        self.sliding_window.push(
+            now,
+            summary.total_requests,
+            summary.total_errors,
+            summary.bytes_sent,
+            summary.bytes_received,
+        );
+        let smoothed_rps = self.sliding_window.request_rate();
+
         tracing::debug!(
             tick_requests = summary.total_requests,
             total_requests = self.total_aggregate.total_requests(),
+            smoothed_rps,
             target_rps = decision.target_rps,
             "coordinator tick"
         );
@@ -317,8 +409,9 @@ impl Coordinator {
         // Distribute to workers via timer thread
         self.distribute_rate(decision.target_rps);
 
-        // Compute saturation info from timer stats + tick aggregate
-        let saturation = self.compute_saturation(&summary, decision.target_rps);
+        // Compute saturation info from timer stats + tick aggregate.
+        // Uses smoothed_rps so empty ticks don't trigger false ClientSaturated.
+        let saturation = self.compute_saturation(&summary, decision.target_rps, smoothed_rps);
 
         // Emit progress update
         if let Some(ref mut callback) = self.on_progress {
@@ -327,7 +420,7 @@ impl Coordinator {
             let update = ProgressUpdate {
                 elapsed,
                 remaining: self.test_duration.saturating_sub(elapsed),
-                current_rps: summary.request_rate,
+                current_rps: smoothed_rps,
                 target_rps: decision.target_rps,
                 total_requests: self.total_aggregate.total_requests(),
                 total_errors: self.total_aggregate.total_errors(),
@@ -377,7 +470,14 @@ impl Coordinator {
     }
 
     /// Compute client/server saturation info from timer stats and tick metrics.
-    fn compute_saturation(&mut self, summary: &MetricsSummary, target_rps: f64) -> SaturationInfo {
+    /// `smoothed_rps` comes from the sliding window so that empty ticks don't
+    /// trigger false `ClientSaturated` assessments.
+    fn compute_saturation(
+        &mut self,
+        summary: &MetricsSummary,
+        target_rps: f64,
+        smoothed_rps: f64,
+    ) -> SaturationInfo {
         // Read timer stats and compute per-tick deltas
         let current_dispatched = self.timer_handle.stats.dispatched.load(Ordering::Relaxed);
         let current_dropped = self.timer_handle.stats.dropped.load(Ordering::Relaxed);
@@ -412,16 +512,19 @@ impl Coordinator {
         };
 
         let rate_achievement = if target_rps > 0.0 {
-            (summary.request_rate / target_rps).min(2.0)
+            (smoothed_rps / target_rps).min(2.0)
         } else {
             1.0
         };
 
-        // Classification
+        // Only flag rate underachievement when there's data in the window.
+        // An empty window (e.g. startup) means "no data yet", not "can't keep up".
+        let rate_underachieving = summary.total_requests > 0 && rate_achievement < 0.90;
+
         let client_signals = backpressure_ratio > 0.01
             || scheduling_delay_mean_ms > 5.0
             || delayed_request_ratio > 0.10
-            || rate_achievement < 0.90;
+            || rate_underachieving;
 
         let server_signals = summary.error_rate > 0.05 || (summary.latency_p99_ns > 5_000_000_000); // p99 > 5s
 

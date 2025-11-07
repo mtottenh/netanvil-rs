@@ -424,9 +424,13 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
         (cmd_rx, agent.shared_state.clone())
     };
 
+    // Readiness barrier: the coordinator signals when its tick loop is about
+    // to start, so we don't return 200 until the engine can process commands.
+    let (ready_tx, ready_rx) = flume::bounded::<()>(1);
+
     let plugin_config = test_config.plugin.clone();
 
-    let inner = inner.clone();
+    let inner_clone = inner.clone();
     let request_timeout = test_config.connections.request_timeout;
     let protocol = test_config.protocol.clone();
 
@@ -446,6 +450,7 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
                     test_config,
                     request_timeout,
                     cmd_rx,
+                    ready_tx,
                     progress_state,
                     &mode,
                     &payload_hex,
@@ -461,6 +466,7 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
                     test_config,
                     request_timeout,
                     cmd_rx,
+                    ready_tx,
                     progress_state,
                     &payload_hex,
                     expect_response,
@@ -474,6 +480,7 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
                     test_config,
                     request_timeout,
                     cmd_rx,
+                    ready_tx,
                     progress_state,
                     &domains,
                     &query_type,
@@ -489,6 +496,7 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
                     test_config,
                     request_timeout,
                     cmd_rx,
+                    ready_tx,
                     progress_state,
                     password.as_deref(),
                     db,
@@ -517,13 +525,14 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
                         test_config,
                         request_timeout,
                         cmd_rx,
+                        ready_tx,
                         progress_state,
                         plugin_factory,
                     )
                 }
             };
 
-            let mut agent = inner.lock().unwrap();
+            let mut agent = inner_clone.lock().unwrap();
             agent.state = NodeState::Idle;
             agent.command_tx = None;
             agent.shared_state.reset_metrics();
@@ -543,7 +552,22 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
         })
         .map_err(|e| format!("spawn test thread: {e}"))?;
 
-    Ok(())
+    // Block until the coordinator is ready to process commands.
+    match ready_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(()) => Ok(()),
+        Err(flume::RecvTimeoutError::Timeout) => {
+            let mut agent = inner.lock().unwrap();
+            agent.state = NodeState::Idle;
+            agent.command_tx = None;
+            Err("coordinator startup timed out".into())
+        }
+        Err(flume::RecvTimeoutError::Disconnected) => {
+            let mut agent = inner.lock().unwrap();
+            agent.state = NodeState::Idle;
+            agent.command_tx = None;
+            Err("coordinator startup failed".into())
+        }
+    }
 }
 
 /// Run an HTTP test (the original path).
@@ -551,6 +575,7 @@ fn run_http_test(
     config: TestConfig,
     request_timeout: std::time::Duration,
     cmd_rx: flume::Receiver<WorkerCommand>,
+    ready_tx: flume::Sender<()>,
     progress_state: SharedState,
     plugin_factory: Option<netanvil_core::GeneratorFactory>,
 ) -> netanvil_types::Result<TestResult> {
@@ -573,7 +598,8 @@ fn run_http_test(
         .on_progress(move |update| {
             progress_state.update_from_progress(update);
         })
-        .external_commands(cmd_rx);
+        .external_commands(cmd_rx)
+        .ready_signal(ready_tx);
 
     if let Some(factory) = plugin_factory {
         builder = builder.generator_factory(factory);
@@ -588,6 +614,7 @@ fn run_tcp_test(
     config: TestConfig,
     timeout: std::time::Duration,
     cmd_rx: flume::Receiver<WorkerCommand>,
+    ready_tx: flume::Sender<()>,
     progress_state: SharedState,
     mode_str: &str,
     payload_hex: &str,
@@ -671,6 +698,7 @@ fn run_tcp_test(
         progress_state.update_from_progress(update);
     })
     .external_commands(cmd_rx)
+    .ready_signal(ready_tx)
     .run()
 }
 
@@ -679,6 +707,7 @@ fn run_udp_test(
     config: TestConfig,
     timeout: std::time::Duration,
     cmd_rx: flume::Receiver<WorkerCommand>,
+    ready_tx: flume::Sender<()>,
     progress_state: SharedState,
     payload_hex: &str,
     expect_response: bool,
@@ -724,6 +753,7 @@ fn run_udp_test(
         progress_state.update_from_progress(update);
     })
     .external_commands(cmd_rx)
+    .ready_signal(ready_tx)
     .run()
 }
 
@@ -731,6 +761,7 @@ fn run_dns_test(
     config: TestConfig,
     timeout: std::time::Duration,
     cmd_rx: flume::Receiver<WorkerCommand>,
+    ready_tx: flume::Sender<()>,
     progress_state: SharedState,
     domains_csv: &str,
     query_type_str: &str,
@@ -783,6 +814,7 @@ fn run_dns_test(
         progress_state.update_from_progress(update);
     })
     .external_commands(cmd_rx)
+    .ready_signal(ready_tx)
     .run()
 }
 
@@ -1029,6 +1061,7 @@ fn run_redis_test(
     config: TestConfig,
     timeout: std::time::Duration,
     cmd_rx: flume::Receiver<WorkerCommand>,
+    ready_tx: flume::Sender<()>,
     progress_state: SharedState,
     password: Option<&str>,
     db: Option<u16>,
@@ -1086,6 +1119,7 @@ fn run_redis_test(
         progress_state.update_from_progress(update);
     })
     .external_commands(cmd_rx)
+    .ready_signal(ready_tx)
     .run()
 }
 

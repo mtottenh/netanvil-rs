@@ -139,6 +139,7 @@ where
     external_command_rx: Option<flume::Receiver<netanvil_types::WorkerCommand>>,
     pushed_signal_source: Option<crate::SignalSourceFn>,
     event_recorder_factory: Option<crate::EventRecorderFactory>,
+    ready_tx: Option<flume::Sender<()>>,
 }
 
 impl<E, F> TestBuilder<E, F>
@@ -157,6 +158,7 @@ where
             external_command_rx: None,
             pushed_signal_source: None,
             event_recorder_factory: None,
+            ready_tx: None,
         }
     }
 
@@ -221,6 +223,12 @@ where
         self
     }
 
+    /// Set a readiness signal. Fired when the coordinator is ready to process commands.
+    pub fn ready_signal(mut self, tx: flume::Sender<()>) -> Self {
+        self.ready_tx = Some(tx);
+        self
+    }
+
     /// Build and run the test. Blocks until completion.
     pub fn run(self) -> netanvil_types::Result<TestResult> {
         run_test_impl(
@@ -232,6 +240,7 @@ where
             self.external_command_rx,
             self.pushed_signal_source,
             self.event_recorder_factory,
+            self.ready_tx,
         )
     }
 }
@@ -277,6 +286,7 @@ where
     external_command_rx: Option<flume::Receiver<netanvil_types::WorkerCommand>>,
     pushed_signal_source: Option<crate::SignalSourceFn>,
     event_recorder_factory: Option<crate::EventRecorderFactory>,
+    ready_tx: Option<flume::Sender<()>>,
 }
 
 impl<E, F> GenericTestBuilder<E, F>
@@ -300,6 +310,7 @@ where
             external_command_rx: None,
             pushed_signal_source: None,
             event_recorder_factory: None,
+            ready_tx: None,
         }
     }
 
@@ -330,6 +341,12 @@ where
         self
     }
 
+    /// Set a readiness signal. Fired when the coordinator is ready to process commands.
+    pub fn ready_signal(mut self, tx: flume::Sender<()>) -> Self {
+        self.ready_tx = Some(tx);
+        self
+    }
+
     /// Build and run the test. Blocks until completion.
     pub fn run(self) -> netanvil_types::Result<TestResult> {
         run_test_core(
@@ -341,6 +358,7 @@ where
             self.external_command_rx,
             self.pushed_signal_source,
             self.event_recorder_factory,
+            self.ready_tx,
         )
     }
 }
@@ -359,6 +377,7 @@ fn run_test_impl<E, F>(
     external_command_rx: Option<flume::Receiver<netanvil_types::WorkerCommand>>,
     pushed_signal_source: Option<crate::SignalSourceFn>,
     event_recorder_factory: Option<crate::EventRecorderFactory>,
+    ready_tx: Option<flume::Sender<()>>,
 ) -> netanvil_types::Result<TestResult>
 where
     E: RequestExecutor<Spec = netanvil_types::HttpRequestSpec> + 'static,
@@ -409,6 +428,7 @@ where
         external_command_rx,
         pushed_signal_source,
         event_recorder_factory,
+        ready_tx,
     )
 }
 
@@ -426,6 +446,7 @@ fn run_test_core<E, F>(
     external_command_rx: Option<flume::Receiver<netanvil_types::WorkerCommand>>,
     pushed_signal_source: Option<crate::SignalSourceFn>,
     event_recorder_factory: Option<crate::EventRecorderFactory>,
+    ready_tx: Option<flume::Sender<()>>,
 ) -> netanvil_types::Result<TestResult>
 where
     E: RequestExecutor + 'static,
@@ -451,6 +472,18 @@ where
         0 // share with timer on small machines
     };
 
+    // Nyquist check: metrics_interval should be ≤ control_interval / 2
+    // to guarantee every coordinator tick sees at least one snapshot per worker.
+    if config.metrics_interval > config.control_interval / 2 {
+        tracing::warn!(
+            metrics_interval_ms = config.metrics_interval.as_millis(),
+            control_interval_ms = config.control_interval.as_millis(),
+            recommended_ms = (config.control_interval / 2).as_millis(),
+            "metrics_interval > control_interval/2 violates Nyquist — \
+             coordinator ticks may see zero snapshots, causing reported RPS to drop to 0"
+        );
+    }
+
     tracing::info!(
         available_cores,
         io_workers = num_cores,
@@ -459,6 +492,16 @@ where
         misc_core,
         "thread pinning layout"
     );
+
+    // Pin coordinator (main thread) to misc core BEFORE spawning children,
+    // so any library-spawned threads (tiny_http, tracing, etc.) inherit the
+    // restricted affinity. Hot-path threads override with their own pinning.
+    if misc_core > 0 && misc_core != timer_core {
+        let core = core_affinity::CoreId { id: misc_core };
+        if !core_affinity::set_for_current(core) {
+            tracing::debug!(misc_core, "failed to pin coordinator to misc core");
+        }
+    }
 
     let start_time = Instant::now();
 
@@ -637,14 +680,6 @@ where
     let rate_controller =
         crate::build_rate_controller(&config.rate, config.control_interval, start_time);
 
-    // Pin coordinator (main thread) to misc core
-    if misc_core > 0 && misc_core != timer_core {
-        let core = core_affinity::CoreId { id: misc_core };
-        if !core_affinity::set_for_current(core) {
-            tracing::debug!(misc_core, "failed to pin coordinator to misc core");
-        }
-    }
-
     let mut coordinator = Coordinator::new(
         rate_controller,
         io_handles,
@@ -696,5 +731,5 @@ where
         coordinator.target_bytes(n);
     }
 
-    Ok(coordinator.run())
+    Ok(coordinator.run(ready_tx))
 }

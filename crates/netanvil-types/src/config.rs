@@ -240,7 +240,7 @@ impl Default for TestConfig {
             headers: Vec::new(),
             num_cores: 0,
             connections: ConnectionConfig::default(),
-            metrics_interval: Duration::from_millis(500),
+            metrics_interval: Duration::from_millis(50),
             control_interval: Duration::from_millis(100),
             error_status_threshold: 400,
             external_metrics_url: None,

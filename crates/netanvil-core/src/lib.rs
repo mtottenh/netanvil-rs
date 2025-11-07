@@ -8,6 +8,7 @@ pub mod engine;
 pub mod generator;
 pub mod handle;
 pub mod io_worker;
+pub mod isolation;
 pub mod report;
 pub mod result;
 pub mod scheduler;

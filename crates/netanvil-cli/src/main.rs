@@ -270,6 +270,13 @@ enum Commands {
         /// without client certificates. Only serves /metrics/prometheus.
         #[arg(long)]
         metrics_port: Option<u16>,
+
+        /// Migrate system threads off hot-path CPU cores before starting.
+        /// Shields timer and I/O worker cores from scheduling noise by
+        /// moving non-essential threads (including other processes) to the
+        /// housekeeping core. Requires CAP_SYS_NICE for cross-process migration.
+        #[arg(long)]
+        isolate_cpus: bool,
     },
 
     /// Run as distributed test leader, coordinating agent nodes
@@ -598,7 +605,8 @@ fn main() -> Result<()> {
             tls_cert,
             tls_key,
             metrics_port,
-        } => commands::agent::run(listen, node_id, cores, tls_ca, tls_cert, tls_key, metrics_port)?,
+            isolate_cpus,
+        } => commands::agent::run(listen, node_id, cores, tls_ca, tls_cert, tls_key, metrics_port, isolate_cpus)?,
 
         Commands::Leader {
             workers,

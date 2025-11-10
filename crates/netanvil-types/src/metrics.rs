@@ -43,6 +43,25 @@ pub struct MetricsSnapshot {
     /// Numeric signal values extracted from response headers this window.
     /// Maps signal_name → (sum, count, max, last) for aggregation.
     pub response_signals: std::collections::HashMap<String, ResponseSignalAccumulator>,
+    /// Protocol-level messages sent this window (datagrams, transactions, queries).
+    /// Distinct from `total_requests` which counts completed request/response cycles.
+    pub packets_sent: u64,
+    /// Protocol-level responses received this window.
+    pub packets_received: u64,
+    /// Protocol-level messages declared lost (sent but no response observed
+    /// within the tracking window).
+    pub packets_lost: u64,
+}
+
+/// Protocol-level packet counter deltas for a metrics window.
+///
+/// Returned by [`PacketCounterSource::take_packet_deltas()`] for protocols
+/// that track packet-level statistics (UDP loss, TCP retransmits, etc.).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PacketCounterDeltas {
+    pub sent: u64,
+    pub received: u64,
+    pub lost: u64,
 }
 
 /// Accumulator for a single numeric signal extracted from response headers.
@@ -83,11 +102,10 @@ pub struct MetricsSummary {
     pub external_signals: Vec<(String, f64)>,
 }
 
-/// Output of a RateController: new target rate and when to check again.
+/// Output of a RateController: new target rate.
 #[derive(Debug, Clone)]
 pub struct RateDecision {
     pub target_rps: f64,
-    pub next_update_interval: Duration,
 }
 
 /// Client-side saturation assessment.

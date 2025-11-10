@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::time::Instant;
 
-use crate::metrics::{MetricsSnapshot, MetricsSummary, RateDecision};
+use crate::metrics::{MetricsSnapshot, MetricsSummary, PacketCounterDeltas, RateDecision};
 use crate::request::{ExecutionResult, HttpRequestSpec, ProtocolSpec, RequestContext};
 
 // ---------------------------------------------------------------------------
@@ -68,6 +68,26 @@ pub trait RequestTransformer {
     fn update_metadata(&self, _metadata: Vec<(String, String)>) {}
 }
 
+/// Source of protocol-level packet counters (UDP loss bitmap, TCP_INFO, etc.).
+///
+/// Shared between the executor (which populates it) and the metrics collector
+/// (which reads it during `snapshot()`).  Implementations use interior
+/// mutability and return deltas since the last call.
+pub trait PacketCounterSource: Default {
+    fn take_packet_deltas(&self) -> PacketCounterDeltas;
+}
+
+/// No-op packet counter source for protocols that don't track packet loss.
+#[derive(Debug, Default)]
+pub struct NoopPacketSource;
+
+impl PacketCounterSource for NoopPacketSource {
+    #[inline]
+    fn take_packet_deltas(&self) -> PacketCounterDeltas {
+        PacketCounterDeltas::default()
+    }
+}
+
 /// Executes requests against the target system.
 ///
 /// Takes `&self` because it is `Rc`-shared across concurrent spawned tasks
@@ -76,12 +96,19 @@ pub trait RequestTransformer {
 /// Implementations: HttpExecutor (netanvil-http)
 pub trait RequestExecutor {
     type Spec: ProtocolSpec;
+    type PacketSource: PacketCounterSource;
 
     fn execute(
         &self,
         spec: &Self::Spec,
         context: &RequestContext,
     ) -> impl Future<Output = ExecutionResult>;
+
+    /// Return the packet counter source shared with this executor.
+    /// Called once per I/O worker at setup time, not on the hot path.
+    fn packet_counter_source(&self) -> Option<Self::PacketSource> {
+        None
+    }
 }
 
 /// Records per-request metrics. `Rc`-shared across spawned tasks.
@@ -200,4 +227,17 @@ pub trait RateController {
     /// The controller should adopt this as its new baseline.
     /// Default: no-op (controller ignores external overrides).
     fn set_rate(&mut self, _rps: f64) {}
+
+    /// Dynamically adjust the upper RPS bound.
+    /// Used by `SlowStart<C>` to progressively raise the ceiling.
+    /// Default: no-op (controllers without max_rps ignore this).
+    fn set_max_rps(&mut self, _max_rps: f64) {}
+
+    /// Return controller-specific state as key-value pairs for Prometheus.
+    /// The distributed coordinator includes these in progress updates so
+    /// they can be rendered as gauges (e.g., ramp ceiling, slew cap state).
+    /// Default: empty (no custom state to export).
+    fn controller_state(&self) -> Vec<(&'static str, f64)> {
+        Vec::new()
+    }
 }

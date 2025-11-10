@@ -63,6 +63,12 @@ impl SlidingWindow {
     }
 
     /// Smoothed requests-per-second over the window.
+    ///
+    /// Each entry's request count covers the interval *ending* at its
+    /// timestamp.  The measured span runs from `timestamps[0]` to
+    /// `timestamps[N-1]`, so entry[0]'s data falls *before* the span.
+    /// We skip it to avoid a fencepost overcount of one-tick/span
+    /// (≈ control_interval / window_duration).
     fn request_rate(&self) -> f64 {
         if self.timestamps.len() < 2 {
             // With fewer than 2 entries we can't compute a time span;
@@ -76,7 +82,7 @@ impl SlidingWindow {
             .unwrap()
             .saturating_duration_since(*self.timestamps.front().unwrap());
         let secs = span.as_secs_f64().max(0.001);
-        let total: u64 = self.total_requests.iter().sum();
+        let total: u64 = self.total_requests.iter().skip(1).sum();
         total as f64 / secs
     }
 }

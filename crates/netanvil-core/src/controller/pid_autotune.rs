@@ -76,6 +76,14 @@ impl AutotuningPidController {
             phase: Phase::Exploring(manager),
         }
     }
+
+    /// Lower the maximum RPS ceiling (e.g. after hitting an error threshold).
+    pub fn set_max_rps(&mut self, ceiling: f64) {
+        self.max_rps = ceiling.max(self.min_rps);
+        if self.current_rps > self.max_rps {
+            self.current_rps = self.max_rps;
+        }
+    }
 }
 
 impl RateController for AutotuningPidController {

@@ -132,15 +132,27 @@ impl netanvil_types::RateController for RampRateController {
             }
 
             RampState::Ramping => {
-                // Safety valve: if error rate exceeds threshold, force rate reduction
+                // When errors exceed the threshold, ratchet the ceiling down
+                // by 1% and drop the current rate by 20%.  The PID will climb
+                // back up from the lower rate, but can never exceed the
+                // (slightly lower) ceiling.  Each successive error hit shaves
+                // another 1% off the ceiling until the PID settles in a
+                // stable band just below the error cliff.
                 let error_pct = summary.error_rate * 100.0;
                 if error_pct > self.config.max_error_rate && summary.total_requests > 10 {
-                    self.current_rps = (self.current_rps * 0.8).max(self.config.min_rps);
-                    tracing::warn!(
+                    let new_ceiling = (self.current_rps * 0.99).max(self.config.min_rps);
+                    self.current_rps = (self.current_rps * 0.80).max(self.config.min_rps);
+
+                    if let Some(ref mut pid) = self.inner_pid {
+                        pid.set_max_rps(new_ceiling);
+                    }
+
+                    tracing::info!(
                         error_rate_pct = format!("{:.1}", error_pct),
                         max_error_rate = self.config.max_error_rate,
+                        ceiling_rps = format!("{:.0}", new_ceiling),
                         reduced_rps = format!("{:.0}", self.current_rps),
-                        "error rate exceeded threshold, reducing rate"
+                        "error threshold hit, ratcheting ceiling down"
                     );
                     return RateDecision {
                         target_rps: self.current_rps,

@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -237,18 +238,32 @@ pub fn run(
         {
             coordinator.set_signal_source(poller.into_source());
         }
+        let is_tty = std::io::stderr().is_terminal();
+        let mut last_log_elapsed = Duration::ZERO;
         coordinator.on_progress(move |update| {
             if let Some(ref state) = metrics_state {
                 state.update(update);
             }
-            eprint!(
-                "\r  [{:.1}s] {:.0} RPS target | {} requests | {} errors | {} nodes",
-                update.elapsed.as_secs_f64(),
-                update.target_rps,
-                update.total_requests,
-                update.total_errors,
-                update.active_nodes,
-            );
+            if is_tty {
+                eprint!(
+                    "\r  [{:.1}s] {:.0} RPS target | {} requests | {} errors | {} nodes",
+                    update.elapsed.as_secs_f64(),
+                    update.target_rps,
+                    update.total_requests,
+                    update.total_errors,
+                    update.active_nodes,
+                );
+            } else if update.elapsed.saturating_sub(last_log_elapsed) >= Duration::from_secs(1) {
+                last_log_elapsed = update.elapsed;
+                tracing::info!(
+                    elapsed_secs = format!("{:.1}", update.elapsed.as_secs_f64()),
+                    target_rps = format!("{:.0}", update.target_rps),
+                    total_requests = update.total_requests,
+                    total_errors = update.total_errors,
+                    active_nodes = update.active_nodes,
+                    "test progress",
+                );
+            }
         });
         coordinator.run()
     }
@@ -282,7 +297,9 @@ pub fn run(
             metrics_state,
         )
     };
-    eprintln!(); // newline after progress
+    if std::io::stderr().is_terminal() {
+        eprintln!(); // newline after progress
+    }
 
     crate::output::print_distributed_results(&result, output_format);
 

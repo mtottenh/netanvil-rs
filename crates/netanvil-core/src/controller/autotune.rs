@@ -461,6 +461,10 @@ pub struct PidStepInput {
 
 /// Compute a single PID step with gain scheduling.
 ///
+/// Uses conditional integration anti-windup: the integral only accumulates
+/// when the output is not saturated in the error's direction. This prevents
+/// integral windup at the `min_rps`/`max_rps` clamp boundaries.
+///
 /// Returns the new RPS value.
 pub fn pid_step_with_scheduling(input: &PidStepInput, state: &mut PidState) -> f64 {
     let error = input.target_value - input.current_value;
@@ -479,30 +483,51 @@ pub fn pid_step_with_scheduling(input: &PidStepInput, state: &mut PidState) -> f
         state.integral = 0.0;
     }
 
-    state.integral += error;
-    state.integral = state.integral.clamp(-1000.0, 1000.0);
     let derivative = error - state.last_error;
     state.last_error = error;
 
+    // Compute PID output with current integral (before accumulation)
     let output = kp * error + ki * state.integral + kd * derivative;
     let adjustment = (output * 0.05).clamp(-0.20, 0.20);
-    let new_rps = input.current_rps * (1.0 + adjustment);
-    new_rps.clamp(input.min_rps, input.max_rps)
+    let unclamped_rps = input.current_rps * (1.0 + adjustment);
+    let clamped_rps = unclamped_rps.clamp(input.min_rps, input.max_rps);
+
+    // Conditional integration: only accumulate when not saturated in error's direction
+    let saturated_high = unclamped_rps > input.max_rps && error > 0.0;
+    let saturated_low = unclamped_rps < input.min_rps && error < 0.0;
+    if !saturated_high && !saturated_low {
+        state.integral += error;
+        state.integral = state.integral.clamp(-1000.0, 1000.0);
+    }
+
+    clamped_rps
 }
 
 /// Compute a single PID step with fixed gains (no scheduling).
+///
+/// Uses conditional integration anti-windup: the integral only accumulates
+/// when the output is not saturated in the error's direction.
 ///
 /// Returns the new RPS value.
 pub fn pid_step_fixed(input: &PidStepInput, state: &mut PidState) -> f64 {
     let error = input.target_value - input.current_value;
 
-    state.integral += error;
-    state.integral = state.integral.clamp(-1000.0, 1000.0);
     let derivative = error - state.last_error;
     state.last_error = error;
 
+    // Compute PID output with current integral (before accumulation)
     let output = input.kp * error + input.ki * state.integral + input.kd * derivative;
     let adjustment = (output * 0.05).clamp(-0.20, 0.20);
-    let new_rps = input.current_rps * (1.0 + adjustment);
-    new_rps.clamp(input.min_rps, input.max_rps)
+    let unclamped_rps = input.current_rps * (1.0 + adjustment);
+    let clamped_rps = unclamped_rps.clamp(input.min_rps, input.max_rps);
+
+    // Conditional integration: only accumulate when not saturated in error's direction
+    let saturated_high = unclamped_rps > input.max_rps && error > 0.0;
+    let saturated_low = unclamped_rps < input.min_rps && error < 0.0;
+    if !saturated_high && !saturated_low {
+        state.integral += error;
+        state.integral = state.integral.clamp(-1000.0, 1000.0);
+    }
+
+    clamped_rps
 }

@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use netanvil_types::{MetricsSummary, RateController, RateDecision};
 
 /// Rate controller that maintains a constant request rate.
@@ -17,7 +15,6 @@ impl RateController for StaticRateController {
     fn update(&mut self, _summary: &MetricsSummary) -> RateDecision {
         RateDecision {
             target_rps: self.rps,
-            next_update_interval: Duration::from_millis(100),
         }
     }
 

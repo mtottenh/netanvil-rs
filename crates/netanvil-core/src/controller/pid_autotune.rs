@@ -77,19 +77,10 @@ impl AutotuningPidController {
         }
     }
 
-    /// Lower the maximum RPS ceiling (e.g. after hitting an error threshold).
-    pub fn set_max_rps(&mut self, ceiling: f64) {
-        self.max_rps = ceiling.max(self.min_rps);
-        if self.current_rps > self.max_rps {
-            self.current_rps = self.max_rps;
-        }
-    }
 }
 
 impl RateController for AutotuningPidController {
     fn update(&mut self, summary: &MetricsSummary) -> RateDecision {
-        let interval = Duration::from_millis(100);
-
         match &mut self.phase {
             Phase::Exploring(manager) => {
                 if let Some(rate) = manager.tick(summary) {
@@ -131,7 +122,6 @@ impl RateController for AutotuningPidController {
 
                 RateDecision {
                     target_rps: self.current_rps,
-                    next_update_interval: interval,
                 }
             }
 
@@ -139,7 +129,6 @@ impl RateController for AutotuningPidController {
                 if summary.total_requests < 5 {
                     return RateDecision {
                         target_rps: self.current_rps,
-                        next_update_interval: interval,
                     };
                 }
 
@@ -162,7 +151,6 @@ impl RateController for AutotuningPidController {
 
                 RateDecision {
                     target_rps: self.current_rps,
-                    next_update_interval: interval,
                 }
             }
         }
@@ -189,6 +177,13 @@ impl RateController for AutotuningPidController {
             Phase::Active { state, .. } => {
                 state.reset();
             }
+        }
+    }
+
+    fn set_max_rps(&mut self, max_rps: f64) {
+        self.max_rps = max_rps.max(self.min_rps);
+        if self.current_rps > self.max_rps {
+            self.current_rps = self.max_rps;
         }
     }
 }

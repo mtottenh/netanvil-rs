@@ -24,6 +24,7 @@ pub struct RampConfig {
     pub min_rps: f64,
     pub max_rps: f64,
     pub control_interval: Duration,
+    pub test_duration: Duration,
 }
 
 pub struct RampRateController {
@@ -37,6 +38,21 @@ pub struct RampRateController {
     baseline_p99_ms: f64,
     /// Computed target p99 in milliseconds.
     target_p99_ms: f64,
+    /// Error-ratcheted ceiling. Once errors are detected, this persists
+    /// across ticks and cannot be raised by external `set_max_rps` calls.
+    ratcheted_ceiling: Option<f64>,
+    /// Max per-tick rate increase (slew cap). Derived from the ramp slope.
+    max_increase_per_tick: f64,
+    /// When the ramping phase started (for progressive ceiling computation).
+    ramp_start_time: Option<Instant>,
+    /// Last logged ceiling ramp milestone (0, 25, 50, 75, 100).
+    last_ceiling_milestone: u8,
+    /// Last computed time-based ceiling (for Prometheus export).
+    last_time_ceiling: f64,
+    /// Last computed effective ceiling (for Prometheus export).
+    last_effective_ceiling: f64,
+    /// Whether slew cap fired on the last tick (for Prometheus export).
+    last_slew_capped: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -50,6 +66,13 @@ enum RampState {
 impl RampRateController {
     pub fn new(config: RampConfig) -> Self {
         let current_rps = config.warmup_rps;
+        let ramp_duration_secs = (config.test_duration / 2).as_secs_f64();
+        let max_increase_per_tick = if ramp_duration_secs > 0.0 {
+            (config.max_rps - config.warmup_rps) * config.control_interval.as_secs_f64()
+                / ramp_duration_secs
+        } else {
+            f64::INFINITY
+        };
         Self {
             config,
             state: RampState::Warmup,
@@ -59,6 +82,13 @@ impl RampRateController {
             inner_pid: None,
             baseline_p99_ms: 0.0,
             target_p99_ms: 0.0,
+            ratcheted_ceiling: None,
+            max_increase_per_tick,
+            ramp_start_time: None,
+            last_ceiling_milestone: 0,
+            last_time_ceiling: 0.0,
+            last_effective_ceiling: 0.0,
+            last_slew_capped: false,
         }
     }
 
@@ -100,6 +130,7 @@ impl RampRateController {
             },
         ));
 
+        self.ramp_start_time = Some(Instant::now());
         self.state = RampState::Ramping;
     }
 }
@@ -127,24 +158,67 @@ impl netanvil_types::RateController for RampRateController {
                 // Still warming up — hold at warmup RPS
                 RateDecision {
                     target_rps: self.config.warmup_rps,
-                    next_update_interval: Duration::from_millis(100),
                 }
             }
 
             RampState::Ramping => {
-                // When errors exceed the threshold, ratchet the ceiling down
-                // by 1% and drop the current rate by 20%.  The PID will climb
-                // back up from the lower rate, but can never exceed the
-                // (slightly lower) ceiling.  Each successive error hit shaves
-                // another 1% off the ceiling until the PID settles in a
-                // stable band just below the error cliff.
+                // 1. Progressive ceiling: ramp from warmup_rps to max_rps
+                //    over the first half of the test duration.
+                let elapsed = self
+                    .ramp_start_time
+                    .expect("ramp_start_time set in transition_to_ramping")
+                    .elapsed();
+                let ramp_duration = self.config.test_duration / 2;
+                let progress = if ramp_duration.as_secs_f64() > 0.0 {
+                    (elapsed.as_secs_f64() / ramp_duration.as_secs_f64()).min(1.0)
+                } else {
+                    1.0
+                };
+                let time_ceiling = self.config.warmup_rps
+                    + progress * (self.config.max_rps - self.config.warmup_rps);
+
+                // 2. Effective ceiling = min(time ramp, error ratchet).
+                //    Single owner — no external wrapper can overwrite.
+                let effective_ceiling = match self.ratcheted_ceiling {
+                    Some(rc) => time_ceiling.min(rc),
+                    None => time_ceiling,
+                };
+                self.last_time_ceiling = time_ceiling;
+                self.last_effective_ceiling = effective_ceiling;
+
+                if let Some(ref mut pid) = self.inner_pid {
+                    pid.set_max_rps(effective_ceiling);
+                }
+
+                // Log ceiling ramp milestones at 25% intervals.
+                let pct = (progress * 100.0) as u8;
+                let milestone = (pct / 25) * 25;
+                if milestone > self.last_ceiling_milestone {
+                    self.last_ceiling_milestone = milestone;
+                    tracing::info!(
+                        progress_pct = milestone,
+                        time_ceiling = format!("{:.0}", time_ceiling),
+                        effective_ceiling = format!("{:.0}", effective_ceiling),
+                        ratcheted_ceiling = self.ratcheted_ceiling.map(|c| format!("{:.0}", c)),
+                        "ramp ceiling milestone"
+                    );
+                }
+
+                // 3. Error detection: ratchet ceiling and drop rate.
                 let error_pct = summary.error_rate * 100.0;
                 if error_pct > self.config.max_error_rate && summary.total_requests > 10 {
-                    let new_ceiling = (self.current_rps * 0.99).max(self.config.min_rps);
+                    let new_ceiling = match self.ratcheted_ceiling {
+                        // Successive hit: ratchet 5% below previous ceiling
+                        Some(prev) => (prev * 0.95).max(self.config.min_rps),
+                        // First hit: ceiling = rate where errors appeared
+                        None => self.current_rps.max(self.config.min_rps),
+                    };
+                    self.ratcheted_ceiling = Some(new_ceiling);
                     self.current_rps = (self.current_rps * 0.80).max(self.config.min_rps);
 
                     if let Some(ref mut pid) = self.inner_pid {
                         pid.set_max_rps(new_ceiling);
+                        pid.set_rate(self.current_rps);
                     }
 
                     tracing::info!(
@@ -156,14 +230,42 @@ impl netanvil_types::RateController for RampRateController {
                     );
                     return RateDecision {
                         target_rps: self.current_rps,
-                        next_update_interval: Duration::from_millis(100),
                     };
                 }
 
-                // Delegate to the autotuning PID
+                // 4. Delegate to the autotuning PID
                 let decision = self.inner_pid.as_mut().unwrap().update(summary);
-                self.current_rps = decision.target_rps;
-                decision
+
+                // 5. Slew cap: limit per-tick increases, leave decreases uncapped.
+                let max_allowed = self.current_rps + self.max_increase_per_tick;
+                self.last_slew_capped = decision.target_rps > max_allowed;
+                if self.last_slew_capped {
+                    tracing::info!(
+                        pid_wanted = format!("{:.0}", decision.target_rps),
+                        slew_allowed = format!("{:.0}", max_allowed),
+                        "slew rate cap engaged"
+                    );
+                    if let Some(ref mut pid) = self.inner_pid {
+                        pid.set_rate(max_allowed); // back-calculation
+                    }
+                    self.current_rps = max_allowed;
+                } else {
+                    self.current_rps = decision.target_rps;
+                }
+
+                tracing::debug!(
+                    time_ceiling = format!("{:.0}", time_ceiling),
+                    ratcheted_ceiling = self.ratcheted_ceiling.map(|c| format!("{:.0}", c)),
+                    effective_ceiling = format!("{:.0}", effective_ceiling),
+                    pid_target_rps = format!("{:.0}", decision.target_rps),
+                    slew_capped = self.last_slew_capped,
+                    current_rps = format!("{:.0}", self.current_rps),
+                    "ramp controller tick"
+                );
+
+                RateDecision {
+                    target_rps: self.current_rps,
+                }
             }
         }
     }
@@ -177,5 +279,39 @@ impl netanvil_types::RateController for RampRateController {
         if let Some(ref mut pid) = self.inner_pid {
             pid.set_rate(rps);
         }
+    }
+
+    fn set_max_rps(&mut self, max_rps: f64) {
+        self.config.max_rps = max_rps.max(self.config.min_rps);
+        // Respect the error-ratcheted ceiling: external callers cannot
+        // raise the PID's ceiling above the ratcheted value.
+        let effective = match self.ratcheted_ceiling {
+            Some(ceil) => self.config.max_rps.min(ceil),
+            None => self.config.max_rps,
+        };
+        if let Some(ref mut pid) = self.inner_pid {
+            pid.set_max_rps(effective);
+        }
+        if self.current_rps > effective {
+            self.current_rps = effective;
+        }
+    }
+
+    fn controller_state(&self) -> Vec<(&'static str, f64)> {
+        if self.state != RampState::Ramping {
+            return Vec::new();
+        }
+        let mut state = vec![
+            ("netanvil_ramp_time_ceiling", self.last_time_ceiling),
+            ("netanvil_ramp_effective_ceiling", self.last_effective_ceiling),
+            (
+                "netanvil_ramp_slew_capped",
+                if self.last_slew_capped { 1.0 } else { 0.0 },
+            ),
+        ];
+        if let Some(rc) = self.ratcheted_ceiling {
+            state.push(("netanvil_ramp_ratcheted_ceiling", rc));
+        }
+        state
     }
 }

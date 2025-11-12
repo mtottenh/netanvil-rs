@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use netanvil_types::{MetricsSummary, RateController, RateDecision};
 
+
 /// Rate controller that changes rates at predefined time offsets.
 ///
 /// Steps are `(offset_from_start, rps)` pairs. The controller looks up
@@ -59,7 +60,6 @@ impl RateController for StepRateController {
         self.update_from_time();
         RateDecision {
             target_rps: self.current_rps,
-            next_update_interval: Duration::from_millis(100),
         }
     }
 

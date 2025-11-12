@@ -60,7 +60,6 @@ pub struct CompositePidController {
     current_rps: f64,
     min_rps: f64,
     max_rps: f64,
-    control_interval: Duration,
     phase: Phase,
 }
 
@@ -114,7 +113,6 @@ impl CompositePidController {
                 current_rps: initial_rps,
                 min_rps,
                 max_rps,
-                control_interval,
                 phase: Phase::Active {
                     constraints: manual_constraints,
                 },
@@ -143,7 +141,6 @@ impl CompositePidController {
             current_rps: initial_rps * 0.5, // baseline rate during exploration
             min_rps,
             max_rps,
-            control_interval,
             phase: Phase::Exploring {
                 manager,
                 manual_constraints,
@@ -284,7 +281,6 @@ impl RateController for CompositePidController {
 
                     RateDecision {
                         target_rps: self.current_rps,
-                        next_update_interval: self.control_interval,
                     }
                 } else {
                     // Exploration done — build full constraint list
@@ -354,7 +350,6 @@ impl RateController for CompositePidController {
 
                     RateDecision {
                         target_rps: self.current_rps,
-                        next_update_interval: self.control_interval,
                     }
                 }
             }
@@ -370,7 +365,6 @@ impl RateController for CompositePidController {
 
                 RateDecision {
                     target_rps: self.current_rps,
-                    next_update_interval: self.control_interval,
                 }
             }
         }
@@ -402,6 +396,13 @@ impl RateController for CompositePidController {
                     c.pid.reset();
                 }
             }
+        }
+    }
+
+    fn set_max_rps(&mut self, max_rps: f64) {
+        self.max_rps = max_rps.max(self.min_rps);
+        if self.current_rps > self.max_rps {
+            self.current_rps = self.max_rps;
         }
     }
 }

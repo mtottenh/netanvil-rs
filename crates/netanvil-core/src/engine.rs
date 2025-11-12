@@ -1,5 +1,5 @@
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::coordinator::Coordinator;
 use crate::generator::SimpleGenerator;
@@ -472,16 +472,43 @@ where
         0 // share with timer on small machines
     };
 
-    // Nyquist check: metrics_interval should be ≤ control_interval / 2
-    // to guarantee every coordinator tick sees at least one snapshot per worker.
-    if config.metrics_interval > config.control_interval / 2 {
+    // Validate and enforce control_interval floor of 1 second.
+    let control_interval = if config.control_interval < Duration::from_secs(1) {
         tracing::warn!(
-            metrics_interval_ms = config.metrics_interval.as_millis(),
             control_interval_ms = config.control_interval.as_millis(),
-            recommended_ms = (config.control_interval / 2).as_millis(),
-            "metrics_interval > control_interval/2 violates Nyquist — \
-             coordinator ticks may see zero snapshots, causing reported RPS to drop to 0"
+            "control_interval below 1s floor, clamping to 1s"
         );
+        Duration::from_secs(1)
+    } else {
+        config.control_interval
+    };
+
+    // Derive metrics_interval from control_interval (Nyquist satisfied by construction).
+    let metrics_interval = control_interval / 2;
+
+    // Warn if test is too short for PID to reach steady state.
+    // Slow-start ramp consumes test_duration/2, exploration takes ~8 ticks.
+    let ramp_secs = config.duration.as_secs_f64() / 2.0;
+    let exploration_secs = 8.0 * control_interval.as_secs_f64();
+    let steady_state_secs = config.duration.as_secs_f64() - ramp_secs - exploration_secs;
+    if steady_state_secs < config.duration.as_secs_f64() * 0.25 {
+        let uses_pid = matches!(
+            config.rate,
+            netanvil_types::RateConfig::Pid { .. }
+                | netanvil_types::RateConfig::CompositePid { .. }
+                | netanvil_types::RateConfig::Ramp { .. }
+        );
+        if uses_pid {
+            tracing::warn!(
+                duration_secs = config.duration.as_secs(),
+                control_interval_secs = control_interval.as_secs(),
+                ramp_secs = format!("{:.1}", ramp_secs),
+                exploration_secs = format!("{:.1}", exploration_secs),
+                steady_state_secs = format!("{:.1}", steady_state_secs),
+                "test may be too short for PID to reach steady state; \
+                 consider increasing duration or reducing control_interval (minimum 1s)"
+            );
+        }
     }
 
     tracing::info!(
@@ -599,11 +626,15 @@ where
                     let generator = generator_factory(core_id);
                     let transformer = transformer_factory(core_id);
                     let executor = executor_factory();
-                    let collector = HdrMetricsCollector::with_signal_configs(
+                    let packet_source = executor
+                        .packet_counter_source()
+                        .unwrap_or_default();
+                    let collector = HdrMetricsCollector::with_packet_source(
                         config.error_status_threshold,
                         config.tracked_response_headers.clone(),
                         config.md5_check_enabled,
                         config.response_signal_headers.clone(),
+                        packet_source,
                     );
 
                     let event_recorder: Rc<dyn EventRecorder> =
@@ -617,7 +648,7 @@ where
                             fire_rx,
                             metrics_tx,
                             core_id,
-                            metrics_interval: config.metrics_interval,
+                            metrics_interval,
                             graceful_shutdown: config.graceful_shutdown,
                         },
                         generator,
@@ -678,14 +709,14 @@ where
 
     // ── Create coordinator ──
     let rate_controller =
-        crate::build_rate_controller(&config.rate, config.control_interval, start_time);
+        crate::build_rate_controller(&config.rate, control_interval, start_time, config.duration);
 
     let mut coordinator = Coordinator::new(
         rate_controller,
         io_handles,
         timer_handle,
         config.duration,
-        config.control_interval,
+        control_interval,
     );
 
     if let Some(callback) = on_progress {

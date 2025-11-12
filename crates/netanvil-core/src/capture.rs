@@ -27,6 +27,7 @@ impl<E> CapturingExecutor<E> {
 
 impl<E: RequestExecutor> RequestExecutor for CapturingExecutor<E> {
     type Spec = E::Spec;
+    type PacketSource = E::PacketSource;
 
     async fn execute(&self, spec: &Self::Spec, ctx: &RequestContext) -> ExecutionResult {
         let result = self.inner.execute(spec, ctx).await;

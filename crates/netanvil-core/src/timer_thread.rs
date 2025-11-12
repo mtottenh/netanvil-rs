@@ -164,12 +164,15 @@ pub fn timer_loop(
             }
             Err(flume::TrySendError::Full(_)) => {
                 let dropped = stats.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-                tracing::warn!(
-                    worker = worker_id,
-                    total_dropped = dropped,
-                    "backpressure: request dropped at {:?}",
-                    intended_time
-                );
+                // Log first drop, then at power-of-two intervals to avoid
+                // spamming the log under sustained backpressure.
+                if dropped.is_power_of_two() {
+                    tracing::warn!(
+                        worker = worker_id,
+                        total_dropped = dropped,
+                        "backpressure: requests being dropped"
+                    );
+                }
             }
             Err(flume::TrySendError::Disconnected(_)) => {
                 tracing::warn!(

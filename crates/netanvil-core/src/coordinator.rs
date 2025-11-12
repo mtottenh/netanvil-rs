@@ -107,6 +107,10 @@ pub struct ProgressUpdate {
     pub total_bytes_sent: u64,
     /// Total bytes received across all cores (cumulative).
     pub total_bytes_received: u64,
+    /// Protocol-level packet counters (cumulative): (sent, received, lost).
+    pub packets_sent: u64,
+    pub packets_received: u64,
+    pub packets_lost: u64,
 }
 
 /// Standard Prometheus latency bucket boundaries in nanoseconds.
@@ -387,7 +391,7 @@ impl Coordinator {
             }
         }
         if !summary.external_signals.is_empty() {
-            tracing::debug!(signals = ?summary.external_signals, "external signals for rate controller");
+            tracing::info!(signals = ?summary.external_signals, "external signals for rate controller");
         }
 
         let decision = self.rate_controller.update(&summary);
@@ -423,6 +427,7 @@ impl Coordinator {
         if let Some(ref mut callback) = self.on_progress {
             let elapsed = self.start_time.elapsed();
             let buckets = histogram_to_prometheus_buckets(self.total_aggregate.histogram());
+            let pkts = self.total_aggregate.packet_counters();
             let update = ProgressUpdate {
                 elapsed,
                 remaining: self.test_duration.saturating_sub(elapsed),
@@ -435,6 +440,9 @@ impl Coordinator {
                 saturation,
                 total_bytes_sent: self.total_aggregate.bytes_sent(),
                 total_bytes_received: self.total_aggregate.bytes_received(),
+                packets_sent: pkts.0,
+                packets_received: pkts.1,
+                packets_lost: pkts.2,
             };
             callback(&update);
         }
@@ -450,7 +458,13 @@ impl Coordinator {
     fn handle_external_command(&mut self, cmd: WorkerCommand) {
         let timer_cmd = match cmd {
             WorkerCommand::UpdateRate(rps) => {
+                let previous_rps = self.rate_controller.current_rate();
                 self.rate_controller.set_rate(rps);
+                tracing::info!(
+                    previous_rps,
+                    new_rps = rps,
+                    "external rate override applied"
+                );
                 TimerCommand::UpdateRate(rps)
             }
             WorkerCommand::UpdateTargets(targets) => TimerCommand::UpdateTargets(targets),
@@ -542,11 +556,14 @@ impl Coordinator {
         };
 
         if assessment != SaturationAssessment::Healthy {
+            let latency_p99_ms = summary.latency_p99_ns as f64 / 1_000_000.0;
             tracing::warn!(
                 ?assessment,
                 backpressure_ratio,
                 scheduling_delay_mean_ms,
                 rate_achievement,
+                error_rate = summary.error_rate,
+                latency_p99_ms,
                 "saturation detected"
             );
         }

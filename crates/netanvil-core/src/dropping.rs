@@ -56,6 +56,7 @@ impl<E> DroppingExecutor<E> {
 
 impl<E: RequestExecutor> RequestExecutor for DroppingExecutor<E> {
     type Spec = E::Spec;
+    type PacketSource = E::PacketSource;
 
     async fn execute(&self, spec: &Self::Spec, context: &RequestContext) -> ExecutionResult {
         if self.should_drop() {

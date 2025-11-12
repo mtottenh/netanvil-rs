@@ -137,6 +137,66 @@ pub fn shield_hot_cores(
     ShieldResult::default()
 }
 
+/// Reset the calling process's CPU affinity to all online CPUs.
+///
+/// A previous `shield_hot_cores` run may have migrated PID 1 (systemd) to a
+/// single housekeeping core. Child processes inherit that restricted mask,
+/// causing `available_parallelism()` to return 1 on multi-core machines.
+///
+/// Call this **before** `available_parallelism()` to ensure the process sees
+/// all cores. Returns the number of online CPUs, or 0 on failure.
+#[cfg(target_os = "linux")]
+pub fn reset_affinity() -> usize {
+    use std::fs;
+
+    // Read the set of online CPUs from sysfs (e.g. "0-3" or "0-3,5,7-9").
+    let online = match fs::read_to_string("/sys/devices/system/cpu/online") {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("cannot read /sys/devices/system/cpu/online: {e}");
+            return 0;
+        }
+    };
+
+    let mut cpuset: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    unsafe { libc::CPU_ZERO(&mut cpuset) };
+    let mut count = 0usize;
+
+    for part in online.trim().split(',') {
+        if let Some((lo, hi)) = part.split_once('-') {
+            let lo: usize = lo.parse().unwrap_or(0);
+            let hi: usize = hi.parse().unwrap_or(0);
+            for cpu in lo..=hi {
+                unsafe { libc::CPU_SET(cpu, &mut cpuset) };
+                count += 1;
+            }
+        } else if let Ok(cpu) = part.parse::<usize>() {
+            unsafe { libc::CPU_SET(cpu, &mut cpuset) };
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        return 0;
+    }
+
+    let ret = unsafe {
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpuset)
+    };
+    if ret != 0 {
+        tracing::warn!("sched_setaffinity reset failed: {}", std::io::Error::last_os_error());
+        return 0;
+    }
+
+    tracing::info!(online_cpus = count, "reset process CPU affinity to all online CPUs");
+    count
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn reset_affinity() -> usize {
+    0
+}
+
 /// Counts from a [`shield_hot_cores`] sweep.
 #[derive(Debug, Default)]
 pub struct ShieldResult {

@@ -128,6 +128,7 @@ impl RedisExecutor {
 
 impl RequestExecutor for RedisExecutor {
     type Spec = RedisRequestSpec;
+    type PacketSource = netanvil_types::NoopPacketSource;
 
     async fn execute(&self, spec: &RedisRequestSpec, ctx: &RequestContext) -> ExecutionResult {
         let start = Instant::now();

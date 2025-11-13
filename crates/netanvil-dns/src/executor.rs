@@ -41,6 +41,7 @@ impl Default for DnsExecutor {
 
 impl RequestExecutor for DnsExecutor {
     type Spec = DnsRequestSpec;
+    type PacketSource = netanvil_types::NoopPacketSource;
 
     async fn execute(&self, spec: &DnsRequestSpec, ctx: &RequestContext) -> ExecutionResult {
         let start = Instant::now();

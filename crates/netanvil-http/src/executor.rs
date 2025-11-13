@@ -229,6 +229,7 @@ impl HttpExecutor {
 
 impl RequestExecutor for HttpExecutor {
     type Spec = HttpRequestSpec;
+    type PacketSource = netanvil_types::NoopPacketSource;
 
     async fn execute(&self, spec: &HttpRequestSpec, context: &RequestContext) -> ExecutionResult {
         let start = Instant::now();

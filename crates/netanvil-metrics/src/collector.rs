@@ -5,13 +5,19 @@ use std::time::Instant;
 use hdrhistogram::Histogram;
 use netanvil_types::config::ResponseSignalConfig;
 use netanvil_types::metrics::ResponseSignalAccumulator;
-use netanvil_types::{ExecutionResult, MetricsCollector, MetricsSnapshot};
+use netanvil_types::{
+    ExecutionResult, MetricsCollector, MetricsSnapshot, NoopPacketSource, PacketCounterSource,
+};
 
 /// HDR histogram-based metrics collector for a single core.
 ///
 /// Uses `RefCell`/`Cell` for interior mutability — this is `!Send` by design.
 /// Each core gets its own collector, shared via `Rc` with spawned tasks.
-pub struct HdrMetricsCollector {
+///
+/// Generic over `P: PacketCounterSource` so protocol-specific executors can
+/// inject packet-level counters (UDP loss bitmap, TCP_INFO, etc.) that get
+/// populated inside `snapshot()`.  Defaults to [`NoopPacketSource`] (zero cost).
+pub struct HdrMetricsCollector<P: PacketCounterSource = NoopPacketSource> {
     histogram: RefCell<Histogram<u64>>,
     size_histogram: RefCell<Histogram<u64>>,
     total_requests: Cell<u64>,
@@ -39,20 +45,12 @@ pub struct HdrMetricsCollector {
     response_signal_configs: Vec<ResponseSignalConfig>,
     /// Per-signal accumulators for the current window.
     response_signal_accumulators: RefCell<HashMap<String, ResponseSignalAccumulator>>,
+    /// Protocol-level packet counter source (UDP loss, TCP_INFO, etc.).
+    packet_source: P,
 }
 
 impl HdrMetricsCollector {
-    /// Create a new collector.
-    ///
-    /// `error_status_threshold`: HTTP status codes >= this value are counted
-    /// as errors. Use 400 for all client/server errors, 500 for server-only,
-    /// or 0 to only count transport errors.
-    ///
-    /// `tracked_headers`: response header names whose value distributions
-    /// should be counted (e.g., `["X-Cache"]` for cache-hit tracking).
-    ///
-    /// `md5_check_enabled`: when true, compute MD5 of response body and
-    /// compare with `Content-MD5` header value.
+    /// Create a new collector with no packet counter source.
     pub fn new(
         error_status_threshold: u16,
         tracked_headers: Vec<String>,
@@ -66,12 +64,31 @@ impl HdrMetricsCollector {
         )
     }
 
-    /// Create a collector with response signal extraction.
+    /// Create a collector with response signal extraction (no packet source).
     pub fn with_signal_configs(
         error_status_threshold: u16,
         tracked_headers: Vec<String>,
         md5_check_enabled: bool,
         response_signal_configs: Vec<ResponseSignalConfig>,
+    ) -> Self {
+        Self::with_packet_source(
+            error_status_threshold,
+            tracked_headers,
+            md5_check_enabled,
+            response_signal_configs,
+            NoopPacketSource,
+        )
+    }
+}
+
+impl<P: PacketCounterSource> HdrMetricsCollector<P> {
+    /// Create a collector with a protocol-specific packet counter source.
+    pub fn with_packet_source(
+        error_status_threshold: u16,
+        tracked_headers: Vec<String>,
+        md5_check_enabled: bool,
+        response_signal_configs: Vec<ResponseSignalConfig>,
+        packet_source: P,
     ) -> Self {
         Self {
             histogram: RefCell::new(
@@ -79,7 +96,6 @@ impl HdrMetricsCollector {
                     .expect("valid histogram params"),
             ),
             size_histogram: RefCell::new(
-                // Response sizes: 1 byte to 1 GiB, 3 significant digits
                 Histogram::<u64>::new_with_bounds(1, 1_073_741_824, 3)
                     .expect("valid histogram params"),
             ),
@@ -98,11 +114,12 @@ impl HdrMetricsCollector {
             md5_mismatches: Cell::new(0),
             response_signal_configs,
             response_signal_accumulators: RefCell::new(HashMap::new()),
+            packet_source,
         }
     }
 }
 
-impl MetricsCollector for HdrMetricsCollector {
+impl<P: PacketCounterSource> MetricsCollector for HdrMetricsCollector<P> {
     fn record(&self, result: &ExecutionResult) {
         self.total_requests.set(self.total_requests.get() + 1);
 
@@ -229,6 +246,7 @@ impl MetricsCollector for HdrMetricsCollector {
 
     fn snapshot(&self) -> MetricsSnapshot {
         let now = Instant::now();
+        let pkt_deltas = self.packet_source.take_packet_deltas();
 
         // Clone histograms (memcpy of counts Vec), then reset originals
         // in-place so the allocation is reused for the next window.
@@ -263,6 +281,9 @@ impl MetricsCollector for HdrMetricsCollector {
                 acc.clear();
                 cloned
             },
+            packets_sent: pkt_deltas.sent,
+            packets_received: pkt_deltas.received,
+            packets_lost: pkt_deltas.lost,
         };
 
         // Reset for next window (keeps existing allocations)

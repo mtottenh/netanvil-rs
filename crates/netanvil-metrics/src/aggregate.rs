@@ -33,6 +33,10 @@ pub struct AggregateMetrics {
     response_signals: HashMap<String, ResponseSignalAccumulator>,
     // Signal aggregation configs (set once, used in to_summary)
     signal_configs: Vec<netanvil_types::config::ResponseSignalConfig>,
+    // Protocol-level packet tracking (composable: sum)
+    packets_sent: u64,
+    packets_received: u64,
+    packets_lost: u64,
 }
 
 impl AggregateMetrics {
@@ -56,6 +60,9 @@ impl AggregateMetrics {
             md5_mismatches: 0,
             response_signals: HashMap::new(),
             signal_configs: Vec::new(),
+            packets_sent: 0,
+            packets_received: 0,
+            packets_lost: 0,
         }
     }
 
@@ -123,6 +130,11 @@ impl AggregateMetrics {
             }
             entry.last = acc.last;
         }
+
+        // Merge protocol-level packet counters
+        self.packets_sent += snapshot.packets_sent;
+        self.packets_received += snapshot.packets_received;
+        self.packets_lost += snapshot.packets_lost;
     }
 
     /// Reset for the next aggregation window.
@@ -142,6 +154,14 @@ impl AggregateMetrics {
         self.header_value_counts.clear();
         self.md5_mismatches = 0;
         self.response_signals.clear();
+        self.packets_sent = 0;
+        self.packets_received = 0;
+        self.packets_lost = 0;
+    }
+
+    /// Protocol-level packet counters: (sent, received, lost).
+    pub fn packet_counters(&self) -> (u64, u64, u64) {
+        (self.packets_sent, self.packets_received, self.packets_lost)
     }
 
     /// Compute derived metrics for the RateController.
@@ -275,6 +295,9 @@ mod tests {
                 .unwrap(),
             md5_mismatches: 0,
             response_signals: std::collections::HashMap::new(),
+            packets_sent: 0,
+            packets_received: 0,
+            packets_lost: 0,
         }
     }
 

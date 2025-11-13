@@ -22,10 +22,12 @@
 
 pub mod executor;
 pub mod generator;
+pub mod loss_tracker;
 pub mod spec;
 pub mod transformer;
 
 pub use executor::UdpExecutor;
 pub use generator::SimpleUdpGenerator;
+pub use loss_tracker::{LossTracker, UdpPacketSource};
 pub use spec::UdpRequestSpec;
 pub use transformer::UdpNoopTransformer;

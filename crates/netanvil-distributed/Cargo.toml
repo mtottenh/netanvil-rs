@@ -8,6 +8,7 @@ description = "Distributed coordination for netanvil-rs load testing"
 
 [dependencies]
 netanvil-types = { workspace = true }
+netanvil-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
@@ -25,3 +26,4 @@ netanvil-test-servers = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tracing-subscriber = { workspace = true }
+tempfile = "3"

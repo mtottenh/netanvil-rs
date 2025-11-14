@@ -95,6 +95,28 @@ impl LeaderServer {
     }
 }
 
+/// Handle a Prometheus scrape request using the shared metrics state.
+/// Public so `leader_api` can reuse it without duplicating Prometheus rendering.
+pub fn handle_prometheus_from_state(
+    request: tiny_http::Request,
+    state: &LeaderMetricsState,
+) {
+    let body = match state.snapshot() {
+        Some(p) => format_prometheus(&p),
+        None => "# No metrics available yet\n".to_string(),
+    };
+    let response = tiny_http::Response::from_string(body)
+        .with_status_code(200)
+        .with_header(
+            tiny_http::Header::from_bytes(
+                &b"Content-Type"[..],
+                &b"text/plain; version=0.0.4; charset=utf-8"[..],
+            )
+            .unwrap(),
+        );
+    let _ = request.respond(response);
+}
+
 /// Format aggregated distributed metrics as Prometheus text exposition.
 fn format_prometheus(p: &DistributedProgressUpdate) -> String {
     let mut out = String::with_capacity(2048);
@@ -207,6 +229,12 @@ fn format_prometheus(p: &DistributedProgressUpdate) -> String {
         ));
     }
 
+    // -- Controller-specific gauges (e.g., ramp ceiling state) --
+    for (name, value) in &p.controller_state {
+        out.push_str(&format!("# TYPE {name} gauge\n"));
+        out.push_str(&format!("{name} {value}\n"));
+    }
+
     out
 }
 
@@ -254,6 +282,7 @@ mod tests {
                     },
                 ),
             ],
+            controller_state: vec![],
         }
     }
 

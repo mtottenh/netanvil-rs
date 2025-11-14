@@ -22,6 +22,8 @@ pub struct DistributedProgressUpdate {
     pub total_errors: u64,
     pub active_nodes: usize,
     pub per_node: Vec<(NodeId, RemoteMetrics)>,
+    /// Controller-specific state for Prometheus gauges (e.g., ramp ceiling).
+    pub controller_state: Vec<(&'static str, f64)>,
 }
 
 /// Orchestrates a distributed load test across multiple agent nodes.
@@ -44,6 +46,11 @@ where
     node_weights: HashMap<NodeId, f64>,
     signal_source: Option<Box<dyn FnMut() -> Vec<(String, f64)> + Send>>,
     on_progress: Option<Box<dyn FnMut(&DistributedProgressUpdate)>>,
+    cancel_rx: Option<flume::Receiver<()>>,
+    /// External rate override channel (from leader API PUT /tests/{id}/rate).
+    rate_override_rx: Option<flume::Receiver<f64>>,
+    /// External signal push channel (from leader API PUT /tests/{id}/signal).
+    signal_push_rx: Option<flume::Receiver<(String, f64)>>,
 }
 
 impl<D, M, C> DistributedCoordinator<D, M, C>
@@ -69,6 +76,9 @@ where
             node_weights: HashMap::new(),
             signal_source: None,
             on_progress: None,
+            cancel_rx: None,
+            rate_override_rx: None,
+            signal_push_rx: None,
         }
     }
 
@@ -78,6 +88,24 @@ where
 
     pub fn on_progress(&mut self, f: impl FnMut(&DistributedProgressUpdate) + 'static) {
         self.on_progress = Some(Box::new(f));
+    }
+
+    /// Set an optional cancel channel. When a message is received, the
+    /// coordinator stops all agents and returns partial results.
+    pub fn set_cancel_rx(&mut self, rx: flume::Receiver<()>) {
+        self.cancel_rx = Some(rx);
+    }
+
+    /// Set a channel for external rate overrides (from the leader API).
+    /// The coordinator drains this each tick and applies the latest value.
+    pub fn set_rate_override_rx(&mut self, rx: flume::Receiver<f64>) {
+        self.rate_override_rx = Some(rx);
+    }
+
+    /// Set a channel for externally pushed signals (from the leader API).
+    /// Signals are merged into the MetricsSummary each tick.
+    pub fn set_signal_push_rx(&mut self, rx: flume::Receiver<(String, f64)>) {
+        self.signal_push_rx = Some(rx);
     }
 
     /// Run the distributed test. Blocks until completion.
@@ -147,6 +175,14 @@ where
                 break;
             }
 
+            // Check for external cancellation.
+            if let Some(ref rx) = self.cancel_rx {
+                if rx.try_recv().is_ok() {
+                    tracing::info!("test cancelled via cancel channel");
+                    break;
+                }
+            }
+
             // Progress callback
             if let Some(ref mut callback) = self.on_progress {
                 let per_node: Vec<_> = self
@@ -162,6 +198,7 @@ where
                     total_errors: self.node_metrics.values().map(|m| m.total_errors).sum(),
                     active_nodes: nodes.len(),
                     per_node,
+                    controller_state: self.rate_controller.controller_state(),
                 };
                 callback(&update);
             }
@@ -216,13 +253,57 @@ where
         // Aggregate into MetricsSummary for the rate controller
         let mut summary = self.aggregate_metrics();
 
-        // Inject external signals
+        // Inject external signals from polling source.
         if let Some(ref mut source) = self.signal_source {
             summary.external_signals = source();
+            if !summary.external_signals.is_empty() {
+                tracing::info!(signals = ?summary.external_signals, "external signals for rate controller");
+            }
+        }
+
+        // Inject externally pushed signals (from leader API PUT /signal).
+        if let Some(ref rx) = self.signal_push_rx {
+            while let Ok((name, value)) = rx.try_recv() {
+                // Overwrite or append.
+                if let Some(existing) = summary.external_signals.iter_mut().find(|(k, _)| *k == name) {
+                    existing.1 = value;
+                } else {
+                    summary.external_signals.push((name, value));
+                }
+            }
         }
 
         // Rate controller decision
-        let decision = self.rate_controller.update(&summary);
+        let previous_rps = self.rate_controller.current_rate();
+        let mut decision = self.rate_controller.update(&summary);
+
+        // Apply external rate override (from leader API PUT /rate).
+        if let Some(ref rx) = self.rate_override_rx {
+            let mut latest = None;
+            while let Ok(rps) = rx.try_recv() {
+                latest = Some(rps);
+            }
+            if let Some(rps) = latest {
+                tracing::info!(
+                    override_rps = rps,
+                    controller_rps = decision.target_rps,
+                    "applying external rate override"
+                );
+                self.rate_controller.set_rate(rps);
+                decision = RateDecision { target_rps: rps };
+            }
+        }
+
+        if (decision.target_rps - previous_rps).abs() > 0.01 {
+            tracing::info!(
+                previous_rps,
+                new_rps = decision.target_rps,
+                active_nodes = nodes.len(),
+                error_rate = format!("{:.4}", summary.error_rate),
+                latency_p99_ms = format!("{:.1}", summary.latency_p99_ns as f64 / 1_000_000.0),
+                "leader rate adjustment"
+            );
+        }
 
         tracing::debug!(
             total_requests = summary.total_requests,

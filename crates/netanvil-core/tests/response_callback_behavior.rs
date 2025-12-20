@@ -31,6 +31,7 @@ impl MockExecutor {
 
 impl RequestExecutor for MockExecutor {
     type Spec = HttpRequestSpec;
+    type PacketSource = netanvil_types::NoopPacketSource;
 
     async fn execute(&self, _spec: &HttpRequestSpec, context: &RequestContext) -> ExecutionResult {
         ExecutionResult {

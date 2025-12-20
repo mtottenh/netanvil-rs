@@ -71,8 +71,7 @@ fn always_new_policy_creates_many_connections() {
             connection_policy: ConnectionPolicy::AlwaysNew,
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 
@@ -108,8 +107,7 @@ fn keepalive_policy_reuses_connections() {
             connection_policy: ConnectionPolicy::KeepAlive,
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 
@@ -147,8 +145,7 @@ fn mixed_policy_produces_both_new_and_reused_connections() {
             },
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 

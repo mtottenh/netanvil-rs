@@ -120,8 +120,7 @@ fn pid_controller_adapts_rate_based_on_external_server_load() {
             request_timeout: Duration::from_secs(5),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(200),
+        control_interval: Duration::from_secs(1),
         external_metrics_url: Some(format!("http://{}/stats", server_addr)),
         external_metrics_field: Some("load".into()),
         ..Default::default()
@@ -183,8 +182,7 @@ fn pid_without_external_signal_generates_requests() {
             request_timeout: Duration::from_secs(5),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(200),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 
@@ -214,8 +212,7 @@ fn high_rps_does_not_stall_worker() {
             request_timeout: Duration::from_secs(5),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 
@@ -254,8 +251,7 @@ fn external_signal_not_configured_does_not_affect_static_rate() {
             request_timeout: Duration::from_secs(5),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         // No external signal configured
         ..Default::default()
     };

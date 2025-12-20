@@ -37,6 +37,7 @@ impl MockExecutor {
 
 impl RequestExecutor for MockExecutor {
     type Spec = HttpRequestSpec;
+    type PacketSource = netanvil_types::NoopPacketSource;
 
     async fn execute(&self, _spec: &HttpRequestSpec, context: &RequestContext) -> ExecutionResult {
         self.call_count.set(self.call_count.get() + 1);
@@ -366,6 +367,7 @@ fn timer_plus_workers_coordinated_omission_tracking() {
 
     impl RequestExecutor for ContextCapture {
         type Spec = HttpRequestSpec;
+        type PacketSource = netanvil_types::NoopPacketSource;
 
         async fn execute(
             &self,

@@ -155,8 +155,7 @@ fn make_config(server: &TestServer, rps: f64, duration: Duration, cores: usize) 
             request_timeout: Duration::from_secs(10),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     }
 }
@@ -244,8 +243,7 @@ fn step_rate_changes_throughput() {
             request_timeout: Duration::from_secs(10),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 
@@ -279,8 +277,7 @@ fn error_endpoint_tracks_errors() {
             request_timeout: Duration::from_secs(10),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 
@@ -317,8 +314,7 @@ fn latency_reflects_server_delay() {
             request_timeout: Duration::from_secs(10),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 
@@ -353,8 +349,7 @@ fn coordinated_omission_detected_with_intermittent_delays() {
             request_timeout: Duration::from_secs(10),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 
@@ -396,8 +391,7 @@ fn poisson_scheduler_generates_load_at_target_rate() {
             request_timeout: Duration::from_secs(10),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 
@@ -424,7 +418,7 @@ fn custom_headers_reach_the_server() {
 
     let config = TestConfig {
         targets: vec![format!("http://{}/echo-meta", server.addr)],
-        duration: Duration::from_secs(1),
+        duration: Duration::from_secs(3),
         rate: RateConfig::Static { rps: 50.0 },
         headers: vec![
             ("X-Test-Id".into(), "netanvil-123".into()),
@@ -435,8 +429,7 @@ fn custom_headers_reach_the_server() {
             request_timeout: Duration::from_secs(10),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 
@@ -477,15 +470,14 @@ fn http_method_is_configurable() {
     let config = TestConfig {
         targets: vec![format!("http://{}/echo-meta", server.addr)],
         method: "POST".into(),
-        duration: Duration::from_secs(1),
+        duration: Duration::from_secs(3),
         rate: RateConfig::Static { rps: 50.0 },
         num_cores: 1,
         connections: ConnectionConfig {
             request_timeout: Duration::from_secs(10),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 
@@ -511,7 +503,7 @@ fn error_threshold_zero_ignores_http_errors() {
 
     let config = TestConfig {
         targets: vec![format!("http://{}/error", server.addr)],
-        duration: Duration::from_secs(1),
+        duration: Duration::from_secs(3),
         rate: RateConfig::Static { rps: 100.0 },
         num_cores: 1,
         error_status_threshold: 0, // only transport errors count
@@ -519,8 +511,7 @@ fn error_threshold_zero_ignores_http_errors() {
             request_timeout: Duration::from_secs(10),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 
@@ -544,7 +535,7 @@ fn error_threshold_500_only_counts_server_errors() {
     // Hit the 404 endpoint — with threshold=500, this should NOT be an error
     let config = TestConfig {
         targets: vec![format!("http://{}/not-found", server.addr)],
-        duration: Duration::from_secs(1),
+        duration: Duration::from_secs(3),
         rate: RateConfig::Static { rps: 100.0 },
         num_cores: 1,
         error_status_threshold: 500, // only 5xx count
@@ -552,8 +543,7 @@ fn error_threshold_500_only_counts_server_errors() {
             request_timeout: Duration::from_secs(10),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 
@@ -578,7 +568,7 @@ fn error_threshold_default_counts_4xx_and_5xx() {
     // Hit the 404 endpoint — with default threshold=400, this IS an error
     let config = TestConfig {
         targets: vec![format!("http://{}/not-found", server.addr)],
-        duration: Duration::from_secs(1),
+        duration: Duration::from_secs(3),
         rate: RateConfig::Static { rps: 100.0 },
         num_cores: 1,
         // error_status_threshold defaults to 400
@@ -586,8 +576,7 @@ fn error_threshold_default_counts_4xx_and_5xx() {
             request_timeout: Duration::from_secs(10),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 

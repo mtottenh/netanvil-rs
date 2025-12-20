@@ -71,8 +71,7 @@ fn make_test_config(target_addr: SocketAddr, rps: f64, duration_secs: u64) -> Te
             request_timeout: Duration::from_secs(10),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(200),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     }
 }
@@ -92,8 +91,9 @@ fn distributed_test_with_two_agents() {
     // Give agents time to start
     std::thread::sleep(Duration::from_millis(500));
 
-    // Build config
-    let config = make_test_config(target_addr, 200.0, 3);
+    // Build config — duration must be long enough for agents to start generating
+    // requests and for the distributed coordinator to fetch metrics (control_interval=1s).
+    let config = make_test_config(target_addr, 200.0, 8);
 
     // Build distributed coordinator
     let discovery = StaticDiscovery::new(vec![
@@ -124,7 +124,7 @@ fn distributed_test_with_two_agents() {
     }
 
     // Should have generated a reasonable number of requests
-    // 200 RPS for 3 seconds = ~600 expected
+    // 200 RPS for 8 seconds = ~1600 expected
     assert!(
         total > 300,
         "expected >300 requests across 2 agents, got {total}"
@@ -161,8 +161,8 @@ fn distributed_stop_terminates_all_agents() {
     let _agent = start_agent(port);
     std::thread::sleep(Duration::from_millis(500));
 
-    // 60 second test, but we'll verify the coordinator stops it after 3s
-    let config = make_test_config(target_addr, 100.0, 3);
+    // Short test — verify the coordinator stops within the duration
+    let config = make_test_config(target_addr, 100.0, 8);
 
     let discovery = StaticDiscovery::new(vec![format!("127.0.0.1:{port}")]);
     let fetcher = HttpMetricsFetcher::new(Duration::from_secs(5));
@@ -205,15 +205,14 @@ fn distributed_dns_test_with_two_agents() {
     // Build DNS test config
     let config = TestConfig {
         targets: vec![format!("dns://{}", dns_server.addr)],
-        duration: Duration::from_secs(3),
+        duration: Duration::from_secs(8),
         rate: RateConfig::Static { rps: 200.0 },
         num_cores: 1,
         connections: ConnectionConfig {
             request_timeout: Duration::from_secs(5),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(200),
+        control_interval: Duration::from_secs(1),
         error_status_threshold: 0,
         protocol: Some(ProtocolConfig::Dns {
             domains: "example.com,test.com,foo.bar".to_string(),

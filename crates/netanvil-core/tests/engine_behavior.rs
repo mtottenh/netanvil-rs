@@ -28,6 +28,7 @@ impl MockExecutor {
 
 impl RequestExecutor for MockExecutor {
     type Spec = HttpRequestSpec;
+    type PacketSource = netanvil_types::NoopPacketSource;
 
     async fn execute(&self, _spec: &HttpRequestSpec, context: &RequestContext) -> ExecutionResult {
         if self.latency > Duration::from_millis(1) {
@@ -59,6 +60,7 @@ struct ErrorExecutor;
 
 impl RequestExecutor for ErrorExecutor {
     type Spec = HttpRequestSpec;
+    type PacketSource = netanvil_types::NoopPacketSource;
 
     async fn execute(&self, _spec: &HttpRequestSpec, context: &RequestContext) -> ExecutionResult {
         ExecutionResult {
@@ -92,8 +94,7 @@ fn engine_runs_constant_rate_test_with_correct_request_count() {
         duration: Duration::from_secs(2),
         rate: RateConfig::Static { rps: 200.0 },
         num_cores: 2,
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         connections: ConnectionConfig::default(),
         ..Default::default()
     };
@@ -124,8 +125,7 @@ fn engine_records_latency_percentiles() {
         duration: Duration::from_secs(2),
         rate: RateConfig::Static { rps: 100.0 },
         num_cores: 1,
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         connections: ConnectionConfig::default(),
         ..Default::default()
     };
@@ -149,11 +149,10 @@ fn engine_records_latency_percentiles() {
 fn engine_tracks_errors() {
     let config = TestConfig {
         targets: vec!["http://mock.test/".into()],
-        duration: Duration::from_secs(1),
+        duration: Duration::from_secs(3),
         rate: RateConfig::Static { rps: 100.0 },
         num_cores: 1,
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         connections: ConnectionConfig::default(),
         ..Default::default()
     };
@@ -178,8 +177,7 @@ fn engine_scales_across_cores() {
             duration: Duration::from_secs(2),
             rate: RateConfig::Static { rps: 200.0 },
             num_cores,
-            metrics_interval: Duration::from_millis(200),
-            control_interval: Duration::from_millis(100),
+                control_interval: Duration::from_secs(1),
             connections: ConnectionConfig::default(),
             ..Default::default()
         };
@@ -210,8 +208,7 @@ fn engine_step_rate_changes_throughput() {
             ],
         },
         num_cores: 2,
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         connections: ConnectionConfig::default(),
         ..Default::default()
     };

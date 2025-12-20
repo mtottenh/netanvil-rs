@@ -83,8 +83,7 @@ fn run_at_rate(
             request_timeout: Duration::from_secs(10),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 
@@ -125,7 +124,7 @@ fn scale_characterization() {
     eprintln!("  {}", "-".repeat(70));
 
     for &target in &rates {
-        let r = run_at_rate(addr, target, 3, 1);
+        let r = run_at_rate(addr, target, 5, 1);
         eprintln!(
             "  {:<12.0} {:>12.1} {:>8.2} {:>10} {:>8} {:>8.1}",
             r.target_rps, r.achieved_rps, r.ratio, r.total_requests, r.total_errors, r.p99_ms

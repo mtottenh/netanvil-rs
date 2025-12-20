@@ -213,6 +213,9 @@ fn aggregate_merges_scheduling_delay_fields() {
         response_size_histogram: empty_size_hist(),
         md5_mismatches: 0,
         response_signals: std::collections::HashMap::new(),
+        packets_sent: 0,
+        packets_received: 0,
+        packets_lost: 0,
     };
 
     let snap_b = MetricsSnapshot {
@@ -230,6 +233,9 @@ fn aggregate_merges_scheduling_delay_fields() {
         response_size_histogram: empty_size_hist(),
         md5_mismatches: 0,
         response_signals: std::collections::HashMap::new(),
+        packets_sent: 0,
+        packets_received: 0,
+        packets_lost: 0,
     };
 
     let mut agg = AggregateMetrics::new();

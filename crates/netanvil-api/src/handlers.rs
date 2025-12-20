@@ -58,6 +58,28 @@ pub fn handle_post_stop(request: tiny_http::Request, command_tx: &flume::Sender<
     respond_json(request, 200, &ApiResponse::success());
 }
 
+pub fn handle_get_result(request: tiny_http::Request, result: &Option<netanvil_core::TestResult>) {
+    match result {
+        Some(r) => respond_json(request, 200, r),
+        None => respond_json(request, 404, &ApiResponse::error("no test result available")),
+    }
+}
+
+/// Build a result view for the mTLS handler (no tiny_http dependency).
+pub fn build_result_view(result: &Option<netanvil_core::TestResult>) -> (u16, serde_json::Value) {
+    match result {
+        Some(r) => (
+            200,
+            serde_json::to_value(r).unwrap_or(serde_json::json!({})),
+        ),
+        None => (
+            404,
+            serde_json::to_value(ApiResponse::error("no test result available"))
+                .unwrap_or(serde_json::json!({})),
+        ),
+    }
+}
+
 pub fn handle_put_signal(request: tiny_http::Request, state: &SharedState) {
     read_json_then_respond::<PushSignalRequest>(request, |body, req| {
         tracing::debug!(name = %body.name, value = body.value, "received pushed signal");
@@ -214,6 +236,36 @@ pub fn build_prometheus_body(state: &SharedState) -> String {
                 "netanvil_client_saturated{label} {}\n",
                 if saturated { 1 } else { 0 }
             ));
+
+            // Protocol-level packet loss tracking
+            if m.packets_sent > 0 {
+                out.push_str(
+                    "# HELP netanvil_packets_sent_total Protocol messages sent.\n",
+                );
+                out.push_str("# TYPE netanvil_packets_sent_total counter\n");
+                out.push_str(&format!(
+                    "netanvil_packets_sent_total{label} {}\n",
+                    m.packets_sent
+                ));
+
+                out.push_str(
+                    "# HELP netanvil_packets_received_total Protocol responses received.\n",
+                );
+                out.push_str("# TYPE netanvil_packets_received_total counter\n");
+                out.push_str(&format!(
+                    "netanvil_packets_received_total{label} {}\n",
+                    m.packets_received
+                ));
+
+                out.push_str(
+                    "# HELP netanvil_packets_lost_total Protocol messages declared lost.\n",
+                );
+                out.push_str("# TYPE netanvil_packets_lost_total counter\n");
+                out.push_str(&format!(
+                    "netanvil_packets_lost_total{label} {}\n",
+                    m.packets_lost
+                ));
+            }
 
             out
         }

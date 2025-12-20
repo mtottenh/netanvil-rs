@@ -77,6 +77,9 @@ impl SharedState {
             throughput_recv_mbps: update.total_bytes_received as f64 * 8.0 / secs / 1_000_000.0,
             latency_buckets: update.latency_buckets.clone(),
             saturation: update.saturation.clone(),
+            packets_sent: update.packets_sent,
+            packets_received: update.packets_received,
+            packets_lost: update.packets_lost,
         });
     }
 
@@ -173,6 +176,15 @@ pub struct MetricsView {
     /// Client/server saturation assessment.
     #[serde(default)]
     pub saturation: netanvil_types::SaturationInfo,
+    /// Protocol-level packets sent (cumulative).
+    #[serde(default)]
+    pub packets_sent: u64,
+    /// Protocol-level packets received (cumulative).
+    #[serde(default)]
+    pub packets_received: u64,
+    /// Protocol-level packets declared lost (cumulative).
+    #[serde(default)]
+    pub packets_lost: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -250,6 +262,9 @@ mod tests {
             },
             latency_buckets: vec![(0.005, 100), (0.01, 500), (f64::INFINITY, 9500)],
             saturation: SaturationInfo::default(),
+            packets_sent: 0,
+            packets_received: 0,
+            packets_lost: 0,
         });
 
         // Verify metrics are populated.

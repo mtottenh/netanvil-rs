@@ -119,8 +119,9 @@ fn with_api_test(
 
     // Run verification in a background thread (the test body runs while the load test is active)
     let verify_handle = std::thread::spawn(move || {
-        // Wait for the test to generate some data
-        std::thread::sleep(Duration::from_millis(500));
+        // Wait for at least two coordinator ticks (control_interval=1s) plus
+        // metrics collection (metrics_interval=500ms) so the API has real data.
+        std::thread::sleep(Duration::from_millis(3000));
         verify(&api_addr);
     });
 
@@ -133,8 +134,7 @@ fn with_api_test(
             request_timeout: Duration::from_secs(5),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 
@@ -158,7 +158,7 @@ fn with_api_test(
 #[test]
 fn get_status_returns_running() {
     let target = start_target_server();
-    with_api_test(target, 19001, Duration::from_secs(3), 50.0, |api_addr| {
+    with_api_test(target, 19001, Duration::from_secs(8), 50.0, |api_addr| {
         let (status, body) = http_get(api_addr, "/status");
         assert_eq!(status, 200);
 
@@ -172,7 +172,7 @@ fn get_status_returns_running() {
 #[test]
 fn get_metrics_returns_latency_data() {
     let target = start_target_server();
-    with_api_test(target, 19002, Duration::from_secs(3), 50.0, |api_addr| {
+    with_api_test(target, 19002, Duration::from_secs(8), 50.0, |api_addr| {
         let (status, body) = http_get(api_addr, "/metrics");
         assert_eq!(status, 200);
 
@@ -186,7 +186,7 @@ fn get_metrics_returns_latency_data() {
 #[test]
 fn put_rate_changes_target_rps() {
     let target = start_target_server();
-    with_api_test(target, 19003, Duration::from_secs(4), 50.0, |api_addr| {
+    with_api_test(target, 19003, Duration::from_secs(8), 50.0, |api_addr| {
         // Update rate
         let (status, body) = http_put(api_addr, "/rate", r#"{"rps": 200.0}"#);
         assert_eq!(status, 200);
@@ -227,14 +227,13 @@ fn post_stop_terminates_test_early() {
             request_timeout: Duration::from_secs(5),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         ..Default::default()
     };
 
-    // Send stop after 1 second
+    // Send stop after 2 seconds (must be > control_interval for coordinator to process)
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(2));
         let _ = http_post(&format!("127.0.0.1:{api_port}"), "/stop");
     });
 
@@ -262,7 +261,7 @@ fn post_stop_terminates_test_early() {
 #[test]
 fn put_targets_accepted() {
     let target = start_target_server();
-    with_api_test(target, 19005, Duration::from_secs(2), 50.0, |api_addr| {
+    with_api_test(target, 19005, Duration::from_secs(5), 50.0, |api_addr| {
         let (status, body) = http_put(
             api_addr,
             "/targets",
@@ -277,7 +276,7 @@ fn put_targets_accepted() {
 #[test]
 fn put_headers_accepted() {
     let target = start_target_server();
-    with_api_test(target, 19006, Duration::from_secs(2), 50.0, |api_addr| {
+    with_api_test(target, 19006, Duration::from_secs(5), 50.0, |api_addr| {
         let (status, body) = http_put(
             api_addr,
             "/headers",
@@ -292,7 +291,7 @@ fn put_headers_accepted() {
 #[test]
 fn not_found_for_unknown_path() {
     let target = start_target_server();
-    with_api_test(target, 19007, Duration::from_secs(2), 50.0, |api_addr| {
+    with_api_test(target, 19007, Duration::from_secs(5), 50.0, |api_addr| {
         let (status, body) = http_get(api_addr, "/nonexistent");
         assert_eq!(status, 404);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -303,7 +302,7 @@ fn not_found_for_unknown_path() {
 #[test]
 fn put_rate_rejects_invalid_json() {
     let target = start_target_server();
-    with_api_test(target, 19008, Duration::from_secs(2), 50.0, |api_addr| {
+    with_api_test(target, 19008, Duration::from_secs(5), 50.0, |api_addr| {
         let (status, body) = http_put(api_addr, "/rate", "not json");
         assert_eq!(status, 400);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();

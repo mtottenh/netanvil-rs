@@ -33,6 +33,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 rustls = { version = "0.23", features = ["ring"] }
+tempfile = "3"
 
 [features]
 v8 = ["netanvil-harness/v8", "netanvil-api/v8"]

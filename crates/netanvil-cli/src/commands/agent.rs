@@ -24,6 +24,11 @@ pub fn run(
 ) -> Result<()> {
     let bind_addr = parse_listen_addr(&listen);
 
+    // Reset affinity before auto-detecting cores. A previous --isolate-cpus
+    // run may have migrated PID 1 to a single housekeeping core, and child
+    // processes inherit that restricted mask.
+    netanvil_core::isolation::reset_affinity();
+
     let cores = if cores == 0 {
         std::thread::available_parallelism()
             .map(|n| n.get())

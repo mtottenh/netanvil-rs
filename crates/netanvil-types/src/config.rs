@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::distribution::{CountDistribution, ValueDistribution};
+
 fn default_true() -> bool {
     true
 }
@@ -25,9 +27,9 @@ pub struct TestConfig {
     pub num_cores: usize,
     /// Connection settings
     pub connections: ConnectionConfig,
-    /// How often workers send metrics snapshots to the coordinator
-    pub metrics_interval: Duration,
-    /// How often the coordinator runs its control loop
+    /// How often the coordinator runs its control loop.
+    /// Minimum 1 second. Default 3 seconds.
+    /// `metrics_interval` is derived internally as `control_interval / 2`.
     pub control_interval: Duration,
     /// HTTP status codes >= this threshold count as errors in metrics.
     /// Set to 0 to disable HTTP error classification (only transport errors count).
@@ -139,10 +141,10 @@ pub enum ProtocolConfig {
         payload_hex: String,
         /// Framing: "raw", "length-prefix:N", "delimiter:XX", "fixed:N"
         framing: String,
-        /// Request payload size for RR protocol mode.
-        request_size: u16,
-        /// Response payload size for RR/SOURCE/BIDIR modes.
-        response_size: u32,
+        /// Request payload size distribution for RR protocol mode.
+        request_size: ValueDistribution<u16>,
+        /// Response payload size distribution for RR/SOURCE/BIDIR modes.
+        response_size: ValueDistribution<u32>,
     },
     /// UDP test configuration.
     Udp {
@@ -240,8 +242,7 @@ impl Default for TestConfig {
             headers: Vec::new(),
             num_cores: 0,
             connections: ConnectionConfig::default(),
-            metrics_interval: Duration::from_millis(50),
-            control_interval: Duration::from_millis(100),
+            control_interval: Duration::from_secs(3),
             error_status_threshold: 400,
             external_metrics_url: None,
             external_metrics_field: None,
@@ -464,19 +465,8 @@ pub enum ConnectionPolicy {
     },
 }
 
-/// A distribution over positive integer counts.
-///
-/// Used to model realistic variation in connection lifetimes,
-/// request counts per session, etc.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CountDistribution {
-    /// Exactly N every time.
-    Fixed(u32),
-    /// Uniform random between min and max (inclusive).
-    Uniform { min: u32, max: u32 },
-    /// Normal (Gaussian) distribution, clamped to >= 1.
-    Normal { mean: f64, stddev: f64 },
-}
+// `CountDistribution` (= `ValueDistribution<u32>`) is defined in
+// `crate::distribution` and re-exported from `crate::lib`.
 
 /// TLS configuration for HTTP executor connections to the target.
 ///

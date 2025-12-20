@@ -6,6 +6,7 @@
 pub mod command;
 pub mod config;
 pub mod distributed;
+pub mod distribution;
 pub mod dns_spec;
 pub mod error;
 pub mod metrics;
@@ -18,15 +19,17 @@ pub mod udp_spec;
 
 pub use command::{ScheduledRequest, TimerCommand, WorkerCommand};
 pub use config::{
-    ConnectionConfig, ConnectionPolicy, CountDistribution, EventLogOutput, HttpVersion,
-    PidConstraint, PidGains, PidTarget, PluginConfig, PluginType, ProtocolConfig, RateConfig,
-    ResponseSignalConfig, SchedulerConfig, SignalAggregation, TargetMetric, TestConfig, TlsConfig,
+    ConnectionConfig, ConnectionPolicy, EventLogOutput, HttpVersion, PidConstraint, PidGains,
+    PidTarget, PluginConfig, PluginType, ProtocolConfig, RateConfig, ResponseSignalConfig,
+    SchedulerConfig, SignalAggregation, TargetMetric, TestConfig, TlsConfig,
 };
+pub use distribution::{CountDistribution, ValueDistribution, WeightedValue};
 pub use distributed::{MetricsFetcher, NodeCommander, NodeDiscovery, RemoteMetrics};
 pub use dns_spec::{DnsQueryType, DnsRequestSpec};
 pub use error::{NetAnvilError, Result};
 pub use metrics::{
-    MetricsSnapshot, MetricsSummary, RateDecision, SaturationAssessment, SaturationInfo,
+    MetricsSnapshot, MetricsSummary, PacketCounterDeltas, RateDecision, SaturationAssessment,
+    SaturationInfo,
 };
 pub use node::{NodeId, NodeInfo, NodeState};
 pub use redis_spec::RedisRequestSpec;
@@ -36,7 +39,8 @@ pub use request::{
 pub use tcp_spec::{TcpFraming, TcpRequestSpec, TcpTestMode};
 pub use traits::{
     EventRecorder, HttpGenerator, HttpTransformer, MetricsCollector, NoopEventRecorder,
-    RateController, RequestExecutor, RequestGenerator, RequestScheduler, RequestTransformer,
+    NoopPacketSource, PacketCounterSource, RateController, RequestExecutor, RequestGenerator,
+    RequestScheduler, RequestTransformer,
 };
 pub use udp_spec::UdpRequestSpec;
 

@@ -9,6 +9,7 @@ pub mod generator;
 pub mod handle;
 pub mod io_worker;
 pub mod isolation;
+pub mod lifecycle;
 pub mod report;
 pub mod result;
 pub mod scheduler;
@@ -43,8 +44,8 @@ pub type TransformerFactory = GenericTransformerFactory<netanvil_types::HttpRequ
 pub use controller::builder::build_rate_controller;
 pub use controller::{
     AutotuneParams, AutotuningPidController, CompositePidController, PidGainValues,
-    PidRateController, PidStepInput, RampConfig, RampRateController, StaticRateController,
-    StepRateController,
+    PidRateController, PidStepInput, RampConfig, RampRateController, SlowStart,
+    StaticRateController, StepRateController,
 };
 pub use coordinator::Coordinator;
 pub use coordinator::ProgressUpdate;
@@ -58,4 +59,5 @@ pub use report::{ProgressLine, Report};
 pub use result::TestResult;
 pub use scheduler::{ConstantRateScheduler, PoissonScheduler};
 pub use timer_thread::TimerThreadHandle;
+pub use lifecycle::{LifecycleCounter, SampleDistribution};
 pub use transformer::{ConnectionPolicyTransformer, HeaderTransformer, NoopTransformer};

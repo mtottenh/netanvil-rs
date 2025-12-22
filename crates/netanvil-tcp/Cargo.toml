@@ -10,6 +10,8 @@ description = "TCP request-response executor for netanvil-rs load testing"
 netanvil-types = { workspace = true }
 compio = { workspace = true }
 tracing = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }
 
 [dev-dependencies]
 netanvil-test-servers = { workspace = true }

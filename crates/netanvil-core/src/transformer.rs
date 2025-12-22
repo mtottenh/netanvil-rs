@@ -1,11 +1,10 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 
-use netanvil_types::{
-    ConnectionPolicy, CountDistribution, HttpRequestSpec, RequestContext, RequestTransformer,
-};
+use netanvil_types::{ConnectionPolicy, HttpRequestSpec, RequestContext, RequestTransformer};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use rand_distr::{Distribution, Normal};
+
+use crate::lifecycle::LifecycleCounter;
 
 /// Transformer that passes requests through unchanged.
 pub struct NoopTransformer;
@@ -53,18 +52,15 @@ impl RequestTransformer for HeaderTransformer {
 ///
 /// Wraps an inner transformer so headers and connection policy compose.
 ///
-/// For the `Mixed` policy with a `connection_lifetime`, the transformer
-/// simulates connection lifecycles: it samples a request count from the
-/// distribution, counts requests, and sends `Connection: close` when the
-/// limit is reached, then resamples for the next "connection".
+/// For the `Mixed` policy with a `connection_lifetime`, a [`LifecycleCounter`]
+/// tracks requests per simulated connection and signals when to close.
 pub struct ConnectionPolicyTransformer {
     inner: Box<dyn RequestTransformer<Spec = HttpRequestSpec>>,
     policy: ConnectionPolicy,
+    /// Lifecycle counter for Mixed policy with connection_lifetime.
+    /// `None` when the policy is not Mixed or has no lifetime distribution.
+    lifecycle: RefCell<Option<LifecycleCounter>>,
     rng: RefCell<SmallRng>,
-    /// Requests sent on the current simulated connection.
-    conn_request_count: Cell<u32>,
-    /// How many requests until the current connection closes (sampled from distribution).
-    conn_lifetime: Cell<u32>,
 }
 
 impl ConnectionPolicyTransformer {
@@ -72,37 +68,19 @@ impl ConnectionPolicyTransformer {
         inner: Box<dyn RequestTransformer<Spec = HttpRequestSpec>>,
         policy: ConnectionPolicy,
     ) -> Self {
-        let mut rng = SmallRng::from_entropy();
-        // Sample the initial connection lifetime
-        let initial_lifetime = match &policy {
+        let lifecycle = match &policy {
             ConnectionPolicy::Mixed {
                 connection_lifetime: Some(dist),
                 ..
-            } => sample_count(dist, &mut rng),
-            _ => u32::MAX,
+            } => Some(LifecycleCounter::new(dist.clone())),
+            _ => None,
         };
 
         Self {
             inner,
             policy,
-            rng: RefCell::new(rng),
-            conn_request_count: Cell::new(0),
-            conn_lifetime: Cell::new(initial_lifetime),
-        }
-    }
-}
-
-/// Sample a positive integer from a CountDistribution.
-fn sample_count(dist: &CountDistribution, rng: &mut SmallRng) -> u32 {
-    match dist {
-        CountDistribution::Fixed(n) => *n,
-        CountDistribution::Uniform { min, max } => rng.gen_range(*min..=*max),
-        CountDistribution::Normal { mean, stddev } => {
-            let normal =
-                Normal::new(*mean, *stddev).unwrap_or_else(|_| Normal::new(1.0, 0.0).unwrap());
-            let sample: f64 = normal.sample(rng);
-            // Clamp to >= 1
-            sample.round().max(1.0) as u32
+            lifecycle: RefCell::new(lifecycle),
+            rng: RefCell::new(SmallRng::from_entropy()),
         }
     }
 }
@@ -119,27 +97,23 @@ impl RequestTransformer for ConnectionPolicyTransformer {
             ConnectionPolicy::AlwaysNew => true,
             ConnectionPolicy::NoReuse => false, // Don't send Connection: close — leave connections dangling
             ConnectionPolicy::Mixed {
-                persistent_ratio,
-                connection_lifetime,
+                persistent_ratio, ..
             } => {
-                let count = self.conn_request_count.get();
-
-                // Check if the simulated connection has reached its lifetime
-                let lifetime_exceeded = count >= self.conn_lifetime.get();
-
-                if lifetime_exceeded {
-                    // "Close" this connection and start a new one:
-                    // reset counter (this request is #0 of the new connection)
-                    // and resample lifetime
-                    self.conn_request_count.set(1);
-                    if let Some(dist) = connection_lifetime {
-                        let new_lifetime = sample_count(dist, &mut self.rng.borrow_mut());
-                        self.conn_lifetime.set(new_lifetime);
+                let mut lifecycle = self.lifecycle.borrow_mut();
+                if let Some(ref mut lc) = *lifecycle {
+                    if lc.tick() {
+                        // This request closes the old connection. Count it as
+                        // request #1 of the new connection (matches HTTP/1.1
+                        // behavior where the close request opens a fresh conn).
+                        lc.reset();
+                        lc.tick();
+                        true
+                    } else {
+                        // Random decision based on persistent ratio
+                        !self.rng.borrow_mut().gen_bool(*persistent_ratio)
                     }
-                    true
                 } else {
-                    self.conn_request_count.set(count + 1);
-                    // Random decision based on persistent ratio
+                    // No lifetime distribution — just use persistent_ratio
                     !self.rng.borrow_mut().gen_bool(*persistent_ratio)
                 }
             }

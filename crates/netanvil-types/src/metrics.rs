@@ -112,7 +112,7 @@ pub struct RateDecision {
 ///
 /// Distinguishes between client bottleneck (can't generate fast enough),
 /// server bottleneck (can't handle the load), or both.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct SaturationInfo {
     /// Requests the timer thread dropped this window (fire channel full).
     pub backpressure_drops: u64,
@@ -131,7 +131,7 @@ pub struct SaturationInfo {
 }
 
 /// Classification of where the bottleneck is.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub enum SaturationAssessment {
     /// All signals healthy — generating at target rate, no backpressure.
     #[default]

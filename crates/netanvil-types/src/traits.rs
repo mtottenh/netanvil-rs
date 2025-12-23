@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::time::Instant;
 
+use crate::controller::{ControllerInfo, ControllerType};
 use crate::metrics::{MetricsSnapshot, MetricsSummary, PacketCounterDeltas, RateDecision};
 use crate::request::{ExecutionResult, HttpRequestSpec, ProtocolSpec, RequestContext};
 
@@ -239,5 +240,37 @@ pub trait RateController {
     /// Default: empty (no custom state to export).
     fn controller_state(&self) -> Vec<(&'static str, f64)> {
         Vec::new()
+    }
+
+    /// Return structured information about the controller for introspection.
+    /// Default: returns a minimal description with no editable actions.
+    fn controller_info(&self) -> ControllerInfo {
+        ControllerInfo {
+            controller_type: ControllerType::Static,
+            current_rps: self.current_rate(),
+            editable_actions: vec![],
+            params: serde_json::Value::Null,
+        }
+    }
+
+    /// Apply a typed parameter update. Returns a JSON response body on
+    /// success, or an error message on failure.
+    ///
+    /// The `action` string and `params` JSON are parsed from the PUT body.
+    /// Each controller type handles its own action set; unrecognized actions
+    /// return Err.
+    ///
+    /// Default: rejects all actions.
+    fn apply_update(
+        &mut self,
+        action: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let _ = params;
+        Err(format!(
+            "action '{}' is not valid for controller type '{:?}'",
+            action,
+            self.controller_info().controller_type
+        ))
     }
 }

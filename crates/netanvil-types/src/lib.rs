@@ -5,6 +5,7 @@
 
 pub mod command;
 pub mod config;
+pub mod controller;
 pub mod distributed;
 pub mod distribution;
 pub mod dns_spec;
@@ -18,6 +19,9 @@ pub mod traits;
 pub mod udp_spec;
 
 pub use command::{ScheduledRequest, TimerCommand, WorkerCommand};
+pub use controller::{
+    ControllerInfo, ControllerType, ControllerView, HoldCommand, HoldState,
+};
 pub use config::{
     ConnectionConfig, ConnectionPolicy, EventLogOutput, HttpVersion, PidConstraint, PidGains,
     PidTarget, PluginConfig, PluginType, ProtocolConfig, RateConfig, ResponseSignalConfig,

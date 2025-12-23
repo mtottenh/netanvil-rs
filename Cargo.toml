@@ -63,8 +63,18 @@ flume = "0.11"
 # CPU core pinning
 core_affinity = "0.8"
 
-# Embedded HTTP server (for control API)
-tiny_http = "0.12"
+# HTTP API framework + OpenAPI
+axum = "0.8"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tokio = { version = "1.40", features = ["macros", "rt", "rt-multi-thread", "net", "time"] }
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-scalar = { version = "0.3", features = ["axum"] }
+
+# HTTP client (for leader→agent communication)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# Async utilities
+futures = "0.3"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -93,10 +103,6 @@ rand_distr = "0.4"
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
-
-# Testing (dev only)
-tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "time"] }
-axum = "0.8"
 
 # Workspace crate dependencies
 netanvil-types = { path = "crates/netanvil-types" }

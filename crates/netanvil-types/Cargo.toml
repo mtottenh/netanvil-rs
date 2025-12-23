@@ -8,10 +8,10 @@ description = "Core traits and types for the netanvil-rs load testing framework"
 
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 http = { workspace = true }
+flume = { workspace = true }
+utoipa = { workspace = true }
 bytes = "1"
 hdrhistogram = { workspace = true }
-
-[dev-dependencies]
-serde_json = { workspace = true }

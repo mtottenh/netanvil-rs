@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// Unique identifier for a node in the cluster.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 pub struct NodeId(pub String);
 
 impl std::fmt::Display for NodeId {
@@ -12,7 +13,7 @@ impl std::fmt::Display for NodeId {
 
 /// Information about a node in the cluster.
 /// Reported by agents, consumed by the leader.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct NodeInfo {
     pub id: NodeId,
     /// "host:port" for the agent's API
@@ -24,7 +25,7 @@ pub struct NodeInfo {
 }
 
 /// Agent lifecycle state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub enum NodeState {
     /// Ready to accept a test.
     Idle,

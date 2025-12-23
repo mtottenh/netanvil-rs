@@ -25,6 +25,7 @@ netanvil-plugin = { workspace = true }
 netanvil-plugin-luajit = { workspace = true }
 netanvil-harness = { workspace = true }
 netanvil-events = { workspace = true }
+tokio = { workspace = true }
 flume = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

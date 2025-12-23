@@ -14,7 +14,10 @@ use crate::NetAnvilError;
 // - Send: the coordinator thread owns the impl
 // - Sync: allows sharing with an API server on another thread (future)
 //
-// All methods are synchronous, matching the coordinator's sync tick loop.
+// I/O-bound methods are async, enabling concurrent agent communication
+// (e.g., fetching metrics from N agents in parallel with join_all).
+// The coordinator runs these on a current_thread tokio runtime on its
+// dedicated thread — no interaction with the hot-path timer thread.
 // ---------------------------------------------------------------------------
 
 /// Discovers nodes in the cluster.
@@ -23,9 +26,11 @@ use crate::NetAnvilError;
 /// Future: gossip-based Orswot CRDT for node registry.
 pub trait NodeDiscovery: Send + Sync {
     /// Returns the current set of known nodes.
-    fn discover(&self) -> Vec<NodeInfo>;
+    /// Async to support future discovery mechanisms that do I/O (e.g., DNS, gossip).
+    fn discover(&self) -> impl std::future::Future<Output = Vec<NodeInfo>> + Send;
 
     /// Mark a node as failed (excluded from subsequent discover() calls).
+    /// Sync — just a local state update, no I/O.
     fn mark_failed(&self, id: &NodeId);
 }
 
@@ -36,7 +41,10 @@ pub trait NodeDiscovery: Send + Sync {
 pub trait MetricsFetcher: Send + Sync {
     /// Fetch the latest metrics from the given node.
     /// Returns None if the node is unreachable or has no data.
-    fn fetch_metrics(&self, node: &NodeInfo) -> Option<RemoteMetrics>;
+    fn fetch_metrics(
+        &self,
+        node: &NodeInfo,
+    ) -> impl std::future::Future<Output = Option<RemoteMetrics>> + Send;
 }
 
 /// Sends commands to an agent node.
@@ -45,13 +53,24 @@ pub trait MetricsFetcher: Send + Sync {
 /// Future: stays HTTP/gRPC (point-to-point commands don't benefit from gossip).
 pub trait NodeCommander: Send + Sync {
     /// Start a test on the given agent.
-    fn start_test(&self, node: &NodeInfo, config: &TestConfig) -> Result<(), NetAnvilError>;
+    fn start_test(
+        &self,
+        node: &NodeInfo,
+        config: &TestConfig,
+    ) -> impl std::future::Future<Output = Result<(), NetAnvilError>> + Send;
 
     /// Update the agent's target request rate.
-    fn set_rate(&self, node: &NodeInfo, rps: f64) -> Result<(), NetAnvilError>;
+    fn set_rate(
+        &self,
+        node: &NodeInfo,
+        rps: f64,
+    ) -> impl std::future::Future<Output = Result<(), NetAnvilError>> + Send;
 
     /// Stop the test on the given agent.
-    fn stop_test(&self, node: &NodeInfo) -> Result<(), NetAnvilError>;
+    fn stop_test(
+        &self,
+        node: &NodeInfo,
+    ) -> impl std::future::Future<Output = Result<(), NetAnvilError>> + Send;
 }
 
 /// Metrics reported by a remote agent.

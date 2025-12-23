@@ -1,4 +1,6 @@
-/// Commands sent from coordinator to worker via channel.
+use crate::controller::{ControllerView, HoldCommand};
+
+/// Commands sent from the control API to the coordinator via channel.
 #[derive(Debug, Clone)]
 pub enum WorkerCommand {
     /// Update this worker's target request rate.
@@ -9,6 +11,18 @@ pub enum WorkerCommand {
     UpdateMetadata(Vec<(String, String)>),
     /// Gracefully stop the worker.
     Stop,
+    /// Hold or release the rate (coordinator-level override).
+    Hold(HoldCommand),
+    /// Update controller parameters. Response sent on the oneshot.
+    ControllerUpdate {
+        action: String,
+        params: serde_json::Value,
+        response_tx: flume::Sender<Result<serde_json::Value, String>>,
+    },
+    /// Request controller introspection info. Response sent on the oneshot.
+    ControllerInfo {
+        response_tx: flume::Sender<ControllerView>,
+    },
 }
 
 /// Commands sent from coordinator to the timer thread.

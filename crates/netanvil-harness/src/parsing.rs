@@ -5,7 +5,8 @@ use anyhow::{Context, Result};
 use netanvil_core::{GeneratorFactory, GenericGeneratorFactory};
 use netanvil_types::{
     ConnectionPolicy, CountDistribution, HttpVersion, PidTarget, PluginType, RateConfig,
-    ResponseSignalConfig, SchedulerConfig, SignalAggregation, TargetMetric,
+    ResponseSignalConfig, SchedulerConfig, SignalAggregation, TargetMetric, ValueDistribution,
+    WeightedValue,
 };
 
 pub fn parse_duration(s: &str) -> Result<Duration> {
@@ -125,11 +126,12 @@ pub fn parse_connection_policy(
     }
 }
 
-/// Parse a count distribution: "fixed:100", "uniform:50,200", "normal:100,20"
+/// Parse a count distribution: "fixed:100", "uniform:50,200", "normal:100,20",
+/// "weighted:50@30,100@50,200@20"
 pub fn parse_count_distribution(s: &str) -> Result<CountDistribution> {
     let (kind, params) = s
         .split_once(':')
-        .context("distribution format: 'fixed:N', 'uniform:min,max', or 'normal:mean,stddev'")?;
+        .context("distribution format: 'fixed:N', 'uniform:min,max', 'normal:mean,stddev', or 'weighted:val@pct,...'")?;
     match kind.to_lowercase().as_str() {
         "fixed" => {
             let n: u32 = params
@@ -157,10 +159,120 @@ pub fn parse_count_distribution(s: &str) -> Result<CountDistribution> {
             let stddev: f64 = stddev_s.trim().parse().context("invalid stddev")?;
             Ok(CountDistribution::Normal { mean, stddev })
         }
+        "weighted" => {
+            let entries = parse_weighted_entries::<u32>(params)?;
+            Ok(CountDistribution::Weighted(entries))
+        }
         other => {
-            anyhow::bail!("unknown distribution: {other} (use 'fixed', 'uniform', or 'normal')")
+            anyhow::bail!("unknown distribution: {other} (use 'fixed', 'uniform', 'normal', or 'weighted')")
         }
     }
+}
+
+/// Parse a size distribution for u16: bare integer "1200", or
+/// "fixed:1200", "uniform:200,1500", "normal:800,200", "weighted:200@30,1200@50,1500@20"
+pub fn parse_u16_distribution(s: &str) -> Result<ValueDistribution<u16>> {
+    // Try bare integer first (backward compatible)
+    if let Ok(n) = s.trim().parse::<u16>() {
+        return Ok(ValueDistribution::Fixed(n));
+    }
+    let (kind, params) = s
+        .split_once(':')
+        .context("size distribution: bare integer, 'fixed:N', 'uniform:min,max', 'normal:mean,stddev', or 'weighted:val@pct,...'")?;
+    match kind.to_lowercase().as_str() {
+        "fixed" => {
+            let n: u16 = params.trim().parse().context("fixed:N requires an integer")?;
+            Ok(ValueDistribution::Fixed(n))
+        }
+        "uniform" => {
+            let (min_s, max_s) = params.split_once(',').context("uniform requires min,max")?;
+            let min: u16 = min_s.trim().parse().context("invalid min")?;
+            let max: u16 = max_s.trim().parse().context("invalid max")?;
+            if min > max {
+                anyhow::bail!("uniform min ({min}) must be <= max ({max})");
+            }
+            Ok(ValueDistribution::Uniform { min, max })
+        }
+        "normal" => {
+            let (mean_s, stddev_s) = params.split_once(',').context("normal requires mean,stddev")?;
+            let mean: f64 = mean_s.trim().parse().context("invalid mean")?;
+            let stddev: f64 = stddev_s.trim().parse().context("invalid stddev")?;
+            Ok(ValueDistribution::Normal { mean, stddev })
+        }
+        "weighted" => {
+            let entries = parse_weighted_entries::<u16>(params)?;
+            Ok(ValueDistribution::Weighted(entries))
+        }
+        other => anyhow::bail!("unknown distribution: {other}"),
+    }
+}
+
+/// Parse a size distribution for u32: bare integer "1200", or
+/// "fixed:1200", "uniform:200,1500", "normal:800,200", "weighted:200@30,1200@50,1500@20"
+pub fn parse_u32_distribution(s: &str) -> Result<ValueDistribution<u32>> {
+    // Try bare integer first (backward compatible)
+    if let Ok(n) = s.trim().parse::<u32>() {
+        return Ok(ValueDistribution::Fixed(n));
+    }
+    let (kind, params) = s
+        .split_once(':')
+        .context("size distribution: bare integer, 'fixed:N', 'uniform:min,max', 'normal:mean,stddev', or 'weighted:val@pct,...'")?;
+    match kind.to_lowercase().as_str() {
+        "fixed" => {
+            let n: u32 = params.trim().parse().context("fixed:N requires an integer")?;
+            Ok(ValueDistribution::Fixed(n))
+        }
+        "uniform" => {
+            let (min_s, max_s) = params.split_once(',').context("uniform requires min,max")?;
+            let min: u32 = min_s.trim().parse().context("invalid min")?;
+            let max: u32 = max_s.trim().parse().context("invalid max")?;
+            if min > max {
+                anyhow::bail!("uniform min ({min}) must be <= max ({max})");
+            }
+            Ok(ValueDistribution::Uniform { min, max })
+        }
+        "normal" => {
+            let (mean_s, stddev_s) = params.split_once(',').context("normal requires mean,stddev")?;
+            let mean: f64 = mean_s.trim().parse().context("invalid mean")?;
+            let stddev: f64 = stddev_s.trim().parse().context("invalid stddev")?;
+            Ok(ValueDistribution::Normal { mean, stddev })
+        }
+        "weighted" => {
+            let entries = parse_weighted_entries::<u32>(params)?;
+            Ok(ValueDistribution::Weighted(entries))
+        }
+        other => anyhow::bail!("unknown distribution: {other}"),
+    }
+}
+
+/// Parse weighted entries: "200@30,1200@50,1500@20" → Vec<WeightedValue<T>>
+fn parse_weighted_entries<T: std::str::FromStr>(s: &str) -> Result<Vec<WeightedValue<T>>>
+where
+    T::Err: std::fmt::Display,
+{
+    let mut entries = Vec::new();
+    for part in s.split(',') {
+        let part = part.trim();
+        let (val_s, weight_s) = part
+            .split_once('@')
+            .context("weighted entries: 'value@weight,...' (e.g. '200@30,1200@50,1500@20')")?;
+        let value: T = val_s
+            .trim()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid value '{val_s}': {e}"))?;
+        let weight: f64 = weight_s
+            .trim()
+            .parse()
+            .context(format!("invalid weight '{weight_s}'"))?;
+        if weight <= 0.0 {
+            anyhow::bail!("weight must be positive, got {weight}");
+        }
+        entries.push(WeightedValue::new(value, weight));
+    }
+    if entries.is_empty() {
+        anyhow::bail!("weighted distribution requires at least one entry");
+    }
+    Ok(entries)
 }
 
 /// Parse a human-friendly bandwidth string into bits per second.

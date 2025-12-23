@@ -189,14 +189,17 @@ enum Commands {
         #[arg(long, default_value = "echo")]
         mode: String,
 
-        /// Request payload size in bytes for RR protocol mode.
-        /// Overrides --payload length; pads or truncates to this size.
+        /// Request payload size (distribution) for RR protocol mode.
+        /// Accepts: bare integer "1200", or distribution syntax:
+        /// "fixed:1200", "uniform:200,1500", "normal:800,200",
+        /// "weighted:200@30,1200@50,1500@20"
         #[arg(long)]
-        request_size: Option<u16>,
+        request_size: Option<String>,
 
-        /// Response payload size in bytes for RR/SOURCE/BIDIR protocol modes.
+        /// Response payload size (distribution) for RR/SOURCE/BIDIR modes.
+        /// Same syntax as --request-size.
         #[arg(long)]
-        response_size: Option<u32>,
+        response_size: Option<String>,
 
         /// Chunk size in bytes for stream modes (default: 65536)
         #[arg(long, default_value = "65536")]
@@ -430,13 +433,15 @@ enum Commands {
         #[arg(long, default_value = "echo")]
         mode: String,
 
-        /// Request payload size in bytes for RR protocol mode
+        /// Request payload size (distribution) for RR protocol mode.
+        /// Same syntax as test command --request-size.
         #[arg(long)]
-        request_size: Option<u16>,
+        request_size: Option<String>,
 
-        /// Response payload size in bytes for RR/SOURCE/BIDIR protocol modes
+        /// Response payload size (distribution) for RR/SOURCE/BIDIR modes.
+        /// Same syntax as test command --response-size.
         #[arg(long)]
-        response_size: Option<u32>,
+        response_size: Option<String>,
 
         /// Chunk size in bytes for stream modes (default: 65536)
         #[arg(long, default_value = "65536")]
@@ -473,6 +478,52 @@ enum Commands {
         /// Output format: "text" (human-readable to stderr) or "json" (machine-readable to stdout)
         #[arg(long, default_value = "text")]
         output: String,
+    },
+
+    /// Run as a persistent leader daemon with HTTP API and test queue
+    LeaderServer {
+        /// HTTP API listen address (e.g., "0.0.0.0:8080")
+        #[arg(long, default_value = "0.0.0.0:8080")]
+        listen: String,
+
+        /// Agent addresses (host:port), comma-separated
+        #[arg(long, value_delimiter = ',', required = true)]
+        workers: Vec<String>,
+
+        /// Directory for storing test results
+        #[arg(long, default_value = "/opt/netanvil-rs/results")]
+        results_dir: String,
+
+        /// Maximum number of completed test results to keep
+        #[arg(long, default_value = "100")]
+        max_results: usize,
+
+        /// Port for the dedicated Prometheus metrics endpoint.
+        /// Exposes the same aggregated metrics as one-shot mode,
+        /// so Prometheus config is identical regardless of leader mode.
+        #[arg(long)]
+        metrics_port: Option<u16>,
+
+        /// Path to CA certificate PEM for mTLS agent communication
+        #[arg(long)]
+        tls_ca: Option<String>,
+
+        /// Path to leader's certificate PEM
+        #[arg(long)]
+        tls_cert: Option<String>,
+
+        /// Path to leader's private key PEM
+        #[arg(long)]
+        tls_key: Option<String>,
+
+        /// Optional URL to poll for external metrics
+        #[arg(long)]
+        external_metrics_url: Option<String>,
+
+        /// JSON field name to extract from external metrics
+        #[arg(long)]
+        external_metrics_field: Option<String>,
+
     },
 }
 
@@ -700,6 +751,30 @@ fn main() -> Result<()> {
             ramp_max_errors,
             metrics_port,
             output,
+        )?,
+
+        Commands::LeaderServer {
+            listen,
+            workers,
+            results_dir,
+            max_results,
+            metrics_port,
+            tls_ca,
+            tls_cert,
+            tls_key,
+            external_metrics_url,
+            external_metrics_field,
+        } => commands::leader_server::run(
+            listen,
+            workers,
+            results_dir,
+            max_results,
+            metrics_port,
+            tls_ca,
+            tls_cert,
+            tls_key,
+            external_metrics_url,
+            external_metrics_field,
         )?,
     }
 

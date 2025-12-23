@@ -1,12 +1,11 @@
 use std::io::IsTerminal;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 
 use netanvil_distributed::{
-    DistributedCoordinator, HttpMetricsFetcher, HttpNodeCommander, HttpSignalPoller,
-    LeaderMetricsState, LeaderServer, MtlsMetricsFetcher, MtlsNodeCommander, MtlsStaticDiscovery,
-    StaticDiscovery,
+    LeaderMetricsState, LeaderServer, QueueConfig, ResultStore, TestQueue,
 };
 use netanvil_types::{ConnectionConfig, SchedulerConfig, TestConfig};
 
@@ -49,8 +48,8 @@ pub fn run(
     framing: String,
     no_response: bool,
     mode: String,
-    request_size: Option<u16>,
-    response_size: Option<u32>,
+    request_size: Option<String>,
+    response_size: Option<String>,
     dns_domains: Option<String>,
     dns_query_type: String,
     ramp_warmup: String,
@@ -124,8 +123,7 @@ pub fn run(
             request_timeout: timeout,
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(500),
-        control_interval: Duration::from_millis(200),
+        control_interval: Duration::from_secs(3),
         error_status_threshold: error_threshold,
         external_metrics_url: external_metrics_url.clone(),
         external_metrics_field: external_metrics_field.clone(),
@@ -143,14 +141,25 @@ pub fn run(
             let tcp_payload = resolve_payload(&payload, &payload_hex, &payload_file)
                 .context("invalid TCP payload")?;
             let _tcp_mode = parse_tcp_mode(&mode).context("invalid --mode")?;
-            let req_size = request_size.unwrap_or(tcp_payload.len() as u16);
-            let resp_size = response_size.unwrap_or(req_size as u32);
+            let req_size_dist = match &request_size {
+                Some(s) => parse_u16_distribution(s).context("invalid --request-size")?,
+                None => netanvil_types::ValueDistribution::Fixed(tcp_payload.len() as u16),
+            };
+            let resp_size_dist = match &response_size {
+                Some(s) => parse_u32_distribution(s).context("invalid --response-size")?,
+                None => match &req_size_dist {
+                    netanvil_types::ValueDistribution::Fixed(n) => {
+                        netanvil_types::ValueDistribution::Fixed(*n as u32)
+                    }
+                    _ => netanvil_types::ValueDistribution::Fixed(tcp_payload.len() as u32),
+                },
+            };
             config.protocol = Some(netanvil_types::ProtocolConfig::Tcp {
                 mode: mode.clone(),
                 payload_hex: encode_hex(&tcp_payload),
                 framing: framing.clone(),
-                request_size: req_size,
-                response_size: resp_size,
+                request_size: req_size_dist,
+                response_size: resp_size_dist,
             });
             config.error_status_threshold = 0;
         }
@@ -181,26 +190,8 @@ pub fn run(
             });
             config.error_status_threshold = 0;
         }
-        DetectedProtocol::Http => {
-            // No change needed -- config.protocol stays None (default HTTP)
-        }
+        DetectedProtocol::Http => {}
     }
-
-    tracing::info!(
-        agents = workers.len(),
-        targets = config.targets.len(),
-        rps,
-        ?duration,
-        plugin = plugin.as_deref().unwrap_or("none"),
-        "starting distributed test"
-    );
-
-    // Build rate controller
-    let rate_controller = netanvil_core::build_rate_controller(
-        &config.rate,
-        config.control_interval,
-        std::time::Instant::now(),
-    );
 
     let tls_config = match (&tls_ca, &tls_cert, &tls_key) {
         (Some(ca), Some(cert), Some(key)) => Some(netanvil_types::TlsConfig {
@@ -211,97 +202,113 @@ pub fn run(
         _ => None,
     };
 
-    // Start leader metrics server if requested
-    let metrics_state = metrics_port.map(|port| {
-        let state = LeaderMetricsState::new();
-        let server = LeaderServer::new(state.clone());
-        server.spawn(port).unwrap_or_else(|e| {
-            tracing::error!(port, "failed to start leader metrics server: {e}")
-        });
-        state
-    });
+    let summary = format!(
+        "{} {:.0} RPS, {:.0}s, {} target(s)",
+        rate_mode,
+        rps,
+        config.duration.as_secs_f64(),
+        config.targets.len(),
+    );
 
-    // Helper to configure and run a coordinator (generic over trait impls).
-    fn run_coordinator<D, M, C>(
-        mut coordinator: DistributedCoordinator<D, M, C>,
-        external_metrics_url: Option<&str>,
-        external_metrics_field: Option<&str>,
-        metrics_state: Option<LeaderMetricsState>,
-    ) -> netanvil_distributed::DistributedTestResult
-    where
-        D: netanvil_types::NodeDiscovery,
-        M: netanvil_types::MetricsFetcher,
-        C: netanvil_types::NodeCommander,
-    {
-        if let Some(poller) =
-            HttpSignalPoller::from_config(external_metrics_url, external_metrics_field)
-        {
-            coordinator.set_signal_source(poller.into_source());
-        }
-        let is_tty = std::io::stderr().is_terminal();
-        let mut last_log_elapsed = Duration::ZERO;
-        coordinator.on_progress(move |update| {
-            if let Some(ref state) = metrics_state {
-                state.update(update);
-            }
+    tracing::info!(
+        agents = workers.len(),
+        targets = config.targets.len(),
+        rps,
+        duration = config.duration.as_secs_f64(),
+        plugin = plugin.as_deref().unwrap_or("none"),
+        "starting distributed test"
+    );
+
+    // --- Run through the same TestQueue/scheduler path as daemon mode ---
+
+    let leader_metrics = LeaderMetricsState::new();
+
+    // Start dedicated Prometheus metrics server if requested.
+    if let Some(port) = metrics_port {
+        let server = LeaderServer::new(leader_metrics.clone());
+        server
+            .spawn(port)
+            .unwrap_or_else(|e| tracing::error!(port, "failed to start metrics server: {e}"));
+    }
+
+    // Temporary result store (one-shot mode doesn't persist to disk).
+    let tmp_dir = tempfile::tempdir().context("failed to create temp dir for results")?;
+    let store =
+        ResultStore::open(tmp_dir.path(), 1).context("failed to open temp result store")?;
+
+    let queue = TestQueue::new(store);
+    let test_id = queue.enqueue_config(config, summary);
+
+    // Spawn the scheduler thread.
+    let scheduler_queue = queue.clone();
+    let queue_config = QueueConfig {
+        workers,
+        tls: tls_config,
+        external_metrics_url,
+        external_metrics_field,
+        agents: Arc::new(Mutex::new(Vec::new())),
+        leader_metrics: leader_metrics.clone(),
+    };
+    std::thread::Builder::new()
+        .name("test-scheduler".into())
+        .spawn(move || {
+            scheduler_queue.run_scheduler(queue_config);
+        })
+        .context("failed to spawn scheduler thread")?;
+
+    // Poll for progress until the test completes.
+    let is_tty = std::io::stderr().is_terminal();
+    let mut last_log_elapsed = Duration::ZERO;
+
+    loop {
+        std::thread::sleep(Duration::from_millis(250));
+
+        let info = queue.get_info(&test_id);
+        let status = info.as_ref().map(|i| i.status);
+
+        // Display progress.
+        if let Some(progress) = queue.get_progress(&test_id) {
             if is_tty {
                 eprint!(
                     "\r  [{:.1}s] {:.0} RPS target | {} requests | {} errors | {} nodes",
-                    update.elapsed.as_secs_f64(),
-                    update.target_rps,
-                    update.total_requests,
-                    update.total_errors,
-                    update.active_nodes,
+                    progress.elapsed.as_secs_f64(),
+                    progress.target_rps,
+                    progress.total_requests,
+                    progress.total_errors,
+                    progress.active_nodes,
                 );
-            } else if update.elapsed.saturating_sub(last_log_elapsed) >= Duration::from_secs(1) {
-                last_log_elapsed = update.elapsed;
+            } else if progress.elapsed.saturating_sub(last_log_elapsed) >= Duration::from_secs(1) {
+                last_log_elapsed = progress.elapsed;
                 tracing::info!(
-                    elapsed_secs = format!("{:.1}", update.elapsed.as_secs_f64()),
-                    target_rps = format!("{:.0}", update.target_rps),
-                    total_requests = update.total_requests,
-                    total_errors = update.total_errors,
-                    active_nodes = update.active_nodes,
+                    elapsed_secs = format!("{:.1}", progress.elapsed.as_secs_f64()),
+                    target_rps = format!("{:.0}", progress.target_rps),
+                    total_requests = progress.total_requests,
+                    total_errors = progress.total_errors,
+                    active_nodes = progress.active_nodes,
                     "test progress",
                 );
             }
-        });
-        coordinator.run()
+        }
+
+        // Check for terminal states.
+        match status {
+            Some(netanvil_distributed::TestStatus::Completed)
+            | Some(netanvil_distributed::TestStatus::Failed)
+            | Some(netanvil_distributed::TestStatus::Cancelled) => break,
+            _ => continue,
+        }
     }
 
-    let result = if let Some(ref tls) = tls_config {
-        tracing::info!("using mTLS for agent communication");
-        let discovery = MtlsStaticDiscovery::new(workers, tls)
-            .map_err(|e| anyhow::anyhow!("mTLS discovery: {e}"))?;
-        let fetcher =
-            MtlsMetricsFetcher::new(tls).map_err(|e| anyhow::anyhow!("mTLS fetcher: {e}"))?;
-        let commander =
-            MtlsNodeCommander::new(tls).map_err(|e| anyhow::anyhow!("mTLS commander: {e}"))?;
-        let coordinator =
-            DistributedCoordinator::new(discovery, fetcher, commander, config, rate_controller);
-        run_coordinator(
-            coordinator,
-            external_metrics_url.as_deref(),
-            external_metrics_field.as_deref(),
-            metrics_state.clone(),
-        )
-    } else {
-        let discovery = StaticDiscovery::new(workers);
-        let fetcher = HttpMetricsFetcher::new(Duration::from_secs(5));
-        let commander = HttpNodeCommander::new(Duration::from_secs(10));
-        let coordinator =
-            DistributedCoordinator::new(discovery, fetcher, commander, config, rate_controller);
-        run_coordinator(
-            coordinator,
-            external_metrics_url.as_deref(),
-            external_metrics_field.as_deref(),
-            metrics_state,
-        )
-    };
-    if std::io::stderr().is_terminal() {
+    if is_tty {
         eprintln!(); // newline after progress
     }
 
-    crate::output::print_distributed_results(&result, output_format);
+    // Fetch and print results.
+    if let Some(entry) = queue.get_entry(&test_id) {
+        if let Some(ref result) = entry.result {
+            crate::output::print_stored_results(result, output_format);
+        }
+    }
 
     Ok(())
 }

@@ -49,8 +49,8 @@ pub fn run(
     delimiter: String,
     no_response: bool,
     mode: String,
-    request_size: Option<u16>,
-    response_size: Option<u32>,
+    request_size: Option<String>,
+    response_size: Option<String>,
     dns_domains: Option<String>,
     dns_query_type: String,
     ramp_warmup: String,
@@ -116,8 +116,7 @@ pub fn run(
             connection_policy: conn_policy,
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(500),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(3),
         error_status_threshold: error_threshold,
         bandwidth_limit_bps: bandwidth_bps,
         http_version,
@@ -203,13 +202,24 @@ pub fn run(
             let tcp_mode = parse_tcp_mode(&mode).context("invalid --mode")?;
             let expect_response = !no_response;
 
-            // Determine payload and sizes based on mode
-            let req_size = request_size.unwrap_or(tcp_payload.len() as u16);
-            let resp_size = response_size.unwrap_or(req_size as u32);
+            // Parse size distributions (bare integer or distribution syntax)
+            let req_size_dist = match &request_size {
+                Some(s) => parse_u16_distribution(s).context("invalid --request-size")?,
+                None => netanvil_types::ValueDistribution::Fixed(tcp_payload.len() as u16),
+            };
+            let resp_size_dist = match &response_size {
+                Some(s) => parse_u32_distribution(s).context("invalid --response-size")?,
+                None => match &req_size_dist {
+                    netanvil_types::ValueDistribution::Fixed(n) => {
+                        netanvil_types::ValueDistribution::Fixed(*n as u32)
+                    }
+                    _ => netanvil_types::ValueDistribution::Fixed(tcp_payload.len() as u32),
+                },
+            };
 
             eprintln!(
-                "  protocol: TCP, mode: {mode}, payload: {} bytes, request: {req_size}, response: {resp_size}",
-                tcp_payload.len()
+                "  protocol: TCP, mode: {mode}, payload: {} bytes, request_size: {:?}, response_size: {:?}",
+                tcp_payload.len(), req_size_dist, resp_size_dist,
             );
 
             config.error_status_threshold = 0; // no HTTP status for TCP
@@ -217,8 +227,8 @@ pub fn run(
                 mode: mode.clone(),
                 payload_hex: encode_hex(&tcp_payload),
                 framing: framing.clone(),
-                request_size: req_size,
-                response_size: resp_size,
+                request_size: req_size_dist.clone(),
+                response_size: resp_size_dist.clone(),
             });
 
             let conn_policy = config.connections.connection_policy.clone();
@@ -243,8 +253,8 @@ pub fn run(
                                 expect_response,
                             )
                             .with_mode(tcp_mode)
-                            .with_request_size(req_size)
-                            .with_response_size(resp_size),
+                            .with_request_size_dist(req_size_dist.clone())
+                            .with_response_size_dist(resp_size_dist.clone()),
                         )
                     })
                 };

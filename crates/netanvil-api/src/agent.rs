@@ -212,6 +212,10 @@ impl AgentServer {
                     handlers::respond_json(request, 409, &ApiResponse::error("no test running"));
                 }
             }
+            ("GET", "/test/result") => {
+                let inner = self.inner.lock().unwrap();
+                handlers::handle_get_result(request, &inner.last_result);
+            }
             ("PUT", "/signal") => {
                 let inner = self.inner.lock().unwrap();
                 handlers::handle_put_signal(request, &inner.shared_state);
@@ -286,6 +290,11 @@ impl AgentServer {
                     let inner = inner.lock().unwrap();
                     let view = handlers::build_metrics_view(&inner.shared_state);
                     json_response(200, &view)
+                }
+                ("GET", "/test/result") => {
+                    let inner_guard = inner.lock().unwrap();
+                    let (status, view) = handlers::build_result_view(&inner_guard.last_result);
+                    json_response(status, &view)
                 }
                 ("PUT", "/rate") => Self::handle_command_mtls(&inner, &req.body, |tx, body| {
                     let rate: serde_json::Value =
@@ -619,8 +628,8 @@ fn run_tcp_test(
     mode_str: &str,
     payload_hex: &str,
     framing_str: &str,
-    request_size: u16,
-    response_size: u32,
+    request_size: netanvil_types::ValueDistribution<u16>,
+    response_size: netanvil_types::ValueDistribution<u32>,
     plugin: Option<&netanvil_types::PluginConfig>,
 ) -> netanvil_types::Result<TestResult> {
     use netanvil_tcp::*;
@@ -679,8 +688,8 @@ fn run_tcp_test(
                     expect_response,
                 )
                 .with_mode(mode)
-                .with_request_size(request_size)
-                .with_response_size(response_size),
+                .with_request_size_dist(request_size.clone())
+                .with_response_size_dist(response_size.clone()),
             )
         })
     };

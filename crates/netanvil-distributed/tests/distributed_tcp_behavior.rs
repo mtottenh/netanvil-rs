@@ -36,14 +36,13 @@ fn make_tcp_test_config(
             request_timeout: Duration::from_secs(10),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(200),
+        control_interval: Duration::from_secs(1),
         protocol: Some(ProtocolConfig::Tcp {
             mode: "rr".to_string(),
             payload_hex: "50494e47".to_string(), // "PING"
             framing: "raw".to_string(),
-            request_size: 4,
-            response_size: 4,
+            request_size: netanvil_types::ValueDistribution::Fixed(4),
+            response_size: netanvil_types::ValueDistribution::Fixed(4),
         }),
         ..Default::default()
     }
@@ -61,7 +60,7 @@ fn distributed_tcp_test_with_two_agents() {
     // Give agents time to start
     std::thread::sleep(Duration::from_millis(500));
 
-    let config = make_tcp_test_config(tcp_server.addr, 100.0, 3);
+    let config = make_tcp_test_config(tcp_server.addr, 100.0, 8);
 
     let discovery = StaticDiscovery::new(vec![
         format!("127.0.0.1:{port1}"),
@@ -122,7 +121,7 @@ fn distributed_udp_test_with_two_agents() {
 
     let config = TestConfig {
         targets: vec![format!("udp://{}", udp_server.addr)],
-        duration: Duration::from_secs(3),
+        duration: Duration::from_secs(8),
         rate: RateConfig::Static { rps: 80.0 },
         num_cores: 1,
         error_status_threshold: 0,
@@ -130,8 +129,7 @@ fn distributed_udp_test_with_two_agents() {
             request_timeout: Duration::from_secs(10),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(200),
+        control_interval: Duration::from_secs(1),
         protocol: Some(ProtocolConfig::Udp {
             payload_hex: "48454c4c4f".to_string(), // "HELLO"
             expect_response: true,

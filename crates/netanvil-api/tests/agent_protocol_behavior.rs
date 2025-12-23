@@ -127,14 +127,13 @@ fn make_tcp_config(
             request_timeout: Duration::from_secs(5),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         protocol: Some(ProtocolConfig::Tcp {
             mode: mode.to_string(),
             payload_hex: payload_hex.to_string(),
             framing: "raw".to_string(),
-            request_size,
-            response_size,
+            request_size: netanvil_types::ValueDistribution::Fixed(request_size),
+            response_size: netanvil_types::ValueDistribution::Fixed(response_size),
         }),
         ..Default::default()
     }
@@ -222,14 +221,13 @@ fn agent_runs_tcp_sink_test() {
             request_timeout: Duration::from_secs(5),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         protocol: Some(ProtocolConfig::Tcp {
             mode: "sink".to_string(),
             payload_hex: "AABBCCDD".to_string(),
             framing: "raw".to_string(),
-            request_size: 1024,
-            response_size: 0,
+            request_size: netanvil_types::ValueDistribution::Fixed(1024),
+            response_size: netanvil_types::ValueDistribution::Fixed(0),
         }),
         ..Default::default()
     };
@@ -268,14 +266,13 @@ fn agent_runs_tcp_source_test() {
             request_timeout: Duration::from_secs(5),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         protocol: Some(ProtocolConfig::Tcp {
             mode: "source".to_string(),
             payload_hex: "".to_string(),
             framing: "raw".to_string(),
-            request_size: 0,
-            response_size: 1024,
+            request_size: netanvil_types::ValueDistribution::Fixed(0),
+            response_size: netanvil_types::ValueDistribution::Fixed(1024),
         }),
         ..Default::default()
     };
@@ -314,8 +311,7 @@ fn agent_runs_udp_test() {
             request_timeout: Duration::from_secs(5),
             ..Default::default()
         },
-        metrics_interval: Duration::from_millis(200),
-        control_interval: Duration::from_millis(100),
+        control_interval: Duration::from_secs(1),
         protocol: Some(ProtocolConfig::Udp {
             payload_hex: "48454c4c4f".to_string(), // "HELLO"
             expect_response: true,

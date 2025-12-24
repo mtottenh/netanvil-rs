@@ -10,7 +10,9 @@
 
 use std::time::{Duration, Instant};
 
-use netanvil_types::{MetricsSummary, RateDecision, TargetMetric};
+use netanvil_types::{
+    ControllerInfo, ControllerType, MetricsSummary, RateController, RateDecision, TargetMetric,
+};
 
 use super::pid_autotune::{AutotuneParams, AutotuningPidController};
 
@@ -89,6 +91,34 @@ impl RampRateController {
             last_time_ceiling: 0.0,
             last_effective_ceiling: 0.0,
             last_slew_capped: false,
+        }
+    }
+
+    pub fn reset_ratchet(&mut self) -> Option<f64> {
+        let old = self.ratcheted_ceiling.take();
+        // Recompute the inner PID's max_rps from the time-based ceiling.
+        if let Some(ref mut pid) = self.inner_pid {
+            pid.set_max_rps(self.last_time_ceiling);
+        }
+        old
+    }
+
+    pub fn set_latency_multiplier(&mut self, multiplier: f64) {
+        self.config.latency_multiplier = multiplier;
+        self.target_p99_ms = self.baseline_p99_ms * multiplier;
+        if let Some(ref mut pid) = self.inner_pid {
+            pid.set_target_value(self.target_p99_ms);
+        }
+    }
+
+    pub fn set_max_error_rate(&mut self, rate: f64) {
+        self.config.max_error_rate = rate;
+    }
+
+    pub fn set_min_rps(&mut self, min_rps: f64) {
+        self.config.min_rps = min_rps;
+        if let Some(ref mut pid) = self.inner_pid {
+            pid.set_min_rps(min_rps);
         }
     }
 
@@ -313,5 +343,102 @@ impl netanvil_types::RateController for RampRateController {
             state.push(("netanvil_ramp_ratcheted_ceiling", rc));
         }
         state
+    }
+
+    fn controller_info(&self) -> ControllerInfo {
+        let phase = match self.state {
+            RampState::Warmup => "warmup",
+            RampState::Ramping => "ramping",
+        };
+
+        ControllerInfo {
+            controller_type: ControllerType::Ramp,
+            current_rps: self.current_rps,
+            editable_actions: vec![
+                "reset_ratchet".into(),
+                "set_latency_multiplier".into(),
+                "set_max_error_rate".into(),
+                "set_max_rps".into(),
+                "set_min_rps".into(),
+            ],
+            params: serde_json::json!({
+                "phase": phase,
+                "baseline_p99_ms": self.baseline_p99_ms,
+                "target_p99_ms": self.target_p99_ms,
+                "latency_multiplier": self.config.latency_multiplier,
+                "max_error_rate": self.config.max_error_rate,
+                "min_rps": self.config.min_rps,
+                "max_rps": self.config.max_rps,
+                "time_ceiling": self.last_time_ceiling,
+                "ratcheted_ceiling": self.ratcheted_ceiling,
+                "effective_ceiling": self.last_effective_ceiling,
+                "slew_capped": self.last_slew_capped,
+            }),
+        }
+    }
+
+    fn apply_update(
+        &mut self,
+        action: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        match action {
+            "reset_ratchet" => {
+                let old = self.reset_ratchet();
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "previous_ratcheted_ceiling": old,
+                    "ratchet_cleared": true,
+                }))
+            }
+            "set_latency_multiplier" => {
+                let multiplier = params.get("multiplier").and_then(|v| v.as_f64())
+                    .ok_or("missing 'multiplier' field")?;
+                let old = self.config.latency_multiplier;
+                self.set_latency_multiplier(multiplier);
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "previous_multiplier": old,
+                    "new_multiplier": multiplier,
+                    "new_target_p99_ms": self.target_p99_ms,
+                }))
+            }
+            "set_max_error_rate" => {
+                let rate = params.get("max_error_rate").and_then(|v| v.as_f64())
+                    .ok_or("missing 'max_error_rate' field")?;
+                let old = self.config.max_error_rate;
+                self.set_max_error_rate(rate);
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "previous_max_error_rate": old,
+                    "new_max_error_rate": rate,
+                }))
+            }
+            "set_max_rps" => {
+                let max = params.get("max_rps").and_then(|v| v.as_f64())
+                    .ok_or("missing 'max_rps' field")?;
+                let old = self.config.max_rps;
+                self.set_max_rps(max);
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "previous_max_rps": old,
+                    "new_max_rps": self.config.max_rps,
+                }))
+            }
+            "set_min_rps" => {
+                let min = params.get("min_rps").and_then(|v| v.as_f64())
+                    .ok_or("missing 'min_rps' field")?;
+                let old = self.config.min_rps;
+                self.set_min_rps(min);
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "previous_min_rps": old,
+                    "new_min_rps": self.config.min_rps,
+                }))
+            }
+            _ => Err(format!(
+                "action '{}' is not valid for controller type 'ramp'", action
+            )),
+        }
     }
 }

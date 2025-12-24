@@ -166,6 +166,8 @@ pub struct Coordinator {
     external_command_rx: Option<flume::Receiver<WorkerCommand>>,
     /// Set to true when an external Stop command is received.
     stopped: bool,
+    /// Hold state: when Held, controller.update() is skipped.
+    hold_state: netanvil_types::HoldState,
     /// Optional external signal source (pull-based), polled each tick.
     /// Returns `(signal_name, signal_value)` pairs to inject into MetricsSummary.
     external_signal_source: Option<crate::SignalSourceFn>,
@@ -211,6 +213,7 @@ impl Coordinator {
             on_progress: None,
             external_command_rx: None,
             stopped: false,
+            hold_state: netanvil_types::HoldState::Released,
             external_signal_source: None,
             pushed_signal_source: None,
             last_timer_dispatched: 0,
@@ -394,7 +397,15 @@ impl Coordinator {
             tracing::info!(signals = ?summary.external_signals, "external signals for rate controller");
         }
 
-        let decision = self.rate_controller.update(&summary);
+        let decision = match self.hold_state {
+            netanvil_types::HoldState::Held { rps } => {
+                // Skip controller.update() — controller state is frozen.
+                RateDecision { target_rps: rps }
+            }
+            netanvil_types::HoldState::Released => {
+                self.rate_controller.update(&summary)
+            }
+        };
 
         // Push this tick's counters into the sliding window for
         // smoothed RPS reporting (API / Prometheus / CLI).
@@ -458,23 +469,66 @@ impl Coordinator {
     fn handle_external_command(&mut self, cmd: WorkerCommand) {
         let timer_cmd = match cmd {
             WorkerCommand::UpdateRate(rps) => {
-                let previous_rps = self.rate_controller.current_rate();
-                self.rate_controller.set_rate(rps);
-                tracing::info!(
-                    previous_rps,
-                    new_rps = rps,
-                    "external rate override applied"
+                // Deprecated: translate to hold semantics.
+                tracing::warn!(
+                    rps,
+                    "UpdateRate is deprecated, use Hold instead"
                 );
-                TimerCommand::UpdateRate(rps)
+                self.hold_state = netanvil_types::HoldState::Held { rps };
+                Some(TimerCommand::UpdateRate(rps))
             }
-            WorkerCommand::UpdateTargets(targets) => TimerCommand::UpdateTargets(targets),
-            WorkerCommand::UpdateMetadata(headers) => TimerCommand::UpdateMetadata(headers),
+            WorkerCommand::UpdateTargets(targets) => {
+                Some(TimerCommand::UpdateTargets(targets))
+            }
+            WorkerCommand::UpdateMetadata(headers) => {
+                Some(TimerCommand::UpdateMetadata(headers))
+            }
             WorkerCommand::Stop => {
                 self.stopped = true;
-                TimerCommand::Stop
+                Some(TimerCommand::Stop)
+            }
+            WorkerCommand::Hold(hold_cmd) => {
+                match hold_cmd {
+                    netanvil_types::HoldCommand::Hold(rps) => {
+                        tracing::info!(rps, "rate hold engaged");
+                        self.hold_state = netanvil_types::HoldState::Held { rps };
+                    }
+                    netanvil_types::HoldCommand::Release => {
+                        tracing::info!(
+                            controller_rps = self.rate_controller.current_rate(),
+                            "rate hold released, resuming controller"
+                        );
+                        self.hold_state = netanvil_types::HoldState::Released;
+                    }
+                }
+                None
+            }
+            WorkerCommand::ControllerUpdate {
+                action,
+                params,
+                response_tx,
+            } => {
+                let result = self.rate_controller.apply_update(&action, &params);
+                let _ = response_tx.send(result);
+                None
+            }
+            WorkerCommand::ControllerInfo { response_tx } => {
+                let info = self.rate_controller.controller_info();
+                let view = netanvil_types::ControllerView {
+                    info,
+                    held: matches!(self.hold_state, netanvil_types::HoldState::Held { .. }),
+                    held_rps: match self.hold_state {
+                        netanvil_types::HoldState::Held { rps } => Some(rps),
+                        netanvil_types::HoldState::Released => None,
+                    },
+                };
+                let _ = response_tx.send(view);
+                None
             }
         };
-        let _ = self.timer_handle.command_tx.send(timer_cmd);
+        if let Some(cmd) = timer_cmd {
+            let _ = self.timer_handle.command_tx.send(cmd);
+        }
     }
 
     /// Send total rate to timer thread — it distributes to schedulers internally.

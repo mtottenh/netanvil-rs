@@ -122,6 +122,19 @@ impl ExplorationManager {
         }
     }
 
+    /// Returns exploration progress as a fraction [0.0, 1.0].
+    pub fn exploration_progress(&self) -> f64 {
+        let total_ticks = if self.control_interval.as_secs_f64() > 0.0 {
+            (self.autotune_duration.as_secs_f64() / self.control_interval.as_secs_f64()) as u32
+        } else {
+            1
+        };
+        if total_ticks == 0 {
+            return 1.0;
+        }
+        (self.tick_count as f64 / total_ticks as f64).min(1.0)
+    }
+
     /// Returns the rate to use this tick, or None if exploration is done.
     pub fn tick(&mut self, summary: &MetricsSummary) -> Option<f64> {
         self.tick_count += 1;

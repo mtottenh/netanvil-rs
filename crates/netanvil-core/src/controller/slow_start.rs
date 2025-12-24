@@ -10,7 +10,7 @@
 
 use std::time::{Duration, Instant};
 
-use netanvil_types::{MetricsSummary, RateController, RateDecision};
+use netanvil_types::{ControllerInfo, MetricsSummary, RateController, RateDecision};
 
 /// Generic slow-start wrapper. Ramps the inner controller's ceiling
 /// from `ramp_start` to `ramp_end` over `ramp_duration`, and caps
@@ -101,6 +101,24 @@ impl<C: RateController> RateController for SlowStart<C> {
 
     fn set_max_rps(&mut self, max_rps: f64) {
         self.ramp_end = max_rps;
+    }
+
+    fn controller_info(&self) -> ControllerInfo {
+        self.inner.controller_info()
+    }
+
+    fn apply_update(
+        &mut self,
+        action: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        // Forward set_max_rps to SlowStart's own ramp_end as well.
+        if action == "set_max_rps" {
+            if let Some(max) = params.get("max_rps").and_then(|v| v.as_f64()) {
+                self.ramp_end = max;
+            }
+        }
+        self.inner.apply_update(action, params)
     }
 }
 

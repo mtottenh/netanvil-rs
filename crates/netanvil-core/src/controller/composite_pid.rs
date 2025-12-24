@@ -10,7 +10,8 @@
 use std::time::Duration;
 
 use netanvil_types::{
-    MetricsSummary, PidConstraint, PidGains, RateController, RateDecision, TargetMetric,
+    ControllerInfo, ControllerType, MetricsSummary, PidConstraint, PidGains, RateController,
+    RateDecision, TargetMetric,
 };
 
 use super::autotune::{
@@ -148,6 +149,72 @@ impl CompositePidController {
                 smoothing,
             },
         }
+    }
+
+    pub fn set_constraint_limit(
+        &mut self,
+        index: usize,
+        limit: f64,
+    ) -> Result<f64, String> {
+        match &mut self.phase {
+            Phase::Active { constraints } => {
+                if index >= constraints.len() {
+                    return Err(format!(
+                        "constraint_index {} out of range (0..{})",
+                        index,
+                        constraints.len()
+                    ));
+                }
+                let old = constraints[index].limit;
+                constraints[index].limit = limit;
+                Ok(old)
+            }
+            Phase::Exploring { .. } => {
+                Err("cannot modify constraints during exploration".into())
+            }
+        }
+    }
+
+    pub fn set_constraint_gains(
+        &mut self,
+        index: usize,
+        kp: f64,
+        ki: f64,
+        kd: f64,
+    ) -> Result<(), String> {
+        match &mut self.phase {
+            Phase::Active { constraints } => {
+                if index >= constraints.len() {
+                    return Err(format!(
+                        "constraint_index {} out of range (0..{})",
+                        index,
+                        constraints.len()
+                    ));
+                }
+                constraints[index].kp = kp;
+                constraints[index].ki = ki;
+                constraints[index].kd = kd;
+                Ok(())
+            }
+            Phase::Exploring { .. } => {
+                Err("cannot modify constraints during exploration".into())
+            }
+        }
+    }
+
+    pub fn set_min_rps(&mut self, min_rps: f64) {
+        self.min_rps = min_rps;
+        if self.min_rps > self.max_rps {
+            self.min_rps = self.max_rps;
+        }
+    }
+
+    fn find_constraint_index_by_metric(&self, metric_name: &str) -> Option<usize> {
+        let constraints = match &self.phase {
+            Phase::Active { constraints } => constraints,
+            Phase::Exploring { manual_constraints, .. } => manual_constraints,
+        };
+        constraints.iter().position(|c| format!("{:?}", c.metric) == metric_name)
     }
 
     /// Run the composite PID logic: compute each constraint's desired rate,
@@ -403,6 +470,148 @@ impl RateController for CompositePidController {
         self.max_rps = max_rps.max(self.min_rps);
         if self.current_rps > self.max_rps {
             self.current_rps = self.max_rps;
+        }
+    }
+
+    fn controller_info(&self) -> ControllerInfo {
+        let is_exploring = matches!(self.phase, Phase::Exploring { .. });
+
+        let params = match &self.phase {
+            Phase::Exploring {
+                manager,
+                manual_constraints,
+                ..
+            } => {
+                let progress = manager.exploration_progress();
+                let constraints_json: Vec<serde_json::Value> = manual_constraints
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        serde_json::json!({
+                            "index": i,
+                            "metric": format!("{:?}", c.metric),
+                            "limit": c.limit,
+                            "gains": {"kp": c.kp, "ki": c.ki, "kd": c.kd},
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "phase": "exploring",
+                    "min_rps": self.min_rps,
+                    "max_rps": self.max_rps,
+                    "exploration_progress": progress,
+                    "manual_constraints": constraints_json,
+                })
+            }
+            Phase::Active { constraints } => {
+                // Find binding constraint (lowest desired rate from last tick)
+                let constraints_json: Vec<serde_json::Value> = constraints
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        serde_json::json!({
+                            "index": i,
+                            "metric": format!("{:?}", c.metric),
+                            "limit": c.limit,
+                            "gains": {"kp": c.kp, "ki": c.ki, "kd": c.kd},
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "phase": "active",
+                    "min_rps": self.min_rps,
+                    "max_rps": self.max_rps,
+                    "constraints": constraints_json,
+                })
+            }
+        };
+
+        let editable = if is_exploring {
+            vec!["set_max_rps".into(), "set_min_rps".into()]
+        } else {
+            vec![
+                "set_constraint_limit".into(),
+                "set_constraint_gains".into(),
+                "set_max_rps".into(),
+                "set_min_rps".into(),
+            ]
+        };
+
+        ControllerInfo {
+            controller_type: ControllerType::CompositePid,
+            current_rps: self.current_rps,
+            editable_actions: editable,
+            params,
+        }
+    }
+
+    fn apply_update(
+        &mut self,
+        action: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        match action {
+            "set_constraint_limit" => {
+                let index = if let Some(idx) = params.get("constraint_index").and_then(|v| v.as_u64()) {
+                    idx as usize
+                } else if let Some(metric) = params.get("metric").and_then(|v| v.as_str()) {
+                    self.find_constraint_index_by_metric(metric)
+                        .ok_or_else(|| format!("no constraint with metric '{}'", metric))?
+                } else {
+                    return Err("missing 'constraint_index' or 'metric' field".into());
+                };
+                let limit = params.get("limit").and_then(|v| v.as_f64())
+                    .ok_or("missing 'limit' field")?;
+                let old = self.set_constraint_limit(index, limit)?;
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "constraint_index": index,
+                    "previous_limit": old,
+                    "new_limit": limit,
+                }))
+            }
+            "set_constraint_gains" => {
+                let index = params.get("constraint_index")
+                    .and_then(|v| v.as_u64())
+                    .ok_or("missing 'constraint_index' field")? as usize;
+                let kp = params.get("kp").and_then(|v| v.as_f64())
+                    .ok_or("missing 'kp' field")?;
+                let ki = params.get("ki").and_then(|v| v.as_f64())
+                    .ok_or("missing 'ki' field")?;
+                let kd = params.get("kd").and_then(|v| v.as_f64())
+                    .ok_or("missing 'kd' field")?;
+                self.set_constraint_gains(index, kp, ki, kd)?;
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "constraint_index": index,
+                    "new_gains": {"kp": kp, "ki": ki, "kd": kd},
+                }))
+            }
+            "set_max_rps" => {
+                let max = params.get("max_rps").and_then(|v| v.as_f64())
+                    .ok_or("missing 'max_rps' field")?;
+                let old = self.max_rps;
+                self.set_max_rps(max);
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "previous_max_rps": old,
+                    "new_max_rps": self.max_rps,
+                }))
+            }
+            "set_min_rps" => {
+                let min = params.get("min_rps").and_then(|v| v.as_f64())
+                    .ok_or("missing 'min_rps' field")?;
+                let old = self.min_rps;
+                self.set_min_rps(min);
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "previous_min_rps": old,
+                    "new_min_rps": self.min_rps,
+                }))
+            }
+            _ => Err(format!(
+                "action '{}' is not valid for controller type 'composite_pid'", action
+            )),
         }
     }
 }

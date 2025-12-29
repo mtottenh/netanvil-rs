@@ -1,25 +1,32 @@
 //! Agent server: a remotely controllable load test node.
 //!
-//! Wraps the existing `ControlServer` with lifecycle management.
+//! Wraps the existing control endpoints with lifecycle management.
 //! Accepts `POST /test/start` to begin a test, `GET /info` for node info,
-//! plus all existing control endpoints (`GET /metrics`, `PUT /rate`, `POST /stop`).
+//! plus all control endpoints (`GET /metrics`, `PUT /rate`, `POST /stop`).
 //!
-//! Supports two modes:
-//! - **Plain HTTP** (default): uses tiny_http, no authentication
-//! - **mTLS**: uses custom TLS server with client certificate verification
+//! Supports two modes via a unified axum router:
+//! - **Plain HTTP** (default): standard TCP listener
+//! - **TLS/mTLS**: axum-server with rustls, client certificate verification
 //!
 //! Lifecycle: idle → POST /test/start → running → (test ends or POST /stop) → idle
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use axum::extract::rejection::JsonRejection;
+use axum::extract::State;
+use axum::http::{header, StatusCode};
+use axum::response::IntoResponse;
+use axum::routing::{get, post, put};
+use axum::{Json, Router};
 use netanvil_core::{TestBuilder, TestResult};
 use netanvil_http::HttpExecutor;
 use netanvil_types::{
-    NodeId, NodeInfo, NodeState, PluginType, RequestGenerator, TestConfig, TlsConfig, WorkerCommand,
+    ControllerView, HoldCommand, NodeId, NodeInfo, NodeState, PluginType, RequestGenerator,
+    TestConfig, TlsConfig, WorkerCommand,
 };
 
 use crate::handlers;
-use crate::tls::{HttpRequest, HttpResponse, MtlsServer};
 use crate::types::*;
 
 /// Internal state for agent lifecycle.
@@ -36,17 +43,22 @@ struct AgentInner {
     last_result: Option<TestResult>,
 }
 
+/// Shared state for agent axum handlers.
+#[derive(Clone)]
+pub struct AgentState {
+    inner: Arc<Mutex<AgentInner>>,
+}
+
 /// Agent server: long-lived HTTP server that accepts tests on demand.
 ///
-/// Create with `new()` for plain HTTP or `with_tls()` for mTLS.
-/// When running mTLS, an optional plain HTTP metrics-only listener can be
+/// Create with `new()` for plain HTTP or `with_tls()` for TLS/mTLS.
+/// When running TLS, an optional plain HTTP metrics-only listener can be
 /// started on a separate port so Prometheus can scrape without client certs.
 pub struct AgentServer {
-    /// Plain HTTP server (used when no TLS configured).
-    http_server: Option<tiny_http::Server>,
-    /// mTLS server (used when TLS configured).
-    mtls_server: Option<MtlsServer>,
-    /// Optional plain HTTP port for Prometheus metrics when running mTLS.
+    bind_addr: String,
+    /// TLS server config (None = plain HTTP).
+    tls_config: Option<Arc<rustls::ServerConfig>>,
+    /// Optional plain HTTP port for Prometheus metrics when running TLS.
     metrics_port: Option<u16>,
     inner: Arc<Mutex<AgentInner>>,
 }
@@ -57,20 +69,17 @@ impl AgentServer {
     /// `bind_addr` is the address to listen on (e.g. "0.0.0.0:9090" or "10.0.0.2:9090").
     /// `node_id` is an optional human-readable identifier for metrics/logging.
     pub fn new(bind_addr: &str, cores: usize, node_id: Option<String>) -> std::io::Result<Self> {
-        let server = tiny_http::Server::http(bind_addr)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::AddrInUse, e.to_string()))?;
-
         let inner = make_inner(bind_addr, cores, node_id);
 
         Ok(Self {
-            http_server: Some(server),
-            mtls_server: None,
+            bind_addr: bind_addr.to_string(),
+            tls_config: None,
             metrics_port: None,
             inner,
         })
     }
 
-    /// Create an mTLS agent with client certificate verification.
+    /// Create a TLS/mTLS agent with client certificate verification.
     ///
     /// `bind_addr` is the address to listen on (e.g. "0.0.0.0:9090" or "10.0.0.2:9090").
     /// `node_id` is an optional human-readable identifier for metrics/logging.
@@ -80,21 +89,21 @@ impl AgentServer {
         node_id: Option<String>,
         tls: &TlsConfig,
     ) -> std::io::Result<Self> {
-        let server = MtlsServer::new(bind_addr, tls)
-            .map_err(|e| std::io::Error::other(format!("mTLS setup: {e}")))?;
+        let tls_config = crate::tls::build_server_config(tls)
+            .map_err(|e| std::io::Error::other(format!("TLS setup: {e}")))?;
 
         let inner = make_inner(bind_addr, cores, node_id);
 
         Ok(Self {
-            http_server: None,
-            mtls_server: Some(server),
+            bind_addr: bind_addr.to_string(),
+            tls_config: Some(tls_config),
             metrics_port: None,
             inner,
         })
     }
 
     /// Set a plain HTTP port for Prometheus metrics scraping.
-    /// Only meaningful when running in mTLS mode — in plain HTTP mode,
+    /// Only meaningful when running in TLS mode — in plain HTTP mode,
     /// `/metrics/prometheus` is already available on the main port.
     pub fn set_metrics_port(&mut self, port: u16) {
         self.metrics_port = Some(port);
@@ -109,286 +118,338 @@ impl AgentServer {
         }
 
         // If a metrics-only port is configured, spawn a plain HTTP server
-        // for Prometheus scraping (useful when the main server uses mTLS).
+        // for Prometheus scraping (useful when the main server uses TLS).
         if let Some(port) = self.metrics_port {
             self.spawn_metrics_server(port);
         }
 
-        if let Some(ref http) = self.http_server {
-            tracing::info!("agent listening on {} (plain HTTP)", http.server_addr());
-            self.run_http(http);
-        } else if let Some(ref mtls) = self.mtls_server {
-            tracing::info!("agent listening (mTLS)");
-            self.run_mtls(mtls);
-        }
-    }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio current_thread runtime for agent");
 
-    /// Spawn a plain HTTP server on a background thread that only serves
-    /// `/metrics/prometheus`. Used so Prometheus can scrape mTLS agents.
-    fn spawn_metrics_server(&self, port: u16) {
-        let addr = format!("0.0.0.0:{port}");
-        let server = match tiny_http::Server::http(&addr) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(port, "failed to start metrics-only server: {e}");
-                return;
-            }
+        let state = AgentState {
+            inner: self.inner.clone(),
         };
+        let router = agent_router(state);
+        let bind_addr = self.bind_addr.clone();
+        let tls_config = self.tls_config.clone();
 
-        tracing::info!(port, "metrics-only server listening (plain HTTP)");
-
-        let inner = self.inner.clone();
-        std::thread::Builder::new()
-            .name("agent-metrics-http".into())
-            .spawn(move || {
-                for request in server.incoming_requests() {
-                    let path = request.url().to_string();
-                    match path.as_str() {
-                        "/metrics/prometheus" | "/metrics" => {
-                            let agent = inner.lock().unwrap();
-                            handlers::handle_get_metrics_prometheus(request, &agent.shared_state);
-                        }
-                        _ => handlers::handle_not_found(request),
-                    }
-                }
-            })
-            .unwrap_or_else(|e| panic!("failed to spawn metrics server thread: {e}"));
-    }
-
-    // --- Plain HTTP mode (tiny_http) ----------------------------------------
-
-    fn run_http(&self, server: &tiny_http::Server) {
-        loop {
-            let request = match server.recv() {
-                Ok(req) => req,
-                Err(_) => break,
-            };
-            self.handle_tiny_http(request);
-        }
-    }
-
-    fn handle_tiny_http(&self, request: tiny_http::Request) {
-        let method = request.method().as_str().to_uppercase();
-        let path = request.url().to_string();
-
-        tracing::debug!("{method} {path}");
-
-        match (method.as_str(), path.as_str()) {
-            ("POST", "/test/start") => self.handle_start_test_http(request),
-            ("GET", "/info") => self.handle_get_info_http(request),
-            ("GET", "/status") => {
-                let inner = self.inner.lock().unwrap();
-                handlers::handle_get_status(request, &inner.shared_state);
-            }
-            ("GET", "/metrics") => {
-                let inner = self.inner.lock().unwrap();
-                handlers::handle_get_metrics(request, &inner.shared_state);
-            }
-            ("GET", "/metrics/prometheus") => {
-                let inner = self.inner.lock().unwrap();
-                handlers::handle_get_metrics_prometheus(request, &inner.shared_state);
-            }
-            ("PUT", "/rate") => {
-                let inner = self.inner.lock().unwrap();
-                if let Some(ref tx) = inner.command_tx {
-                    handlers::handle_put_rate(request, tx);
-                } else {
-                    handlers::respond_json(request, 409, &ApiResponse::error("no test running"));
-                }
-            }
-            ("PUT", "/targets") => {
-                let inner = self.inner.lock().unwrap();
-                if let Some(ref tx) = inner.command_tx {
-                    handlers::handle_put_targets(request, tx);
-                } else {
-                    handlers::respond_json(request, 409, &ApiResponse::error("no test running"));
-                }
-            }
-            ("PUT", "/headers") => {
-                let inner = self.inner.lock().unwrap();
-                if let Some(ref tx) = inner.command_tx {
-                    handlers::handle_put_headers(request, tx);
-                } else {
-                    handlers::respond_json(request, 409, &ApiResponse::error("no test running"));
-                }
-            }
-            ("GET", "/test/result") => {
-                let inner = self.inner.lock().unwrap();
-                handlers::handle_get_result(request, &inner.last_result);
-            }
-            ("PUT", "/signal") => {
-                let inner = self.inner.lock().unwrap();
-                handlers::handle_put_signal(request, &inner.shared_state);
-            }
-            ("POST", "/stop") => {
-                let inner = self.inner.lock().unwrap();
-                if let Some(ref tx) = inner.command_tx {
-                    handlers::handle_post_stop(request, tx);
-                } else {
-                    handlers::respond_json(request, 409, &ApiResponse::error("no test running"));
-                }
-            }
-            _ => handlers::handle_not_found(request),
-        }
-    }
-
-    fn handle_start_test_http(&self, request: tiny_http::Request) {
-        let mut body = String::new();
-        let mut request = request;
-        if let Err(e) = request.as_reader().read_to_string(&mut body) {
-            handlers::respond_json(
-                request,
-                400,
-                &ApiResponse::error(format!("read error: {e}")),
-            );
-            return;
-        }
-        let test_config: TestConfig = match serde_json::from_str(&body) {
-            Ok(c) => c,
-            Err(e) => {
-                handlers::respond_json(
-                    request,
-                    400,
-                    &ApiResponse::error(format!("invalid TestConfig JSON: {e}")),
-                );
-                return;
-            }
-        };
-
-        match self.start_test(test_config) {
-            Ok(()) => handlers::respond_json(request, 200, &ApiResponse::success()),
-            Err(msg) => handlers::respond_json(request, 409, &ApiResponse::error(msg)),
-        }
-    }
-
-    fn handle_get_info_http(&self, request: tiny_http::Request) {
-        let info = self.node_info();
-        handlers::respond_json(request, 200, &info);
-    }
-
-    // --- mTLS mode ----------------------------------------------------------
-
-    fn run_mtls(&self, server: &MtlsServer) {
-        let inner = self.inner.clone();
-        server.serve(move |req| {
-            let method = req.method.as_str();
-            let path = req.path.as_str();
-            tracing::debug!("{method} {path} (mTLS)");
-
-            match (method, path) {
-                ("POST", "/test/start") => Self::handle_start_test_mtls(&inner, &req),
-                ("GET", "/info") => {
-                    let info = Self::node_info_from(&inner);
-                    json_response(200, &info)
-                }
-                ("GET", "/status") => {
-                    let inner = inner.lock().unwrap();
-                    let view = handlers::build_status_view(&inner.shared_state);
-                    json_response(200, &view)
-                }
-                ("GET", "/metrics") => {
-                    let inner = inner.lock().unwrap();
-                    let view = handlers::build_metrics_view(&inner.shared_state);
-                    json_response(200, &view)
-                }
-                ("GET", "/test/result") => {
-                    let inner_guard = inner.lock().unwrap();
-                    let (status, view) = handlers::build_result_view(&inner_guard.last_result);
-                    json_response(status, &view)
-                }
-                ("PUT", "/rate") => Self::handle_command_mtls(&inner, &req.body, |tx, body| {
-                    let rate: serde_json::Value =
-                        serde_json::from_slice(body).map_err(|e| format!("bad JSON: {e}"))?;
-                    let rps = rate["rps"].as_f64().ok_or("missing 'rps' field")?;
-                    tx.send(WorkerCommand::UpdateRate(rps))
-                        .map_err(|e| format!("send: {e}"))?;
-                    Ok(())
-                }),
-                ("PUT", "/targets") => Self::handle_command_mtls(&inner, &req.body, |tx, body| {
-                    #[derive(serde::Deserialize)]
-                    struct R {
-                        targets: Vec<String>,
-                    }
-                    let r: R =
-                        serde_json::from_slice(body).map_err(|e| format!("bad JSON: {e}"))?;
-                    tx.send(WorkerCommand::UpdateTargets(r.targets))
-                        .map_err(|e| format!("send: {e}"))?;
-                    Ok(())
-                }),
-                ("PUT", "/headers") => Self::handle_command_mtls(&inner, &req.body, |tx, body| {
-                    #[derive(serde::Deserialize)]
-                    struct R {
-                        headers: Vec<(String, String)>,
-                    }
-                    let r: R =
-                        serde_json::from_slice(body).map_err(|e| format!("bad JSON: {e}"))?;
-                    tx.send(WorkerCommand::UpdateMetadata(r.headers))
-                        .map_err(|e| format!("send: {e}"))?;
-                    Ok(())
-                }),
-                ("POST", "/stop") => {
-                    let inner_guard = inner.lock().unwrap();
-                    if let Some(ref tx) = inner_guard.command_tx {
-                        let _ = tx.send(WorkerCommand::Stop);
-                        json_response(200, &ApiResponse::success())
-                    } else {
-                        json_response(409, &ApiResponse::error("no test running"))
-                    }
-                }
-                _ => HttpResponse::error(404, r#"{"error":"not found"}"#),
+        rt.block_on(async move {
+            if let Some(tls_config) = tls_config {
+                let rustls_config =
+                    axum_server::tls_rustls::RustlsConfig::from_config(tls_config);
+                tracing::info!("agent listening on {bind_addr} (TLS)");
+                axum_server::bind_rustls(bind_addr.parse().expect("parse bind addr"), rustls_config)
+                    .serve(router.into_make_service())
+                    .await
+                    .expect("agent TLS serve");
+            } else {
+                let listener = tokio::net::TcpListener::bind(&bind_addr)
+                    .await
+                    .expect("bind agent");
+                tracing::info!("agent listening on {bind_addr} (plain HTTP)");
+                axum::serve(listener, router).await.expect("agent serve");
             }
         });
     }
 
-    fn handle_start_test_mtls(inner: &Arc<Mutex<AgentInner>>, req: &HttpRequest) -> HttpResponse {
-        let test_config: TestConfig = match serde_json::from_slice(&req.body) {
-            Ok(c) => c,
-            Err(e) => return json_response(400, &ApiResponse::error(format!("bad JSON: {e}"))),
-        };
+    /// Spawn a plain HTTP server on a background thread that only serves
+    /// `/metrics/prometheus`. Used so Prometheus can scrape TLS agents.
+    fn spawn_metrics_server(&self, port: u16) {
+        let inner = self.inner.clone();
 
-        match start_test_inner(inner, test_config) {
-            Ok(()) => json_response(200, &ApiResponse::success()),
-            Err(msg) => json_response(409, &ApiResponse::error(msg)),
-        }
-    }
+        tracing::info!(port, "metrics-only server listening (plain HTTP)");
 
-    fn handle_command_mtls(
-        inner: &Arc<Mutex<AgentInner>>,
-        body: &[u8],
-        f: impl FnOnce(&flume::Sender<WorkerCommand>, &[u8]) -> Result<(), String>,
-    ) -> HttpResponse {
-        let inner_guard = inner.lock().unwrap();
-        if let Some(ref tx) = inner_guard.command_tx {
-            match f(tx, body) {
-                Ok(()) => json_response(200, &ApiResponse::success()),
-                Err(e) => json_response(400, &ApiResponse::error(e)),
-            }
-        } else {
-            json_response(409, &ApiResponse::error("no test running"))
-        }
-    }
+        std::thread::Builder::new()
+            .name("agent-metrics-http".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime for metrics server");
 
-    // --- Shared logic -------------------------------------------------------
+                rt.block_on(async move {
+                    let state = AgentState { inner };
+                    let app = Router::new()
+                        .route("/metrics/prometheus", get(get_metrics_prometheus))
+                        .route("/metrics", get(get_metrics))
+                        .with_state(state);
 
-    /// Start a test (shared between HTTP and mTLS modes).
-    fn start_test(&self, test_config: TestConfig) -> Result<(), String> {
-        start_test_inner(&self.inner, test_config)
-    }
-
-    fn node_info(&self) -> NodeInfo {
-        Self::node_info_from(&self.inner)
-    }
-
-    fn node_info_from(inner: &Arc<Mutex<AgentInner>>) -> NodeInfo {
-        let inner = inner.lock().unwrap();
-        NodeInfo {
-            id: inner.node_id.clone(),
-            addr: inner.listen_addr.clone(),
-            cores: inner.cores,
-            state: inner.state,
-        }
+                    let addr = format!("0.0.0.0:{port}");
+                    let listener = tokio::net::TcpListener::bind(&addr)
+                        .await
+                        .expect("bind metrics server");
+                    axum::serve(listener, app).await.expect("metrics serve");
+                });
+            })
+            .unwrap_or_else(|e| panic!("failed to spawn metrics server thread: {e}"));
     }
 }
+
+/// Build the agent API router.
+fn agent_router(state: AgentState) -> Router {
+    Router::new()
+        .route("/test/start", post(post_test_start))
+        .route("/info", get(get_info))
+        .route("/status", get(get_status))
+        .route("/metrics", get(get_metrics))
+        .route("/metrics/prometheus", get(get_metrics_prometheus))
+        .route("/rate", put(put_rate))
+        .route("/hold", put(put_hold).delete(delete_hold))
+        .route("/controller", get(get_controller).put(put_controller))
+        .route("/targets", put(put_targets))
+        .route("/headers", put(put_headers))
+        .route("/test/result", get(get_test_result))
+        .route("/signal", put(put_signal))
+        .route("/stop", post(post_stop))
+        .fallback(handle_not_found)
+        .with_state(state)
+}
+
+async fn handle_not_found() -> impl IntoResponse {
+    (StatusCode::NOT_FOUND, Json(ApiResponse::error("not found")))
+}
+
+/// Extract JSON body, returning our ApiResponse format on parse failure.
+fn json_or_error<T: serde::de::DeserializeOwned>(
+    result: Result<Json<T>, JsonRejection>,
+) -> Result<T, (StatusCode, Json<ApiResponse>)> {
+    match result {
+        Ok(Json(v)) => Ok(v),
+        Err(rejection) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(format!("invalid JSON: {rejection}"))),
+        )),
+    }
+}
+
+/// Helper: get command_tx from inner, or 409 if no test running.
+fn require_command_tx(
+    inner: &Mutex<AgentInner>,
+) -> Result<flume::Sender<WorkerCommand>, (StatusCode, Json<ApiResponse>)> {
+    let guard = inner.lock().unwrap();
+    guard
+        .command_tx
+        .clone()
+        .ok_or_else(|| {
+            (
+                StatusCode::CONFLICT,
+                Json(ApiResponse::error("no test running")),
+            )
+        })
+}
+
+// --- Handlers ---------------------------------------------------------------
+
+async fn get_status(State(state): State<AgentState>) -> Json<TestStatus> {
+    let inner = state.inner.lock().unwrap();
+    Json(inner.shared_state.get_status())
+}
+
+async fn get_metrics(State(state): State<AgentState>) -> impl IntoResponse {
+    let inner = state.inner.lock().unwrap();
+    match inner.shared_state.get_metrics() {
+        Some(metrics) => Json(serde_json::to_value(metrics).unwrap()).into_response(),
+        None => Json(ApiResponse::error("no metrics yet")).into_response(),
+    }
+}
+
+async fn get_metrics_prometheus(State(state): State<AgentState>) -> impl IntoResponse {
+    let inner = state.inner.lock().unwrap();
+    let body = handlers::build_prometheus_body(&inner.shared_state);
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+}
+
+async fn get_info(State(state): State<AgentState>) -> Json<NodeInfo> {
+    let inner = state.inner.lock().unwrap();
+    Json(NodeInfo {
+        id: inner.node_id.clone(),
+        addr: inner.listen_addr.clone(),
+        cores: inner.cores,
+        state: inner.state,
+    })
+}
+
+async fn post_test_start(
+    State(state): State<AgentState>,
+    body: Result<Json<TestConfig>, JsonRejection>,
+) -> impl IntoResponse {
+    let config = match json_or_error(body) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+
+    // start_test_inner spawns the test thread and waits for readiness.
+    // The readiness wait is async to avoid blocking the tokio runtime.
+    match start_test_async(&state.inner, config).await {
+        Ok(()) => Json(ApiResponse::success()).into_response(),
+        Err(msg) => (StatusCode::CONFLICT, Json(ApiResponse::error(msg))).into_response(),
+    }
+}
+
+async fn get_test_result(State(state): State<AgentState>) -> impl IntoResponse {
+    let inner = state.inner.lock().unwrap();
+    match &inner.last_result {
+        Some(r) => Json(serde_json::to_value(r).unwrap()).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("no test result available")),
+        )
+            .into_response(),
+    }
+}
+
+async fn put_rate(
+    State(state): State<AgentState>,
+    body: Result<Json<UpdateRateRequest>, JsonRejection>,
+) -> impl IntoResponse {
+    let body = json_or_error(body)?;
+    let tx = require_command_tx(&state.inner)?;
+    tracing::warn!(rps = body.rps, "PUT /rate is deprecated, use PUT /hold instead");
+    let _ = tx.send(WorkerCommand::Hold(HoldCommand::Hold(body.rps)));
+    Ok::<_, (StatusCode, Json<ApiResponse>)>(Json(ApiResponse::success()))
+}
+
+async fn put_hold(
+    State(state): State<AgentState>,
+    body: Result<Json<UpdateRateRequest>, JsonRejection>,
+) -> impl IntoResponse {
+    let body = json_or_error(body)?;
+    let tx = require_command_tx(&state.inner)?;
+    let _ = tx.send(WorkerCommand::Hold(HoldCommand::Hold(body.rps)));
+    Ok::<_, (StatusCode, Json<ApiResponse>)>(Json(serde_json::json!({
+        "ok": true,
+        "held_rps": body.rps,
+        "controller_paused": true,
+    })))
+}
+
+async fn delete_hold(State(state): State<AgentState>) -> impl IntoResponse {
+    let tx = require_command_tx(&state.inner)?;
+    let _ = tx.send(WorkerCommand::Hold(HoldCommand::Release));
+    Ok::<_, (StatusCode, Json<ApiResponse>)>(
+        Json(serde_json::json!({"ok": true, "resumed": true})),
+    )
+}
+
+async fn get_controller(State(state): State<AgentState>) -> impl IntoResponse {
+    let tx = match require_command_tx(&state.inner) {
+        Ok(tx) => tx,
+        Err(e) => return e.into_response(),
+    };
+    let (response_tx, response_rx) = flume::bounded::<ControllerView>(1);
+    let _ = tx.send(WorkerCommand::ControllerInfo { response_tx });
+    match tokio::time::timeout(Duration::from_secs(10), response_rx.recv_async()).await {
+        Ok(Ok(view)) => Json(serde_json::to_value(view).unwrap()).into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error("timeout waiting for coordinator")),
+        )
+            .into_response(),
+    }
+}
+
+async fn put_controller(
+    State(state): State<AgentState>,
+    body: Result<Json<serde_json::Value>, JsonRejection>,
+) -> impl IntoResponse {
+    let body = match json_or_error(body) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let action = match body.get("action").and_then(|v| v.as_str()) {
+        Some(a) => a.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"ok": false, "error": "missing 'action' field"})),
+            )
+                .into_response()
+        }
+    };
+    let tx = match require_command_tx(&state.inner) {
+        Ok(tx) => tx,
+        Err(e) => return e.into_response(),
+    };
+    let (response_tx, response_rx) = flume::bounded(1);
+    let _ = tx.send(WorkerCommand::ControllerUpdate {
+        action,
+        params: body,
+        response_tx,
+    });
+    match tokio::time::timeout(Duration::from_secs(10), response_rx.recv_async()).await {
+        Ok(Ok(Ok(response))) => Json(response).into_response(),
+        Ok(Ok(Err(e))) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"ok": false, "error": e})),
+        )
+            .into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error("timeout waiting for coordinator")),
+        )
+            .into_response(),
+    }
+}
+
+async fn put_targets(
+    State(state): State<AgentState>,
+    body: Result<Json<UpdateTargetsRequest>, JsonRejection>,
+) -> impl IntoResponse {
+    let body = match json_or_error(body) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    if body.targets.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("targets must not be empty")),
+        )
+            .into_response();
+    }
+    let tx = match require_command_tx(&state.inner) {
+        Ok(tx) => tx,
+        Err(e) => return e.into_response(),
+    };
+    let _ = tx.send(WorkerCommand::UpdateTargets(body.targets));
+    Json(ApiResponse::success()).into_response()
+}
+
+async fn put_headers(
+    State(state): State<AgentState>,
+    body: Result<Json<UpdateMetadataRequest>, JsonRejection>,
+) -> impl IntoResponse {
+    let body = json_or_error(body)?;
+    let tx = require_command_tx(&state.inner)?;
+    let _ = tx.send(WorkerCommand::UpdateMetadata(body.headers));
+    Ok::<_, (StatusCode, Json<ApiResponse>)>(Json(ApiResponse::success()))
+}
+
+async fn put_signal(
+    State(state): State<AgentState>,
+    body: Result<Json<PushSignalRequest>, JsonRejection>,
+) -> impl IntoResponse {
+    let body = json_or_error(body)?;
+    tracing::debug!(name = %body.name, value = body.value, "received pushed signal");
+    let inner = state.inner.lock().unwrap();
+    inner.shared_state.push_signal(body.name, body.value);
+    Ok::<_, (StatusCode, Json<ApiResponse>)>(Json(ApiResponse::success()))
+}
+
+async fn post_stop(State(state): State<AgentState>) -> impl IntoResponse {
+    let tx = require_command_tx(&state.inner)?;
+    let _ = tx.send(WorkerCommand::Stop);
+    Ok::<_, (StatusCode, Json<ApiResponse>)>(Json(ApiResponse::success()))
+}
+
+// --- Shared logic -----------------------------------------------------------
 
 fn make_inner(bind_addr: &str, cores: usize, node_id: Option<String>) -> Arc<Mutex<AgentInner>> {
     let node_id = node_id.unwrap_or_else(|| {
@@ -410,14 +471,40 @@ fn make_inner(bind_addr: &str, cores: usize, node_id: Option<String>) -> Arc<Mut
     }))
 }
 
-/// Start a test on a background thread (shared between HTTP and mTLS modes).
+/// Start a test with async readiness waiting (for use in axum handlers).
 ///
-/// Dispatches to the appropriate protocol executor based on `test_config.protocol`:
-/// - `None` -> HTTP (default)
-/// - `Some(ProtocolConfig::Tcp { .. })` -> TCP executor with connection pool
-/// - `Some(ProtocolConfig::Udp { .. })` -> UDP executor
-/// - `Some(ProtocolConfig::Dns { .. })` -> DNS executor (UDP queries)
-fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> Result<(), String> {
+/// Spawns the test on a background std::thread and waits asynchronously
+/// for the coordinator to signal readiness.
+async fn start_test_async(
+    inner: &Arc<Mutex<AgentInner>>,
+    test_config: TestConfig,
+) -> Result<(), String> {
+    let ready_rx = start_test_spawn(inner, test_config)?;
+
+    // Wait for readiness asynchronously (does not block the tokio runtime).
+    match tokio::time::timeout(Duration::from_secs(30), ready_rx.recv_async()).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => {
+            let mut agent = inner.lock().unwrap();
+            agent.state = NodeState::Idle;
+            agent.command_tx = None;
+            Err("coordinator startup failed".into())
+        }
+        Err(_) => {
+            let mut agent = inner.lock().unwrap();
+            agent.state = NodeState::Idle;
+            agent.command_tx = None;
+            Err("coordinator startup timed out".into())
+        }
+    }
+}
+
+/// Spawn the test thread and return the readiness receiver.
+/// Separated from the readiness wait so the wait can be async.
+fn start_test_spawn(
+    inner: &Arc<Mutex<AgentInner>>,
+    test_config: TestConfig,
+) -> Result<flume::Receiver<()>, String> {
     let (cmd_rx, shared_state) = {
         let mut agent = inner.lock().unwrap();
         if agent.state == NodeState::Running {
@@ -433,12 +520,9 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
         (cmd_rx, agent.shared_state.clone())
     };
 
-    // Readiness barrier: the coordinator signals when its tick loop is about
-    // to start, so we don't return 200 until the engine can process commands.
     let (ready_tx, ready_rx) = flume::bounded::<()>(1);
 
     let plugin_config = test_config.plugin.clone();
-
     let inner_clone = inner.clone();
     let request_timeout = test_config.connections.request_timeout;
     let protocol = test_config.protocol.clone();
@@ -561,22 +645,7 @@ fn start_test_inner(inner: &Arc<Mutex<AgentInner>>, test_config: TestConfig) -> 
         })
         .map_err(|e| format!("spawn test thread: {e}"))?;
 
-    // Block until the coordinator is ready to process commands.
-    match ready_rx.recv_timeout(std::time::Duration::from_secs(30)) {
-        Ok(()) => Ok(()),
-        Err(flume::RecvTimeoutError::Timeout) => {
-            let mut agent = inner.lock().unwrap();
-            agent.state = NodeState::Idle;
-            agent.command_tx = None;
-            Err("coordinator startup timed out".into())
-        }
-        Err(flume::RecvTimeoutError::Disconnected) => {
-            let mut agent = inner.lock().unwrap();
-            agent.state = NodeState::Idle;
-            agent.command_tx = None;
-            Err("coordinator startup failed".into())
-        }
-    }
+    Ok(ready_rx)
 }
 
 /// Run an HTTP test (the original path).
@@ -842,11 +911,6 @@ fn decode_hex_bytes(hex: &str) -> Vec<u8> {
             }
         })
         .collect()
-}
-
-fn json_response(status: u16, value: &impl serde::Serialize) -> HttpResponse {
-    let body = serde_json::to_string(value).unwrap_or_else(|_| r#"{"error":"serialize"}"#.into());
-    HttpResponse { status, body }
 }
 
 /// Build an HTTP generator factory from an embedded PluginConfig.

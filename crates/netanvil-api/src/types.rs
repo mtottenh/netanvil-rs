@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use netanvil_core::ProgressUpdate;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// Shared state between the coordinator and HTTP server.
 /// Written by the coordinator's on_progress callback, read by GET endpoints.
@@ -134,7 +135,7 @@ impl Clone for SharedState {
 
 // --- JSON response types ---
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct TestStatus {
     pub state: String,
     pub elapsed_secs: f64,
@@ -145,7 +146,7 @@ pub struct TestStatus {
     pub total_errors: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MetricsView {
     pub current_rps: f64,
     pub target_rps: f64,
@@ -187,7 +188,7 @@ pub struct MetricsView {
     pub packets_lost: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ApiResponse {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -212,22 +213,22 @@ impl ApiResponse {
 
 // --- JSON request body types ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateRateRequest {
     pub rps: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateTargetsRequest {
     pub targets: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateMetadataRequest {
     pub headers: Vec<(String, String)>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct PushSignalRequest {
     pub name: String,
     pub value: f64,

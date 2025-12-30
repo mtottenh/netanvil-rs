@@ -59,37 +59,41 @@ pub fn run(
         leader_metrics: leader_metrics.clone(),
     });
 
-    // Start dedicated Prometheus metrics server on --metrics-port.
-    // This is the same LeaderServer used by one-shot mode, exposing
-    // identical metrics on an identical port — Prometheus config is
-    // mode-agnostic.
-    if let Some(port) = metrics_port {
-        let server = LeaderServer::new(leader_metrics.clone());
-        server
-            .spawn(port)
-            .unwrap_or_else(|e| tracing::error!(port, "failed to start metrics server: {e}"));
-    }
-
-    // Spawn the scheduler thread (runs tests from the queue).
-    let scheduler_queue = queue.clone();
     let queue_config = QueueConfig {
         workers: workers.clone(),
         tls: tls_config,
         external_metrics_url,
         external_metrics_field,
         agents: state.agents.clone(),
-        leader_metrics,
+        leader_metrics: leader_metrics.clone(),
     };
-    std::thread::Builder::new()
-        .name("test-scheduler".into())
-        .spawn(move || {
-            scheduler_queue.run_scheduler(queue_config);
-        })
-        .context("failed to spawn scheduler thread")?;
 
-    // Run the HTTP API server (blocks).
-    netanvil_distributed::leader_api::serve(&listen, state)
-        .context("leader API server failed")?;
+    // Single tokio runtime for the entire control plane.
+    // All async components (API server, test scheduler, metrics server)
+    // run cooperatively on one thread via select! — no Send required.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to create tokio runtime")?;
 
-    Ok(())
+    rt.block_on(async move {
+        let scheduler = queue.run_scheduler(queue_config);
+        let api = netanvil_distributed::leader_api::serve(&listen, state);
+
+        if let Some(port) = metrics_port {
+            let metrics = LeaderServer::new(leader_metrics).serve(port);
+            tokio::select! {
+                _ = scheduler => {},
+                result = api => { result.context("leader API server failed")?; },
+                result = metrics => { result.context("metrics server failed")?; },
+            }
+        } else {
+            tokio::select! {
+                _ = scheduler => {},
+                result = api => { result.context("leader API server failed")?; },
+            }
+        }
+
+        Ok(())
+    })
 }

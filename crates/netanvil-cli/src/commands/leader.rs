@@ -223,14 +223,6 @@ pub fn run(
 
     let leader_metrics = LeaderMetricsState::new();
 
-    // Start dedicated Prometheus metrics server if requested.
-    if let Some(port) = metrics_port {
-        let server = LeaderServer::new(leader_metrics.clone());
-        server
-            .spawn(port)
-            .unwrap_or_else(|e| tracing::error!(port, "failed to start metrics server: {e}"));
-    }
-
     // Temporary result store (one-shot mode doesn't persist to disk).
     let tmp_dir = tempfile::tempdir().context("failed to create temp dir for results")?;
     let store =
@@ -239,7 +231,6 @@ pub fn run(
     let queue = TestQueue::new(store);
     let test_id = queue.enqueue_config(config, summary);
 
-    // Spawn the scheduler thread.
     let scheduler_queue = queue.clone();
     let queue_config = QueueConfig {
         workers,
@@ -249,62 +240,90 @@ pub fn run(
         agents: Arc::new(Mutex::new(Vec::new())),
         leader_metrics: leader_metrics.clone(),
     };
-    std::thread::Builder::new()
-        .name("test-scheduler".into())
-        .spawn(move || {
-            scheduler_queue.run_scheduler(queue_config);
-        })
-        .context("failed to spawn scheduler thread")?;
 
-    // Poll for progress until the test completes.
-    let is_tty = std::io::stderr().is_terminal();
-    let mut last_log_elapsed = Duration::ZERO;
+    // Clone for use after the async block.
+    let result_queue = queue.clone();
+    let result_test_id = test_id.clone();
 
-    loop {
-        std::thread::sleep(Duration::from_millis(250));
+    // Single tokio runtime for scheduler + optional metrics + progress polling.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to create tokio runtime")?;
 
-        let info = queue.get_info(&test_id);
-        let status = info.as_ref().map(|i| i.status);
+    rt.block_on(async move {
+        let scheduler = scheduler_queue.run_scheduler(queue_config);
+        tokio::pin!(scheduler);
 
-        // Display progress.
-        if let Some(progress) = queue.get_progress(&test_id) {
-            if is_tty {
-                eprint!(
-                    "\r  [{:.1}s] {:.0} RPS target | {} requests | {} errors | {} nodes",
-                    progress.elapsed.as_secs_f64(),
-                    progress.target_rps,
-                    progress.total_requests,
-                    progress.total_errors,
-                    progress.active_nodes,
-                );
-            } else if progress.elapsed.saturating_sub(last_log_elapsed) >= Duration::from_secs(1) {
-                last_log_elapsed = progress.elapsed;
-                tracing::info!(
-                    elapsed_secs = format!("{:.1}", progress.elapsed.as_secs_f64()),
-                    target_rps = format!("{:.0}", progress.target_rps),
-                    total_requests = progress.total_requests,
-                    total_errors = progress.total_errors,
-                    active_nodes = progress.active_nodes,
-                    "test progress",
-                );
+        // Optional Prometheus metrics server.
+        let metrics_future = async {
+            if let Some(port) = metrics_port {
+                let server = LeaderServer::new(leader_metrics);
+                let _ = server.serve(port).await;
+            } else {
+                std::future::pending::<()>().await;
             }
-        }
+        };
+        tokio::pin!(metrics_future);
 
-        // Check for terminal states.
-        match status {
-            Some(netanvil_distributed::TestStatus::Completed)
-            | Some(netanvil_distributed::TestStatus::Failed)
-            | Some(netanvil_distributed::TestStatus::Cancelled) => break,
-            _ => continue,
-        }
-    }
+        // Progress polling loop.
+        let is_tty = std::io::stderr().is_terminal();
+        let mut last_log_elapsed = Duration::ZERO;
+        let progress_poll = async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
 
-    if is_tty {
+                let info = queue.get_info(&test_id);
+                let status = info.as_ref().map(|i| i.status);
+
+                if let Some(progress) = queue.get_progress(&test_id) {
+                    if is_tty {
+                        eprint!(
+                            "\r  [{:.1}s] {:.0} RPS target | {} requests | {} errors | {} nodes",
+                            progress.elapsed.as_secs_f64(),
+                            progress.target_rps,
+                            progress.total_requests,
+                            progress.total_errors,
+                            progress.active_nodes,
+                        );
+                    } else if progress.elapsed.saturating_sub(last_log_elapsed)
+                        >= Duration::from_secs(1)
+                    {
+                        last_log_elapsed = progress.elapsed;
+                        tracing::info!(
+                            elapsed_secs = format!("{:.1}", progress.elapsed.as_secs_f64()),
+                            target_rps = format!("{:.0}", progress.target_rps),
+                            total_requests = progress.total_requests,
+                            total_errors = progress.total_errors,
+                            active_nodes = progress.active_nodes,
+                            "test progress",
+                        );
+                    }
+                }
+
+                match status {
+                    Some(netanvil_distributed::TestStatus::Completed)
+                    | Some(netanvil_distributed::TestStatus::Failed)
+                    | Some(netanvil_distributed::TestStatus::Cancelled) => break,
+                    _ => continue,
+                }
+            }
+        };
+
+        // Run all concurrently; progress_poll completes when test finishes.
+        tokio::select! {
+            _ = &mut scheduler => {},
+            _ = &mut metrics_future => {},
+            _ = progress_poll => {},
+        }
+    });
+
+    if std::io::stderr().is_terminal() {
         eprintln!(); // newline after progress
     }
 
     // Fetch and print results.
-    if let Some(entry) = queue.get_entry(&test_id) {
+    if let Some(entry) = result_queue.get_entry(&result_test_id) {
         if let Some(ref result) = entry.result {
             crate::output::print_stored_results(result, output_format);
         }

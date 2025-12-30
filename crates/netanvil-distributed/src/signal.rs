@@ -4,24 +4,24 @@
 //! value (e.g., "load" from `{"load": 82.5}`). Used by the leader to
 //! feed server-reported metrics into the PID rate controller.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 /// Polls an HTTP endpoint for an external signal value.
 pub struct HttpSignalPoller {
+    client: reqwest::Client,
     url: String,
     field: String,
-    timeout: Duration,
 }
 
 impl HttpSignalPoller {
     pub fn new(url: String, field: String, timeout: Duration) -> Self {
-        Self {
-            url,
-            field,
-            timeout,
-        }
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .expect("reqwest client for signal poller");
+        Self { url, field, client }
     }
 
     /// Create from optional config fields. Returns None if not configured.
@@ -32,53 +32,29 @@ impl HttpSignalPoller {
         }
     }
 
-    /// Poll the endpoint and return (field_name, value).
-    pub fn poll(&self) -> Option<(String, f64)> {
-        let body = self.http_get()?;
-        let json: serde_json::Value = serde_json::from_str(&body).ok()?;
-        let value = json.get(&self.field)?.as_f64()?;
-        Some((self.field.clone(), value))
-    }
-
-    /// Create a closure suitable for `set_signal_source`.
-    pub fn into_source(self) -> impl FnMut() -> Vec<(String, f64)> + Send {
-        move || self.poll().into_iter().collect()
-    }
-
-    fn http_get(&self) -> Option<String> {
-        // Parse host:port from URL
-        let url = &self.url;
-        let without_scheme = url.strip_prefix("http://").unwrap_or(url);
-        let (host_port, path) = without_scheme
-            .split_once('/')
-            .map(|(h, p)| (h, format!("/{p}")))
-            .unwrap_or((without_scheme, "/".into()));
-
-        let mut stream = TcpStream::connect(host_port).ok()?;
-        stream.set_read_timeout(Some(self.timeout)).ok()?;
-        stream.set_write_timeout(Some(self.timeout)).ok()?;
-
-        let request =
-            format!("GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n");
-        stream.write_all(request.as_bytes()).ok()?;
-
-        // Read response
-        let mut reader = BufReader::new(&mut stream);
-        let mut status = String::new();
-        reader.read_line(&mut status).ok()?;
-
-        // Skip headers
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).ok()?;
-            if line.trim().is_empty() {
-                break;
-            }
+    /// Create an async closure suitable for `coordinator.set_signal_source()`.
+    pub fn into_source(
+        self,
+    ) -> impl FnMut() -> Pin<Box<dyn Future<Output = Vec<(String, f64)>> + Send>> + Send {
+        let Self {
+            client,
+            url,
+            field,
+        } = self;
+        move || {
+            let client = client.clone();
+            let url = url.clone();
+            let field = field.clone();
+            Box::pin(async move {
+                let result: Option<(String, f64)> = async {
+                    let resp = client.get(&url).send().await.ok()?;
+                    let json: serde_json::Value = resp.json().await.ok()?;
+                    let value = json.get(&field)?.as_f64()?;
+                    Some((field, value))
+                }
+                .await;
+                result.into_iter().collect()
+            })
         }
-
-        // Read body
-        let mut body = String::new();
-        reader.read_to_string(&mut body).ok()?;
-        Some(body)
     }
 }

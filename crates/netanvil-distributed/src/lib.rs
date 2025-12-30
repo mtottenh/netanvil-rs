@@ -13,7 +13,10 @@ pub mod signal;
 pub mod test_queue;
 pub mod test_spec;
 
-pub use coordinator::{DistributedCoordinator, DistributedProgressUpdate, DistributedTestResult};
+pub use coordinator::{
+    ControllerUpdateCommand, DistributedCoordinator, DistributedProgressUpdate,
+    DistributedTestResult,
+};
 pub use http_cluster::{
     HttpMetricsFetcher, HttpNodeCommander, MtlsMetricsFetcher, MtlsNodeCommander,
     MtlsStaticDiscovery, StaticDiscovery,

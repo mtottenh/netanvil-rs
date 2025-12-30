@@ -3,14 +3,32 @@
 //! Mirrors the local `Coordinator`'s tick-based pattern but operates over the
 //! network. Each tick: discover nodes → fetch metrics → aggregate → rate control
 //! → distribute rate.
+//!
+//! The `run()` method is async, enabling concurrent agent communication
+//! (e.g., fetching metrics from N agents in parallel). It runs on a
+//! current_thread tokio runtime on the coordinator's dedicated thread.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use netanvil_types::{
-    MetricsFetcher, MetricsSummary, NodeCommander, NodeDiscovery, NodeId, NodeInfo, RateController,
-    RateDecision, RemoteMetrics, TestConfig,
+    ControllerView, HoldCommand, HoldState, MetricsFetcher, MetricsSummary, NodeCommander,
+    NodeDiscovery, NodeId, NodeInfo, RateController, RateDecision, RemoteMetrics, TestConfig,
 };
+
+/// Async signal source: called each tick to get external signals.
+pub type AsyncSignalSource = Box<
+    dyn FnMut() -> Pin<Box<dyn Future<Output = Vec<(String, f64)>> + Send>> + Send,
+>;
+
+/// Command for controller parameter updates in the distributed coordinator.
+pub struct ControllerUpdateCommand {
+    pub action: String,
+    pub params: serde_json::Value,
+    pub response_tx: flume::Sender<Result<serde_json::Value, String>>,
+}
 
 /// Progress update emitted each tick of the distributed coordinator.
 #[derive(Debug, Clone)]
@@ -44,13 +62,21 @@ where
     rate_controller: Box<dyn RateController>,
     node_metrics: HashMap<NodeId, RemoteMetrics>,
     node_weights: HashMap<NodeId, f64>,
-    signal_source: Option<Box<dyn FnMut() -> Vec<(String, f64)> + Send>>,
+    signal_source: Option<AsyncSignalSource>,
     on_progress: Option<Box<dyn FnMut(&DistributedProgressUpdate)>>,
     cancel_rx: Option<flume::Receiver<()>>,
     /// External rate override channel (from leader API PUT /tests/{id}/rate).
     rate_override_rx: Option<flume::Receiver<f64>>,
     /// External signal push channel (from leader API PUT /tests/{id}/signal).
     signal_push_rx: Option<flume::Receiver<(String, f64)>>,
+    /// Hold state: when Held, controller.update() is skipped.
+    hold_state: HoldState,
+    /// Channel for hold/release commands.
+    hold_command_rx: Option<flume::Receiver<HoldCommand>>,
+    /// Channel for controller parameter update commands.
+    controller_update_rx: Option<flume::Receiver<ControllerUpdateCommand>>,
+    /// Channel for controller introspection requests.
+    controller_info_rx: Option<flume::Receiver<flume::Sender<ControllerView>>>,
 }
 
 impl<D, M, C> DistributedCoordinator<D, M, C>
@@ -79,41 +105,56 @@ where
             cancel_rx: None,
             rate_override_rx: None,
             signal_push_rx: None,
+            hold_state: HoldState::Released,
+            hold_command_rx: None,
+            controller_update_rx: None,
+            controller_info_rx: None,
         }
     }
 
-    pub fn set_signal_source(&mut self, f: impl FnMut() -> Vec<(String, f64)> + Send + 'static) {
-        self.signal_source = Some(Box::new(f));
+    /// Set an async signal source called each coordinator tick.
+    pub fn set_signal_source<F, Fut>(&mut self, mut f: F)
+    where
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: Future<Output = Vec<(String, f64)>> + Send + 'static,
+    {
+        self.signal_source = Some(Box::new(move || Box::pin(f())));
     }
 
     pub fn on_progress(&mut self, f: impl FnMut(&DistributedProgressUpdate) + 'static) {
         self.on_progress = Some(Box::new(f));
     }
 
-    /// Set an optional cancel channel. When a message is received, the
-    /// coordinator stops all agents and returns partial results.
     pub fn set_cancel_rx(&mut self, rx: flume::Receiver<()>) {
         self.cancel_rx = Some(rx);
     }
 
-    /// Set a channel for external rate overrides (from the leader API).
-    /// The coordinator drains this each tick and applies the latest value.
     pub fn set_rate_override_rx(&mut self, rx: flume::Receiver<f64>) {
         self.rate_override_rx = Some(rx);
     }
 
-    /// Set a channel for externally pushed signals (from the leader API).
-    /// Signals are merged into the MetricsSummary each tick.
     pub fn set_signal_push_rx(&mut self, rx: flume::Receiver<(String, f64)>) {
         self.signal_push_rx = Some(rx);
     }
 
-    /// Run the distributed test. Blocks until completion.
-    pub fn run(&mut self) -> DistributedTestResult {
+    pub fn set_hold_command_rx(&mut self, rx: flume::Receiver<HoldCommand>) {
+        self.hold_command_rx = Some(rx);
+    }
+
+    pub fn set_controller_update_rx(&mut self, rx: flume::Receiver<ControllerUpdateCommand>) {
+        self.controller_update_rx = Some(rx);
+    }
+
+    pub fn set_controller_info_rx(&mut self, rx: flume::Receiver<flume::Sender<ControllerView>>) {
+        self.controller_info_rx = Some(rx);
+    }
+
+    /// Run the distributed test. Async — call from a tokio runtime.
+    pub async fn run(&mut self) -> DistributedTestResult {
         let start = Instant::now();
 
         // Discover nodes and compute initial weights
-        let nodes = self.discovery.discover();
+        let nodes = self.discovery.discover().await;
         if nodes.is_empty() {
             tracing::error!("no agent nodes available");
             return DistributedTestResult {
@@ -127,8 +168,7 @@ where
         self.compute_weights(&nodes);
 
         // Start test on all nodes, each with its weighted share of the
-        // initial rate baked into the config. This avoids a race between
-        // the engine starting and a follow-up PUT /rate arriving.
+        // initial rate baked into the config.
         let initial_rps = self.rate_controller.current_rate();
         for node in &nodes {
             let weight = self.node_weights.get(&node.id).copied().unwrap_or(0.0);
@@ -137,7 +177,7 @@ where
             let mut agent_config = self.config.clone();
             agent_config.rate = netanvil_types::RateConfig::Static { rps: node_rps };
 
-            if let Err(e) = self.commander.start_test(node, &agent_config) {
+            if let Err(e) = self.commander.start_test(node, &agent_config).await {
                 tracing::error!(node = %node.id, "failed to start test: {e}");
                 self.discovery.mark_failed(&node.id);
             }
@@ -145,7 +185,7 @@ where
 
         // Re-discover after startup to exclude any agents that failed,
         // then recompute weights for the tick loop.
-        let nodes = self.discovery.discover();
+        let nodes = self.discovery.discover().await;
         if nodes.is_empty() {
             tracing::error!("all nodes failed during startup");
             return DistributedTestResult {
@@ -156,19 +196,19 @@ where
             };
         }
         self.compute_weights(&nodes);
-        self.distribute_rate(&nodes, initial_rps);
+        self.distribute_rate(&nodes, initial_rps).await;
 
         // Tick loop
         loop {
-            std::thread::sleep(self.config.control_interval);
+            tokio::time::sleep(self.config.control_interval).await;
 
-            let nodes = self.discovery.discover();
+            let nodes = self.discovery.discover().await;
             if nodes.is_empty() {
                 tracing::error!("all nodes failed, stopping");
                 break;
             }
 
-            let decision = self.tick(&nodes);
+            let decision = self.tick(&nodes).await;
 
             let elapsed = start.elapsed();
             if elapsed >= self.config.duration {
@@ -204,21 +244,24 @@ where
             }
         }
 
-        // Stop all nodes
-        let nodes = self.discovery.discover();
-        for node in &nodes {
-            let _ = self.commander.stop_test(node);
+        // Collect final metrics BEFORE stopping nodes — agents reset their
+        // metrics on test completion, so fetching after stop risks a race.
+        let nodes = self.discovery.discover().await;
+        // Fetch final metrics from all agents concurrently.
+        let metrics_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| self.fetcher.fetch_metrics(node))
+            .collect();
+        let metrics_results = futures::future::join_all(metrics_futures).await;
+        for (node, metrics) in nodes.iter().zip(metrics_results) {
+            if let Some(m) = metrics {
+                self.node_metrics.insert(node.id.clone(), m);
+            }
         }
 
-        // Wait a moment for final metrics
-        std::thread::sleep(Duration::from_millis(500));
-
-        // Collect final metrics
-        let nodes = self.discovery.discover();
+        // Stop all nodes
         for node in &nodes {
-            if let Some(metrics) = self.fetcher.fetch_metrics(node) {
-                self.node_metrics.insert(node.id.clone(), metrics);
-            }
+            let _ = self.commander.stop_test(node).await;
         }
 
         let total_requests: u64 = self.node_metrics.values().map(|m| m.total_requests).sum();
@@ -236,12 +279,21 @@ where
         }
     }
 
-    fn tick(&mut self, nodes: &[NodeInfo]) -> RateDecision {
-        // Fetch metrics from all nodes
-        for node in nodes {
-            match self.fetcher.fetch_metrics(node) {
-                Some(metrics) => {
-                    self.node_metrics.insert(node.id.clone(), metrics);
+    async fn tick(&mut self, nodes: &[NodeInfo]) -> RateDecision {
+        // --- Phase 0: Process control commands ---
+        self.process_commands();
+
+        // --- Phase 1: Fetch metrics from all agents concurrently ---
+        let metrics_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| self.fetcher.fetch_metrics(node))
+            .collect();
+        let metrics_results = futures::future::join_all(metrics_futures).await;
+
+        for (node, metrics) in nodes.iter().zip(metrics_results) {
+            match metrics {
+                Some(m) => {
+                    self.node_metrics.insert(node.id.clone(), m);
                 }
                 None => {
                     tracing::warn!(node = %node.id, "metrics fetch failed");
@@ -250,12 +302,11 @@ where
             }
         }
 
-        // Aggregate into MetricsSummary for the rate controller
         let mut summary = self.aggregate_metrics();
 
         // Inject external signals from polling source.
         if let Some(ref mut source) = self.signal_source {
-            summary.external_signals = source();
+            summary.external_signals = source().await;
             if !summary.external_signals.is_empty() {
                 tracing::info!(signals = ?summary.external_signals, "external signals for rate controller");
             }
@@ -264,8 +315,8 @@ where
         // Inject externally pushed signals (from leader API PUT /signal).
         if let Some(ref rx) = self.signal_push_rx {
             while let Ok((name, value)) = rx.try_recv() {
-                // Overwrite or append.
-                if let Some(existing) = summary.external_signals.iter_mut().find(|(k, _)| *k == name) {
+                if let Some(existing) = summary.external_signals.iter_mut().find(|(k, _)| *k == name)
+                {
                     existing.1 = value;
                 } else {
                     summary.external_signals.push((name, value));
@@ -273,26 +324,12 @@ where
             }
         }
 
-        // Rate controller decision
+        // --- Phase 2: Rate decision ---
         let previous_rps = self.rate_controller.current_rate();
-        let mut decision = self.rate_controller.update(&summary);
-
-        // Apply external rate override (from leader API PUT /rate).
-        if let Some(ref rx) = self.rate_override_rx {
-            let mut latest = None;
-            while let Ok(rps) = rx.try_recv() {
-                latest = Some(rps);
-            }
-            if let Some(rps) = latest {
-                tracing::info!(
-                    override_rps = rps,
-                    controller_rps = decision.target_rps,
-                    "applying external rate override"
-                );
-                self.rate_controller.set_rate(rps);
-                decision = RateDecision { target_rps: rps };
-            }
-        }
+        let decision = match self.hold_state {
+            HoldState::Held { rps } => RateDecision { target_rps: rps },
+            HoldState::Released => self.rate_controller.update(&summary),
+        };
 
         if (decision.target_rps - previous_rps).abs() > 0.01 {
             tracing::info!(
@@ -300,7 +337,10 @@ where
                 new_rps = decision.target_rps,
                 active_nodes = nodes.len(),
                 error_rate = format!("{:.4}", summary.error_rate),
-                latency_p99_ms = format!("{:.1}", summary.latency_p99_ns as f64 / 1_000_000.0),
+                latency_p99_ms = format!(
+                    "{:.1}",
+                    summary.latency_p99_ns as f64 / 1_000_000.0
+                ),
                 "leader rate adjustment"
             );
         }
@@ -315,17 +355,78 @@ where
         // Recompute weights (nodes may have changed)
         self.compute_weights(nodes);
 
-        // Distribute rate
-        self.distribute_rate(nodes, decision.target_rps);
+        // Distribute rate to all agents concurrently
+        self.distribute_rate(nodes, decision.target_rps).await;
 
         decision
+    }
+
+    /// Process all pending control commands (hold, controller updates, etc.).
+    /// Sync — just drains channels and updates local state.
+    fn process_commands(&mut self) {
+        // Hold/release commands.
+        if let Some(ref rx) = self.hold_command_rx {
+            while let Ok(cmd) = rx.try_recv() {
+                match cmd {
+                    HoldCommand::Hold(rps) => {
+                        tracing::info!(rps, "rate hold engaged");
+                        self.hold_state = HoldState::Held { rps };
+                    }
+                    HoldCommand::Release => {
+                        tracing::info!(
+                            controller_rps = self.rate_controller.current_rate(),
+                            "rate hold released, resuming controller"
+                        );
+                        self.hold_state = HoldState::Released;
+                    }
+                }
+            }
+        }
+
+        // Controller parameter updates.
+        if let Some(ref rx) = self.controller_update_rx {
+            while let Ok(cmd) = rx.try_recv() {
+                let result = self.rate_controller.apply_update(&cmd.action, &cmd.params);
+                let _ = cmd.response_tx.send(result);
+            }
+        }
+
+        // Controller introspection requests.
+        if let Some(ref rx) = self.controller_info_rx {
+            while let Ok(response_tx) = rx.try_recv() {
+                let info = self.rate_controller.controller_info();
+                let view = ControllerView {
+                    info,
+                    held: matches!(self.hold_state, HoldState::Held { .. }),
+                    held_rps: match self.hold_state {
+                        HoldState::Held { rps } => Some(rps),
+                        HoldState::Released => None,
+                    },
+                };
+                let _ = response_tx.send(view);
+            }
+        }
+
+        // Legacy rate override (deprecated — translates to hold).
+        if let Some(ref rx) = self.rate_override_rx {
+            let mut latest = None;
+            while let Ok(rps) = rx.try_recv() {
+                latest = Some(rps);
+            }
+            if let Some(rps) = latest {
+                tracing::warn!(
+                    rps,
+                    "rate_override_rx is deprecated, use hold_command_rx instead"
+                );
+                self.hold_state = HoldState::Held { rps };
+            }
+        }
     }
 
     fn aggregate_metrics(&self) -> MetricsSummary {
         let total_requests: u64 = self.node_metrics.values().map(|m| m.total_requests).sum();
         let total_errors: u64 = self.node_metrics.values().map(|m| m.total_errors).sum();
 
-        // Conservative aggregation: take max of percentiles
         let p50 = self
             .node_metrics
             .values()
@@ -378,11 +479,11 @@ where
         }
     }
 
-    fn distribute_rate(&self, nodes: &[NodeInfo], total_rps: f64) {
+    async fn distribute_rate(&self, nodes: &[NodeInfo], total_rps: f64) {
         for node in nodes {
             let weight = self.node_weights.get(&node.id).copied().unwrap_or(0.0);
             let node_rps = total_rps * weight;
-            if let Err(e) = self.commander.set_rate(node, node_rps) {
+            if let Err(e) = self.commander.set_rate(node, node_rps).await {
                 tracing::warn!(node = %node.id, rps = node_rps, "failed to set rate: {e}");
             }
         }

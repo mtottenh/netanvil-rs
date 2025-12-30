@@ -30,7 +30,13 @@ fn start_server() -> (String, Arc<LeaderApiState>) {
     let bind = addr.clone();
     let server_state = state.clone();
     std::thread::spawn(move || {
-        leader_api::serve(&bind, server_state).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            leader_api::serve(&bind, server_state).await.unwrap();
+        });
     });
 
     // Wait for the server to be ready.

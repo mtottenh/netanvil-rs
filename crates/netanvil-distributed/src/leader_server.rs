@@ -4,7 +4,12 @@
 //! giving Prometheus a single scrape target instead of N individual agents.
 
 use std::sync::{Arc, Mutex};
-use std::thread;
+
+use axum::extract::State;
+use axum::http::header;
+use axum::response::IntoResponse;
+use axum::routing::get;
+use axum::Router;
 
 use crate::coordinator::DistributedProgressUpdate;
 
@@ -32,7 +37,7 @@ impl LeaderMetricsState {
         *self.inner.lock().unwrap() = Some(progress.clone());
     }
 
-    fn snapshot(&self) -> Option<DistributedProgressUpdate> {
+    pub fn snapshot(&self) -> Option<DistributedProgressUpdate> {
         self.inner.lock().unwrap().clone()
     }
 }
@@ -47,74 +52,39 @@ impl LeaderServer {
         Self { state }
     }
 
-    /// Spawn the server on a background thread. Returns immediately.
-    pub fn spawn(self, port: u16) -> std::io::Result<()> {
+    /// Serve metrics on the given port. Async — call from a shared tokio runtime.
+    pub async fn serve(self, port: u16) -> std::io::Result<()> {
         let addr = format!("0.0.0.0:{port}");
-        let server = tiny_http::Server::http(&addr)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::AddrInUse, e))?;
 
+        let app = Router::new()
+            .route("/metrics/prometheus", get(handle_prometheus))
+            .route("/metrics", get(handle_prometheus))
+            .with_state(self.state);
+
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
         tracing::info!(port, "leader metrics server listening");
-
-        thread::Builder::new()
-            .name("leader-metrics".into())
-            .spawn(move || {
-                for request in server.incoming_requests() {
-                    let path = request.url().to_string();
-                    match path.as_str() {
-                        "/metrics/prometheus" | "/metrics" => {
-                            self.handle_prometheus(request);
-                        }
-                        _ => {
-                            let resp = tiny_http::Response::from_string("not found\n")
-                                .with_status_code(404);
-                            let _ = request.respond(resp);
-                        }
-                    }
-                }
-            })?;
-
-        Ok(())
-    }
-
-    fn handle_prometheus(&self, request: tiny_http::Request) {
-        let body = match self.state.snapshot() {
-            Some(p) => format_prometheus(&p),
-            None => "# No metrics available yet\n".to_string(),
-        };
-
-        let response = tiny_http::Response::from_string(body)
-            .with_status_code(200)
-            .with_header(
-                tiny_http::Header::from_bytes(
-                    &b"Content-Type"[..],
-                    &b"text/plain; version=0.0.4; charset=utf-8"[..],
-                )
-                .unwrap(),
-            );
-        let _ = request.respond(response);
+        axum::serve(listener, app)
+            .await
+            .map_err(|e| std::io::Error::other(format!("leader metrics serve: {e}")))
     }
 }
 
-/// Handle a Prometheus scrape request using the shared metrics state.
-/// Public so `leader_api` can reuse it without duplicating Prometheus rendering.
-pub fn handle_prometheus_from_state(
-    request: tiny_http::Request,
-    state: &LeaderMetricsState,
-) {
+/// Prometheus scrape handler using the shared metrics state.
+/// Also used by `leader_api` for the `/metrics/prometheus` route.
+pub async fn handle_prometheus(
+    State(state): State<LeaderMetricsState>,
+) -> impl IntoResponse {
     let body = match state.snapshot() {
         Some(p) => format_prometheus(&p),
         None => "# No metrics available yet\n".to_string(),
     };
-    let response = tiny_http::Response::from_string(body)
-        .with_status_code(200)
-        .with_header(
-            tiny_http::Header::from_bytes(
-                &b"Content-Type"[..],
-                &b"text/plain; version=0.0.4; charset=utf-8"[..],
-            )
-            .unwrap(),
-        );
-    let _ = request.respond(response);
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
 }
 
 /// Format aggregated distributed metrics as Prometheus text exposition.

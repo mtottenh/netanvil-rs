@@ -20,6 +20,7 @@ pub fn run(
     tls_cert: Option<String>,
     tls_key: Option<String>,
     metrics_port: Option<u16>,
+    trusted_san: Vec<String>,
     isolate_cpus: bool,
 ) -> Result<()> {
     let bind_addr = parse_listen_addr(&listen);
@@ -54,6 +55,10 @@ pub fn run(
 
     if let Some(port) = metrics_port {
         server.set_metrics_port(port);
+    }
+
+    if !trusted_san.is_empty() {
+        server.set_trusted_sans(trusted_san);
     }
 
     if isolate_cpus {

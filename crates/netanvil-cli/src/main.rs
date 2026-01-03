@@ -274,6 +274,13 @@ enum Commands {
         #[arg(long)]
         metrics_port: Option<u16>,
 
+        /// Trusted Subject Alternative Names (SANs) from leader certificates.
+        /// When specified, only clients presenting a certificate with a SAN
+        /// matching one of these values are authorized. Comma-separated.
+        /// Requires TLS to be enabled.
+        #[arg(long, value_delimiter = ',')]
+        trusted_san: Vec<String>,
+
         /// Migrate system threads off hot-path CPU cores before starting.
         /// Shields timer and I/O worker cores from scheduling noise by
         /// moving non-essential threads (including other processes) to the
@@ -656,8 +663,9 @@ fn main() -> Result<()> {
             tls_cert,
             tls_key,
             metrics_port,
+            trusted_san,
             isolate_cpus,
-        } => commands::agent::run(listen, node_id, cores, tls_ca, tls_cert, tls_key, metrics_port, isolate_cpus)?,
+        } => commands::agent::run(listen, node_id, cores, tls_ca, tls_cert, tls_key, metrics_port, trusted_san, isolate_cpus)?,
 
         Commands::Leader {
             workers,

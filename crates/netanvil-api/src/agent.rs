@@ -60,6 +60,9 @@ pub struct AgentServer {
     tls_config: Option<Arc<rustls::ServerConfig>>,
     /// Optional plain HTTP port for Prometheus metrics when running TLS.
     metrics_port: Option<u16>,
+    /// Trusted SANs from leader certificates. When non-empty, the SAN
+    /// verification middleware rejects requests from certs not in this list.
+    trusted_sans: Vec<String>,
     inner: Arc<Mutex<AgentInner>>,
 }
 
@@ -75,6 +78,7 @@ impl AgentServer {
             bind_addr: bind_addr.to_string(),
             tls_config: None,
             metrics_port: None,
+            trusted_sans: Vec::new(),
             inner,
         })
     }
@@ -98,6 +102,7 @@ impl AgentServer {
             bind_addr: bind_addr.to_string(),
             tls_config: Some(tls_config),
             metrics_port: None,
+            trusted_sans: Vec::new(),
             inner,
         })
     }
@@ -107,6 +112,14 @@ impl AgentServer {
     /// `/metrics/prometheus` is already available on the main port.
     pub fn set_metrics_port(&mut self, port: u16) {
         self.metrics_port = Some(port);
+    }
+
+    /// Set trusted SANs for client certificate verification.
+    /// When non-empty, only clients whose certificate SAN matches
+    /// one of these values are allowed to make requests.
+    /// Only effective when TLS is enabled.
+    pub fn set_trusted_sans(&mut self, sans: Vec<String>) {
+        self.trusted_sans = sans;
     }
 
     /// Run the agent server (blocking). Call from the main thread.
@@ -133,11 +146,24 @@ impl AgentServer {
         let bind_addr = self.bind_addr.clone();
         let tls_config = self.tls_config.clone();
         let metrics_port = self.metrics_port;
+        let trusted_sans = self.trusted_sans.clone();
 
         rt.block_on(async move {
             // Build the main server future.
             let main_server = async {
                 if let Some(tls_config) = tls_config {
+                    // When TLS is enabled, apply SAN verification if trusted SANs are configured.
+                    let router = if trusted_sans.is_empty() {
+                        tracing::info!("SAN verification disabled (no --trusted-san configured)");
+                        router
+                    } else {
+                        tracing::info!(
+                            trusted_sans = ?trusted_sans,
+                            "SAN verification enabled"
+                        );
+                        router.layer(crate::identity::SanVerifierLayer::new(trusted_sans))
+                    };
+
                     let rustls_config =
                         axum_server::tls_rustls::RustlsConfig::from_config(tls_config);
                     let acceptor =

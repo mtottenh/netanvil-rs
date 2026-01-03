@@ -8,12 +8,16 @@
 //!
 //! # Variants
 //!
-//! | Variant    | Description                                            |
-//! |------------|--------------------------------------------------------|
-//! | `Fixed`    | Always returns the same value (zero-cost at call site) |
-//! | `Uniform`  | Uniform random in `[min, max]`                         |
-//! | `Normal`   | Gaussian, rounded and clamped to `>= 1`                |
-//! | `Weighted` | Weighted random selection from discrete values         |
+//! | Variant       | Description                                            |
+//! |---------------|--------------------------------------------------------|
+//! | `Fixed`       | Always returns the same value (zero-cost at call site) |
+//! | `Uniform`     | Uniform random in `[min, max]`                         |
+//! | `Normal`      | Gaussian, rounded and clamped to `>= 1`                |
+//! | `Weighted`    | Weighted random selection from discrete values         |
+//! | `Exponential` | Memoryless; natural for connection lifetimes            |
+//! | `LogNormal`   | Right-skewed, always positive; natural for sizes        |
+//! | `Pareto`      | Heavy-tailed power-law; natural for object/file sizes   |
+//! | `Zipf`        | Rank-frequency; natural for key/index selection         |
 
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +42,52 @@ pub enum ValueDistribution<T> {
     /// Weights are relative (not required to sum to 1.0).
     /// Example: `[(200, 0.3), (1200, 0.5), (1500, 0.2)]` means 30%/50%/20%.
     Weighted(Vec<WeightedValue<T>>),
+
+    /// Exponential distribution with the given mean.
+    ///
+    /// Memoryless: P(X > s+t | X > s) = P(X > t). The natural model for
+    /// connection lifetimes (each request has an independent probability of
+    /// being the last) and inter-arrival/think times. Already used internally
+    /// by `PoissonScheduler` for inter-arrival intervals.
+    ///
+    /// Sampled as `f64`, rounded, clamped to `>= 1`.
+    Exponential { mean: f64 },
+
+    /// Log-normal distribution.
+    ///
+    /// Always positive and right-skewed — strictly better than `Normal` for
+    /// modeling sizes (packet payloads, HTTP responses, file objects) where
+    /// values are multiplicative and cannot be negative.
+    ///
+    /// `mu` and `sigma` are the mean and standard deviation of the underlying
+    /// normal distribution on the log scale. The resulting distribution has
+    /// median `exp(mu)` and is more skewed as `sigma` increases.
+    ///
+    /// Sampled as `f64`, rounded, clamped to `>= 1`.
+    LogNormal { mu: f64, sigma: f64 },
+
+    /// Pareto (power-law) distribution.
+    ///
+    /// Models heavy-tailed quantities: many small values, few very large ones.
+    /// The 80/20 rule is a Pareto distribution. Natural for CDN object sizes,
+    /// web page sizes, and file size distributions.
+    ///
+    /// `scale` (x_m) is the minimum possible value. `shape` (α) controls the
+    /// tail weight — smaller α means heavier tails.
+    ///
+    /// Sampled as `f64`, rounded, clamped to `>= 1`.
+    Pareto { scale: f64, shape: f64 },
+
+    /// Zipf (zeta) distribution over ranks `1..=n`.
+    ///
+    /// Rank `k` has probability proportional to `1/k^exponent`. The standard
+    /// model for key/index access patterns in caches, databases, and content
+    /// systems. Without Zipfian key selection, Redis/cache benchmarks produce
+    /// unrealistically uniform hit rates.
+    ///
+    /// Typical exponents: 0.99 (YCSB default), 1.0 (classic Zipf), 1.2+
+    /// (highly skewed).
+    Zipf { n: u64, exponent: f64 },
 }
 
 /// A value with an associated relative weight for `ValueDistribution::Weighted`.

@@ -8,11 +8,13 @@
 
 pub mod agent;
 pub mod handlers;
+pub mod identity;
 pub mod server;
 pub mod tls;
 pub mod types;
 
 pub use agent::AgentServer;
+pub use identity::{CertExtractingAcceptor, ClientIdentity, SanVerifierLayer};
 pub use server::ControlServer;
 pub use tls::{build_client_config, build_server_config};
 pub use types::{MetricsView, SharedState};

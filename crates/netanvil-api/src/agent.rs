@@ -110,17 +110,15 @@ impl AgentServer {
     }
 
     /// Run the agent server (blocking). Call from the main thread.
+    ///
+    /// Creates a single tokio `current_thread` runtime for all control-plane
+    /// HTTP serving. When a metrics-only port is configured, both the main
+    /// server and the metrics server run cooperatively on the same runtime.
     pub fn run(&self) {
         // Set node_id on shared state so Prometheus metrics include it.
         {
             let agent = self.inner.lock().unwrap();
             agent.shared_state.set_node_id(agent.node_id.0.clone());
-        }
-
-        // If a metrics-only port is configured, spawn a plain HTTP server
-        // for Prometheus scraping (useful when the main server uses TLS).
-        if let Some(port) = self.metrics_port {
-            self.spawn_metrics_server(port);
         }
 
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -131,59 +129,56 @@ impl AgentServer {
         let state = AgentState {
             inner: self.inner.clone(),
         };
-        let router = agent_router(state);
+        let router = agent_router(state.clone());
         let bind_addr = self.bind_addr.clone();
         let tls_config = self.tls_config.clone();
+        let metrics_port = self.metrics_port;
 
         rt.block_on(async move {
-            if let Some(tls_config) = tls_config {
-                let rustls_config =
-                    axum_server::tls_rustls::RustlsConfig::from_config(tls_config);
-                tracing::info!("agent listening on {bind_addr} (TLS)");
-                axum_server::bind_rustls(bind_addr.parse().expect("parse bind addr"), rustls_config)
-                    .serve(router.into_make_service())
+            // Build the main server future.
+            let main_server = async {
+                if let Some(tls_config) = tls_config {
+                    let rustls_config =
+                        axum_server::tls_rustls::RustlsConfig::from_config(tls_config);
+                    let acceptor =
+                        crate::identity::CertExtractingAcceptor::new(rustls_config);
+                    tracing::info!("agent listening on {bind_addr} (TLS with cert extraction)");
+                    axum_server::bind(bind_addr.parse().expect("parse bind addr"))
+                        .acceptor(acceptor)
+                        .serve(router.into_make_service())
+                        .await
+                        .expect("agent TLS serve");
+                } else {
+                    let listener = tokio::net::TcpListener::bind(&bind_addr)
+                        .await
+                        .expect("bind agent");
+                    tracing::info!("agent listening on {bind_addr} (plain HTTP)");
+                    axum::serve(listener, router).await.expect("agent serve");
+                }
+            };
+
+            // Optionally serve metrics on a separate plain HTTP port
+            // (for Prometheus to scrape without TLS client certs).
+            if let Some(port) = metrics_port {
+                let metrics_app = Router::new()
+                    .route("/metrics/prometheus", get(get_metrics_prometheus))
+                    .route("/metrics", get(get_metrics))
+                    .with_state(state);
+                let metrics_addr = format!("0.0.0.0:{port}");
+                let metrics_listener = tokio::net::TcpListener::bind(&metrics_addr)
                     .await
-                    .expect("agent TLS serve");
+                    .expect("bind metrics server");
+                tracing::info!(port, "metrics-only server listening (plain HTTP)");
+                let metrics_server = axum::serve(metrics_listener, metrics_app);
+
+                tokio::select! {
+                    _ = main_server => {},
+                    _ = metrics_server => {},
+                }
             } else {
-                let listener = tokio::net::TcpListener::bind(&bind_addr)
-                    .await
-                    .expect("bind agent");
-                tracing::info!("agent listening on {bind_addr} (plain HTTP)");
-                axum::serve(listener, router).await.expect("agent serve");
+                main_server.await;
             }
         });
-    }
-
-    /// Spawn a plain HTTP server on a background thread that only serves
-    /// `/metrics/prometheus`. Used so Prometheus can scrape TLS agents.
-    fn spawn_metrics_server(&self, port: u16) {
-        let inner = self.inner.clone();
-
-        tracing::info!(port, "metrics-only server listening (plain HTTP)");
-
-        std::thread::Builder::new()
-            .name("agent-metrics-http".into())
-            .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("tokio runtime for metrics server");
-
-                rt.block_on(async move {
-                    let state = AgentState { inner };
-                    let app = Router::new()
-                        .route("/metrics/prometheus", get(get_metrics_prometheus))
-                        .route("/metrics", get(get_metrics))
-                        .with_state(state);
-
-                    let addr = format!("0.0.0.0:{port}");
-                    let listener = tokio::net::TcpListener::bind(&addr)
-                        .await
-                        .expect("bind metrics server");
-                    axum::serve(listener, app).await.expect("metrics serve");
-                });
-            })
-            .unwrap_or_else(|e| panic!("failed to spawn metrics server thread: {e}"));
     }
 }
 

@@ -15,6 +15,7 @@ tracing = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 utoipa = { workspace = true }
+utoipa-scalar = { workspace = true }
 reqwest = { workspace = true }
 futures = { workspace = true }
 flume = { workspace = true }

@@ -7,6 +7,8 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use netanvil_types::{ControllerView, HoldCommand, WorkerCommand};
+use utoipa::OpenApi;
+use utoipa_scalar::{Scalar, Servable};
 
 use crate::handlers;
 use crate::types::*;
@@ -82,6 +84,23 @@ impl ControlServer {
     }
 }
 
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        get_status, get_metrics, get_metrics_prometheus,
+        put_rate, put_hold, delete_hold,
+        get_controller, put_controller,
+        put_targets, put_headers, put_signal, post_stop,
+    ),
+    components(schemas(
+        TestStatus, MetricsView, ApiResponse,
+        UpdateRateRequest, UpdateTargetsRequest,
+        UpdateMetadataRequest, PushSignalRequest,
+    )),
+    tags((name = "control", description = "Mid-test control endpoints"))
+)]
+pub struct ControlApiDoc;
+
 /// Build the control API router. Exported so AgentServer can nest it.
 pub fn control_router(state: ControlState) -> Router {
     Router::new()
@@ -95,6 +114,7 @@ pub fn control_router(state: ControlState) -> Router {
         .route("/headers", put(put_headers))
         .route("/signal", put(put_signal))
         .route("/stop", post(post_stop))
+        .merge(Scalar::with_url("/docs", ControlApiDoc::openapi()))
         .fallback(handle_not_found)
         .with_state(state)
 }

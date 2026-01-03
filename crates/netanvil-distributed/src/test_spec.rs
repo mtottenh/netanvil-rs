@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// Unique identifier for a test run.
 ///
 /// Format: `t-YYYYMMDD-HHMMSS-XXXX` where XXXX is 4 random hex chars.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TestId(pub String);
 
 impl TestId {
@@ -410,7 +410,7 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
 // ---------------------------------------------------------------------------
 
 /// Status of a test in the queue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TestStatus {
     Queued,
@@ -435,7 +435,7 @@ impl std::fmt::Display for TestStatus {
 }
 
 /// Metadata for a test visible in listings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TestInfo {
     pub id: TestId,
     pub status: TestStatus,

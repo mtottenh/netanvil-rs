@@ -15,10 +15,12 @@ use axum::{Json, Router};
 use serde::Deserialize;
 
 use netanvil_types::NodeInfo;
+use utoipa::OpenApi;
+use utoipa_scalar::{Scalar, Servable};
 
 use crate::leader_server;
 use crate::test_queue::{CancelResult, TestQueue};
-use crate::test_spec::{format_timestamp, TestId, TestSpec};
+use crate::test_spec::{format_timestamp, TestId, TestInfo, TestSpec, TestStatus};
 
 /// Shared state for the leader API server.
 pub struct LeaderApiState {
@@ -42,6 +44,15 @@ pub async fn serve(bind_addr: &str, state: Arc<LeaderApiState>) -> std::io::Resu
         .map_err(|e| std::io::Error::other(format!("leader API serve: {e}")))
 }
 
+#[derive(OpenApi)]
+#[openapi(
+    components(schemas(TestId, TestStatus, TestInfo)),
+    tags((name = "tests", description = "Test lifecycle management"),
+         (name = "agents", description = "Agent discovery"),
+         (name = "system", description = "Health and metrics"))
+)]
+pub struct LeaderApiDoc;
+
 fn leader_router(state: Arc<LeaderApiState>) -> Router {
     Router::new()
         .route("/tests", post(create_test).get(list_tests))
@@ -58,6 +69,7 @@ fn leader_router(state: Arc<LeaderApiState>) -> Router {
         .route("/agents", get(list_agents))
         .route("/health", get(health))
         .route("/metrics/prometheus", get(prometheus_metrics))
+        .merge(Scalar::with_url("/docs", LeaderApiDoc::openapi()))
         .fallback(handle_not_found)
         .with_state(state)
 }

@@ -8,10 +8,10 @@ description = "UDP executor for netanvil-rs load testing"
 
 [dependencies]
 netanvil-types = { workspace = true }
+netanvil-sampling = { workspace = true }
 compio = { workspace = true }
 tracing = { workspace = true }
 rand = { workspace = true }
-rand_distr = { workspace = true }
 
 [dev-dependencies]
 netanvil-test-servers = { workspace = true }

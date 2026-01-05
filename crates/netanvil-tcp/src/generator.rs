@@ -2,19 +2,19 @@
 
 use std::net::SocketAddr;
 
+use netanvil_sampling::Sampler;
 use netanvil_types::distribution::ValueDistribution;
 use netanvil_types::{RequestContext, RequestGenerator};
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
-use rand_distr::{Distribution, Normal};
+use rand::SeedableRng;
 
 use crate::spec::{TcpFraming, TcpRequestSpec, TcpTestMode};
 
 /// Generates TCP requests cycling through targets round-robin.
 ///
 /// `request_size` and `response_size` are sampled per-request from
-/// [`ValueDistribution`], enabling packet size variation (fixed, uniform,
-/// normal, or weighted distributions).
+/// pre-compiled [`Sampler`]s, enabling packet size variation (fixed, uniform,
+/// normal, exponential, log-normal, pareto, zipf, or weighted distributions).
 pub struct SimpleTcpGenerator {
     targets: Vec<SocketAddr>,
     payload: Vec<u8>,
@@ -22,8 +22,8 @@ pub struct SimpleTcpGenerator {
     expect_response: bool,
     response_max_bytes: usize,
     mode: TcpTestMode,
-    request_size_dist: ValueDistribution<u16>,
-    response_size_dist: ValueDistribution<u32>,
+    request_size_sampler: Sampler<u16>,
+    response_size_sampler: Sampler<u32>,
     index: usize,
     rng: SmallRng,
 }
@@ -42,8 +42,8 @@ impl SimpleTcpGenerator {
             expect_response,
             response_max_bytes: 65536,
             mode: TcpTestMode::Echo,
-            request_size_dist: ValueDistribution::Fixed(0),
-            response_size_dist: ValueDistribution::Fixed(0),
+            request_size_sampler: Sampler::new(&ValueDistribution::Fixed(0)),
+            response_size_sampler: Sampler::new(&ValueDistribution::Fixed(0)),
             index: 0,
             rng: SmallRng::from_entropy(),
         }
@@ -61,25 +61,25 @@ impl SimpleTcpGenerator {
 
     /// Set a fixed request size (backward-compatible convenience).
     pub fn with_request_size(mut self, size: u16) -> Self {
-        self.request_size_dist = ValueDistribution::Fixed(size);
+        self.request_size_sampler = Sampler::new(&ValueDistribution::Fixed(size));
         self
     }
 
     /// Set a fixed response size (backward-compatible convenience).
     pub fn with_response_size(mut self, size: u32) -> Self {
-        self.response_size_dist = ValueDistribution::Fixed(size);
+        self.response_size_sampler = Sampler::new(&ValueDistribution::Fixed(size));
         self
     }
 
-    /// Set request size distribution (supports Fixed, Uniform, Normal, Weighted).
+    /// Set request size distribution.
     pub fn with_request_size_dist(mut self, dist: ValueDistribution<u16>) -> Self {
-        self.request_size_dist = dist;
+        self.request_size_sampler = Sampler::new(&dist);
         self
     }
 
-    /// Set response size distribution (supports Fixed, Uniform, Normal, Weighted).
+    /// Set response size distribution.
     pub fn with_response_size_dist(mut self, dist: ValueDistribution<u32>) -> Self {
-        self.response_size_dist = dist;
+        self.response_size_sampler = Sampler::new(&dist);
         self
     }
 }
@@ -91,8 +91,8 @@ impl RequestGenerator for SimpleTcpGenerator {
         let target = self.targets[self.index % self.targets.len()];
         self.index += 1;
 
-        let request_size = sample_u16(&self.request_size_dist, &mut self.rng);
-        let response_size = sample_u32(&self.response_size_dist, &mut self.rng);
+        let request_size = self.request_size_sampler.sample(&mut self.rng);
+        let response_size = self.response_size_sampler.sample(&mut self.rng);
 
         TcpRequestSpec {
             target,
@@ -113,52 +113,4 @@ impl RequestGenerator for SimpleTcpGenerator {
             self.index = 0;
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Sampling helpers (duplicated from netanvil-core/lifecycle to avoid circular dep)
-// ---------------------------------------------------------------------------
-
-fn sample_u16(dist: &ValueDistribution<u16>, rng: &mut SmallRng) -> u16 {
-    match dist {
-        ValueDistribution::Fixed(n) => *n,
-        ValueDistribution::Uniform { min, max } => rng.gen_range(*min..=*max),
-        ValueDistribution::Normal { mean, stddev } => {
-            let normal = Normal::new(*mean, *stddev)
-                .unwrap_or_else(|_| Normal::new(1.0, 0.0).unwrap());
-            let s: f64 = normal.sample(rng);
-            s.round().max(1.0).min(u16::MAX as f64) as u16
-        }
-        ValueDistribution::Weighted(entries) => sample_weighted_val(entries, rng),
-    }
-}
-
-fn sample_u32(dist: &ValueDistribution<u32>, rng: &mut SmallRng) -> u32 {
-    match dist {
-        ValueDistribution::Fixed(n) => *n,
-        ValueDistribution::Uniform { min, max } => rng.gen_range(*min..=*max),
-        ValueDistribution::Normal { mean, stddev } => {
-            let normal = Normal::new(*mean, *stddev)
-                .unwrap_or_else(|_| Normal::new(1.0, 0.0).unwrap());
-            let s: f64 = normal.sample(rng);
-            s.round().max(1.0) as u32
-        }
-        ValueDistribution::Weighted(entries) => sample_weighted_val(entries, rng),
-    }
-}
-
-fn sample_weighted_val<T: Copy>(
-    entries: &[netanvil_types::distribution::WeightedValue<T>],
-    rng: &mut SmallRng,
-) -> T {
-    let total: f64 = entries.iter().map(|e| e.weight).sum();
-    let roll: f64 = rng.gen_range(0.0..total);
-    let mut cumulative = 0.0;
-    for entry in entries {
-        cumulative += entry.weight;
-        if roll < cumulative {
-            return entry.value;
-        }
-    }
-    entries.last().unwrap().value
 }

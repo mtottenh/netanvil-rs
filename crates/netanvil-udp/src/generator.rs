@@ -1,10 +1,10 @@
 use std::net::SocketAddr;
 
+use netanvil_sampling::Sampler;
 use netanvil_types::distribution::ValueDistribution;
 use netanvil_types::{RequestContext, RequestGenerator};
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
-use rand_distr::{Distribution, Normal};
+use rand::SeedableRng;
 
 use crate::spec::UdpRequestSpec;
 
@@ -15,14 +15,14 @@ use crate::spec::UdpRequestSpec;
 /// an 8-byte little-endian sequence number so the executor can correlate
 /// responses and detect loss.
 ///
-/// When `payload_size_dist` is set to a non-Fixed distribution, the payload is
+/// When `payload_size_sampler` is set to a non-Fixed distribution, the payload is
 /// truncated or padded to the sampled size on each request.
 pub struct SimpleUdpGenerator {
     targets: Vec<SocketAddr>,
     payload: Vec<u8>,
     expect_response: bool,
     response_max_bytes: usize,
-    payload_size_dist: Option<ValueDistribution<usize>>,
+    payload_size_sampler: Option<Sampler<usize>>,
     index: usize,
     seq: u64,
     rng: SmallRng,
@@ -35,7 +35,7 @@ impl SimpleUdpGenerator {
             payload,
             expect_response,
             response_max_bytes: 65536,
-            payload_size_dist: None,
+            payload_size_sampler: None,
             index: 0,
             seq: 0,
             rng: SmallRng::from_entropy(),
@@ -48,12 +48,12 @@ impl SimpleUdpGenerator {
         self
     }
 
-    /// Set payload size distribution (supports Fixed, Uniform, Normal, Weighted).
+    /// Set payload size distribution.
     ///
     /// When set, each datagram's payload (excluding the 8-byte sequence header)
     /// is sized according to the distribution.
     pub fn with_payload_size_dist(mut self, dist: ValueDistribution<usize>) -> Self {
-        self.payload_size_dist = Some(dist);
+        self.payload_size_sampler = Some(Sampler::new(&dist));
         self
     }
 }
@@ -70,8 +70,8 @@ impl RequestGenerator for SimpleUdpGenerator {
         self.seq += 1;
 
         // Determine payload body (after sequence header)
-        let body = if let Some(ref dist) = self.payload_size_dist {
-            let size = sample_usize(dist, &mut self.rng);
+        let body = if let Some(ref sampler) = self.payload_size_sampler {
+            let size = sampler.sample(&mut self.rng);
             if self.payload.len() >= size {
                 &self.payload[..size]
             } else {
@@ -111,31 +111,6 @@ impl RequestGenerator for SimpleUdpGenerator {
         if !parsed.is_empty() {
             self.targets = parsed;
             self.index = 0;
-        }
-    }
-}
-
-fn sample_usize(dist: &ValueDistribution<usize>, rng: &mut SmallRng) -> usize {
-    match dist {
-        ValueDistribution::Fixed(n) => *n,
-        ValueDistribution::Uniform { min, max } => rng.gen_range(*min..=*max),
-        ValueDistribution::Normal { mean, stddev } => {
-            let normal = Normal::new(*mean, *stddev)
-                .unwrap_or_else(|_| Normal::new(1.0, 0.0).unwrap());
-            let s: f64 = normal.sample(rng);
-            s.round().max(1.0) as usize
-        }
-        ValueDistribution::Weighted(entries) => {
-            let total: f64 = entries.iter().map(|e| e.weight).sum();
-            let roll: f64 = rng.gen_range(0.0..total);
-            let mut cumulative = 0.0;
-            for entry in entries {
-                cumulative += entry.weight;
-                if roll < cumulative {
-                    return entry.value;
-                }
-            }
-            entries.last().unwrap().value
         }
     }
 }

@@ -59,5 +59,5 @@ pub use report::{ProgressLine, Report};
 pub use result::TestResult;
 pub use scheduler::{ConstantRateScheduler, PoissonScheduler};
 pub use timer_thread::TimerThreadHandle;
-pub use lifecycle::{LifecycleCounter, SampleDistribution};
+pub use lifecycle::{LifecycleCounter, SampleOutput, Sampler};
 pub use transformer::{ConnectionPolicyTransformer, HeaderTransformer, NoopTransformer};

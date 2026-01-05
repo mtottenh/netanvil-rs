@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/netanvil-types",
+    "crates/netanvil-sampling",
     "crates/netanvil-metrics",
     "crates/netanvil-core",
     "crates/netanvil-http",
@@ -25,6 +26,7 @@ members = [
 # Build lua54 explicitly: cargo build -p netanvil-plugin-lua54
 default-members = [
     "crates/netanvil-types",
+    "crates/netanvil-sampling",
     "crates/netanvil-metrics",
     "crates/netanvil-core",
     "crates/netanvil-http",
@@ -106,6 +108,7 @@ clap = { version = "4.5", features = ["derive"] }
 
 # Workspace crate dependencies
 netanvil-types = { path = "crates/netanvil-types" }
+netanvil-sampling = { path = "crates/netanvil-sampling" }
 netanvil-metrics = { path = "crates/netanvil-metrics" }
 netanvil-core = { path = "crates/netanvil-core" }
 netanvil-http = { path = "crates/netanvil-http" }

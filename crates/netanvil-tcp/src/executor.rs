@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use compio::buf::BufResult;
 use compio::io::{AsyncReadExt, AsyncWriteExt};
+use netanvil_sampling::LifecycleCounter;
 use netanvil_types::{
     ConnectionPolicy, ExecutionError, ExecutionResult, RequestContext, RequestExecutor,
     TimingBreakdown,
@@ -33,74 +34,8 @@ pub struct TcpExecutor {
     /// Lifecycle counter for Mixed policy with connection_lifetime.
     /// Properly samples from the distribution (replaces the old broken
     /// `should_keep_connection` that used max/mean as deterministic limits).
-    lifecycle: RefCell<Option<netanvil_core_lifecycle::LifecycleCounter>>,
+    lifecycle: RefCell<Option<LifecycleCounter>>,
     rng: RefCell<SmallRng>,
-}
-
-// LifecycleCounter lives in netanvil-core, but netanvil-tcp can't depend on
-// netanvil-core (circular). We replicate the minimal lifecycle logic here.
-mod netanvil_core_lifecycle {
-    use netanvil_types::distribution::ValueDistribution;
-    use rand::rngs::SmallRng;
-    use rand::{Rng, SeedableRng};
-    use rand_distr::{Distribution, Normal};
-
-    /// Counts events and signals when a distribution-sampled limit is reached.
-    pub struct LifecycleCounter {
-        distribution: ValueDistribution<u32>,
-        count: u32,
-        limit: u32,
-        rng: SmallRng,
-    }
-
-    impl LifecycleCounter {
-        pub fn new(distribution: ValueDistribution<u32>) -> Self {
-            let mut rng = SmallRng::from_entropy();
-            let limit = sample(&distribution, &mut rng);
-            Self {
-                distribution,
-                count: 0,
-                limit,
-                rng,
-            }
-        }
-
-        #[inline]
-        pub fn tick(&mut self) -> bool {
-            self.count += 1;
-            self.count > self.limit
-        }
-
-        pub fn reset(&mut self) {
-            self.count = 0;
-            self.limit = sample(&self.distribution, &mut self.rng);
-        }
-    }
-
-    fn sample(dist: &ValueDistribution<u32>, rng: &mut SmallRng) -> u32 {
-        match dist {
-            ValueDistribution::Fixed(n) => *n,
-            ValueDistribution::Uniform { min, max } => rng.gen_range(*min..=*max),
-            ValueDistribution::Normal { mean, stddev } => {
-                let normal = Normal::new(*mean, *stddev)
-                    .unwrap_or_else(|_| Normal::new(1.0, 0.0).unwrap());
-                let s: f64 = normal.sample(rng);
-                s.round().max(1.0) as u32
-            }
-            ValueDistribution::Weighted(entries) => {
-                let total: f64 = entries.iter().map(|e| e.weight).sum();
-                let roll: f64 = rng.gen_range(0.0..total);
-                let mut cumulative = 0.0;
-                for entry in entries {
-                    cumulative += entry.weight;
-                    if roll < cumulative {
-                        return entry.value;
-                    }
-                }
-                entries.last().unwrap().value
-            }
-        }
-    }
 }
 
 impl Default for TcpExecutor {
@@ -135,7 +70,7 @@ impl TcpExecutor {
             ConnectionPolicy::Mixed {
                 connection_lifetime: Some(dist),
                 ..
-            } => Some(netanvil_core_lifecycle::LifecycleCounter::new(dist.clone())),
+            } => Some(LifecycleCounter::new(dist.clone())),
             _ => None,
         };
 

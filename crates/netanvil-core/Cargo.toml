@@ -8,6 +8,7 @@ description = "Load test engine: worker, coordinator, schedulers, rate controlle
 
 [dependencies]
 netanvil-types = { workspace = true }
+netanvil-sampling = { workspace = true }
 netanvil-metrics = { workspace = true }
 compio = { workspace = true }
 flume = { workspace = true }

@@ -1,0 +1,12 @@
+[package]
+name = "netanvil-sampling"
+description = "Pre-compiled distribution sampling for netanvil-rs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+netanvil-types = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }

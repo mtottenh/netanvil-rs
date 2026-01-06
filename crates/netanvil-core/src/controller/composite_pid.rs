@@ -230,9 +230,12 @@ impl CompositePidController {
             return current_rps;
         }
 
-        // Phase 1: Compute each constraint's desired rate (read-only)
+        // Phase 1: Compute each constraint's desired rate (read-only).
+        // Also track whether the ±20% adjustment clamp fired per constraint
+        // for anti-windup in Phase 3.
         let mut desired_rates: Vec<f64> = Vec::with_capacity(constraints.len());
         let mut raw_values: Vec<f64> = Vec::with_capacity(constraints.len());
+        let mut adj_saturated_flags: Vec<bool> = Vec::with_capacity(constraints.len());
 
         for c in constraints.iter_mut() {
             let raw = autotune::extract_metric(&c.metric, summary);
@@ -263,7 +266,11 @@ impl CompositePidController {
             };
 
             let output = kp * error + ki * tentative_integral + kd * derivative;
-            let adjustment = (output * 0.05).clamp(-0.20, 0.20);
+            let adj_raw = output * 0.05;
+            let adjustment = adj_raw.clamp(-0.20, 0.20);
+            let adj_saturated =
+                (adj_raw > 0.20 && error > 0.0) || (adj_raw < -0.20 && error < 0.0);
+            adj_saturated_flags.push(adj_saturated);
             let rate = (current_rps * (1.0 + adjustment)).clamp(min_rps, max_rps);
             desired_rates.push(rate);
         }
@@ -289,7 +296,10 @@ impl CompositePidController {
             let error = c.limit - raw_values[i];
 
             if i == binding_idx {
-                // Full PID state update for the binding constraint
+                // Full PID state update for the binding constraint.
+                // Suppress integral accumulation when the ±20% adjustment
+                // clamp fired in the error's direction (anti-windup).
+                let suppress = adj_saturated_flags[i];
                 if c.use_scheduling {
                     let normalized = if c.limit.abs() > 1e-9 {
                         error / c.limit
@@ -299,11 +309,11 @@ impl CompositePidController {
                     let mult = autotune::gain_schedule(normalized);
                     if mult.reset_integral {
                         c.pid.integral = 0.0;
-                    } else {
+                    } else if !suppress {
                         c.pid.integral += error;
                         c.pid.integral = c.pid.integral.clamp(-1000.0, 1000.0);
                     }
-                } else {
+                } else if !suppress {
                     c.pid.integral += error;
                     c.pid.integral = c.pid.integral.clamp(-1000.0, 1000.0);
                 }

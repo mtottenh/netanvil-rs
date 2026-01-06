@@ -501,14 +501,19 @@ pub fn pid_step_with_scheduling(input: &PidStepInput, state: &mut PidState) -> f
 
     // Compute PID output with current integral (before accumulation)
     let output = kp * error + ki * state.integral + kd * derivative;
-    let adjustment = (output * 0.05).clamp(-0.20, 0.20);
+    let adj_raw = output * 0.05;
+    let adjustment = adj_raw.clamp(-0.20, 0.20);
     let unclamped_rps = input.current_rps * (1.0 + adjustment);
     let clamped_rps = unclamped_rps.clamp(input.min_rps, input.max_rps);
 
-    // Conditional integration: only accumulate when not saturated in error's direction
-    let saturated_high = unclamped_rps > input.max_rps && error > 0.0;
-    let saturated_low = unclamped_rps < input.min_rps && error < 0.0;
-    if !saturated_high && !saturated_low {
+    // Conditional integration anti-windup: suppress integral accumulation
+    // when EITHER clamp is saturated in the error's direction.
+    // Clamp 1: ±20% proportional adjustment limit
+    let adj_saturated = (adj_raw > 0.20 && error > 0.0) || (adj_raw < -0.20 && error < 0.0);
+    // Clamp 2: absolute min/max RPS bounds
+    let rps_saturated = (unclamped_rps > input.max_rps && error > 0.0)
+        || (unclamped_rps < input.min_rps && error < 0.0);
+    if !adj_saturated && !rps_saturated {
         state.integral += error;
         state.integral = state.integral.clamp(-1000.0, 1000.0);
     }
@@ -530,14 +535,17 @@ pub fn pid_step_fixed(input: &PidStepInput, state: &mut PidState) -> f64 {
 
     // Compute PID output with current integral (before accumulation)
     let output = input.kp * error + input.ki * state.integral + input.kd * derivative;
-    let adjustment = (output * 0.05).clamp(-0.20, 0.20);
+    let adj_raw = output * 0.05;
+    let adjustment = adj_raw.clamp(-0.20, 0.20);
     let unclamped_rps = input.current_rps * (1.0 + adjustment);
     let clamped_rps = unclamped_rps.clamp(input.min_rps, input.max_rps);
 
-    // Conditional integration: only accumulate when not saturated in error's direction
-    let saturated_high = unclamped_rps > input.max_rps && error > 0.0;
-    let saturated_low = unclamped_rps < input.min_rps && error < 0.0;
-    if !saturated_high && !saturated_low {
+    // Conditional integration anti-windup: suppress integral accumulation
+    // when EITHER clamp is saturated in the error's direction.
+    let adj_saturated = (adj_raw > 0.20 && error > 0.0) || (adj_raw < -0.20 && error < 0.0);
+    let rps_saturated = (unclamped_rps > input.max_rps && error > 0.0)
+        || (unclamped_rps < input.min_rps && error < 0.0);
+    if !adj_saturated && !rps_saturated {
         state.integral += error;
         state.integral = state.integral.clamp(-1000.0, 1000.0);
     }

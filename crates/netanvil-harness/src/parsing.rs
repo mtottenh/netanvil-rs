@@ -163,8 +163,36 @@ pub fn parse_count_distribution(s: &str) -> Result<CountDistribution> {
             let entries = parse_weighted_entries::<u32>(params)?;
             Ok(CountDistribution::Weighted(entries))
         }
+        "exponential" | "exp" => {
+            let mean: f64 = params.trim().parse().context("exponential:mean requires a number")?;
+            Ok(CountDistribution::Exponential { mean })
+        }
+        "lognormal" | "log-normal" => {
+            let (mu_s, sigma_s) = params
+                .split_once(',')
+                .context("lognormal requires mu,sigma (e.g. 'lognormal:5.0,0.5')")?;
+            let mu: f64 = mu_s.trim().parse().context("invalid mu")?;
+            let sigma: f64 = sigma_s.trim().parse().context("invalid sigma")?;
+            Ok(CountDistribution::LogNormal { mu, sigma })
+        }
+        "pareto" => {
+            let (scale_s, shape_s) = params
+                .split_once(',')
+                .context("pareto requires scale,shape (e.g. 'pareto:10,2')")?;
+            let scale: f64 = scale_s.trim().parse().context("invalid scale")?;
+            let shape: f64 = shape_s.trim().parse().context("invalid shape")?;
+            Ok(CountDistribution::Pareto { scale, shape })
+        }
+        "zipf" => {
+            let (n_s, exp_s) = params
+                .split_once(',')
+                .context("zipf requires n,exponent (e.g. 'zipf:1000,1.0')")?;
+            let n: u64 = n_s.trim().parse().context("invalid n")?;
+            let exponent: f64 = exp_s.trim().parse().context("invalid exponent")?;
+            Ok(CountDistribution::Zipf { n, exponent })
+        }
         other => {
-            anyhow::bail!("unknown distribution: {other} (use 'fixed', 'uniform', 'normal', or 'weighted')")
+            anyhow::bail!("unknown distribution: {other} (use 'fixed', 'uniform', 'normal', 'weighted', 'exponential', 'lognormal', 'pareto', or 'zipf')")
         }
     }
 }
@@ -203,6 +231,28 @@ pub fn parse_u16_distribution(s: &str) -> Result<ValueDistribution<u16>> {
             let entries = parse_weighted_entries::<u16>(params)?;
             Ok(ValueDistribution::Weighted(entries))
         }
+        "exponential" | "exp" => {
+            let mean: f64 = params.trim().parse().context("exponential:mean requires a number")?;
+            Ok(ValueDistribution::Exponential { mean })
+        }
+        "lognormal" | "log-normal" => {
+            let (mu_s, sigma_s) = params.split_once(',').context("lognormal requires mu,sigma")?;
+            let mu: f64 = mu_s.trim().parse().context("invalid mu")?;
+            let sigma: f64 = sigma_s.trim().parse().context("invalid sigma")?;
+            Ok(ValueDistribution::LogNormal { mu, sigma })
+        }
+        "pareto" => {
+            let (scale_s, shape_s) = params.split_once(',').context("pareto requires scale,shape")?;
+            let scale: f64 = scale_s.trim().parse().context("invalid scale")?;
+            let shape: f64 = shape_s.trim().parse().context("invalid shape")?;
+            Ok(ValueDistribution::Pareto { scale, shape })
+        }
+        "zipf" => {
+            let (n_s, exp_s) = params.split_once(',').context("zipf requires n,exponent")?;
+            let n: u64 = n_s.trim().parse().context("invalid n")?;
+            let exponent: f64 = exp_s.trim().parse().context("invalid exponent")?;
+            Ok(ValueDistribution::Zipf { n, exponent })
+        }
         other => anyhow::bail!("unknown distribution: {other}"),
     }
 }
@@ -240,6 +290,28 @@ pub fn parse_u32_distribution(s: &str) -> Result<ValueDistribution<u32>> {
         "weighted" => {
             let entries = parse_weighted_entries::<u32>(params)?;
             Ok(ValueDistribution::Weighted(entries))
+        }
+        "exponential" | "exp" => {
+            let mean: f64 = params.trim().parse().context("exponential:mean requires a number")?;
+            Ok(ValueDistribution::Exponential { mean })
+        }
+        "lognormal" | "log-normal" => {
+            let (mu_s, sigma_s) = params.split_once(',').context("lognormal requires mu,sigma")?;
+            let mu: f64 = mu_s.trim().parse().context("invalid mu")?;
+            let sigma: f64 = sigma_s.trim().parse().context("invalid sigma")?;
+            Ok(ValueDistribution::LogNormal { mu, sigma })
+        }
+        "pareto" => {
+            let (scale_s, shape_s) = params.split_once(',').context("pareto requires scale,shape")?;
+            let scale: f64 = scale_s.trim().parse().context("invalid scale")?;
+            let shape: f64 = shape_s.trim().parse().context("invalid shape")?;
+            Ok(ValueDistribution::Pareto { scale, shape })
+        }
+        "zipf" => {
+            let (n_s, exp_s) = params.split_once(',').context("zipf requires n,exponent")?;
+            let n: u64 = n_s.trim().parse().context("invalid n")?;
+            let exponent: f64 = exp_s.trim().parse().context("invalid exponent")?;
+            Ok(ValueDistribution::Zipf { n, exponent })
         }
         other => anyhow::bail!("unknown distribution: {other}"),
     }

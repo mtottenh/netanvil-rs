@@ -45,16 +45,20 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.11"
+version = "0.1.29"
 edition = "2021"
 authors = ["NetAnvil-RS Contributors"]
 license = "MIT OR Apache-2.0"
 rust-version = "1.75"
 
 [workspace.dependencies]
-# Async runtime (thread-per-core, io_uring)
+# Async runtime (thread-per-core, io_uring) — using local fork for linked SQE support
 compio = { version = "0.18", features = ["time", "net", "runtime", "macros"] }
 compio-dispatcher = "0.6"
+# Direct dep on compio-net for recv_observe (linked SQE getsockopt)
+compio-net = { version = "0.11" }
+# Direct dep on compio-driver for op types
+compio-driver = { version = "0.11", features = ["io-uring"] }
 
 # HTTP client (compio + hyper bridge)
 cyper = "0.8"
@@ -131,3 +135,19 @@ netanvil-cli = { path = "crates/netanvil-cli" }
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+# Redirect all compio crates to local fork for linked SQE support.
+# This patches both our direct deps and cyper's transitive deps.
+[patch.crates-io]
+compio = { path = "../upstream/compio/compio" }
+compio-buf = { path = "../upstream/compio/compio-buf" }
+compio-driver = { path = "../upstream/compio/compio-driver" }
+compio-runtime = { path = "../upstream/compio/compio-runtime" }
+compio-net = { path = "../upstream/compio/compio-net" }
+compio-io = { path = "../upstream/compio/compio-io" }
+compio-log = { path = "../upstream/compio/compio-log" }
+compio-macros = { path = "../upstream/compio/compio-macros" }
+compio-tls = { path = "../upstream/compio/compio-tls" }
+compio-fs = { path = "../upstream/compio/compio-fs" }
+compio-dispatcher = { path = "../upstream/compio/compio-dispatcher" }
+io-uring = { path = "../upstream/io-uring" }

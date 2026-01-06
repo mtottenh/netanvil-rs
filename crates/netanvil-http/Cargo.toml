@@ -9,9 +9,12 @@ description = "HTTP executor for load testing using compio and cyper"
 [dependencies]
 netanvil-types = { workspace = true }
 compio = { workspace = true }
+compio-driver = { workspace = true }
+compio-net = { workspace = true }
 cyper = { workspace = true }
 cyper-core = "0.8"
 compio-tls = { version = "0.9", features = ["native-tls", "rustls"] }
+rand = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pemfile = "2"
 rustls-native-certs = "0.8"

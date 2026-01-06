@@ -13,5 +13,6 @@ thiserror = { workspace = true }
 http = { workspace = true }
 flume = { workspace = true }
 utoipa = { workspace = true }
+libc = { workspace = true }
 bytes = "1"
 hdrhistogram = { workspace = true }

@@ -5,7 +5,7 @@ use netanvil_core::{
         compute_cohen_coon_gains, gain_schedule, ExplorationManager, MetricExploration, PidState,
     },
     AutotuneParams, AutotuningPidController, CompositePidController, PidGainValues,
-    PidRateController, StaticRateController, StepRateController,
+    PidRateController, RampConfig, RampRateController, StaticRateController, StepRateController,
 };
 use netanvil_types::{MetricsSummary, PidConstraint, PidGains, RateController, TargetMetric};
 
@@ -1618,5 +1618,849 @@ fn autotune_different_system_gains_produce_different_pid_gains() {
         (rate_a_after_explore - rate_b_after_explore).abs() > 100.0,
         "different system gains should produce different post-exploration rates: \
          A={rate_a_after_explore:.0}, B={rate_b_after_explore:.0}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RampRateController (AIMD) behavioral tests
+// ---------------------------------------------------------------------------
+
+/// Build a RampConfig with short durations suitable for unit tests.
+/// Uses smoothing_window=1 and ratio_freeze=false for deterministic behavior.
+fn make_ramp_config() -> RampConfig {
+    RampConfig {
+        warmup_rps: 100.0,
+        warmup_duration: Duration::from_millis(0),
+        latency_multiplier: 3.0,
+        max_error_rate: 5.0,
+        min_rps: 1.0,
+        max_rps: 100_000.0,
+        control_interval: Duration::from_secs(3),
+        test_duration: Duration::from_millis(2), // ceiling ramps over 1ms
+        smoothing_window: 1,
+        enable_ratio_freeze: false,
+        external_constraints: Vec::new(),
+    }
+}
+
+/// Build a MetricsSummary for ramp tests with the given p99 latency and error rate.
+fn make_ramp_summary(requests: u64, p99_ms: f64, error_rate: f64) -> MetricsSummary {
+    MetricsSummary {
+        total_requests: requests,
+        total_errors: (requests as f64 * error_rate) as u64,
+        error_rate,
+        request_rate: requests as f64 / 3.0,
+        latency_p50_ns: (p99_ms * 0.5 * 1_000_000.0) as u64,
+        latency_p90_ns: (p99_ms * 0.9 * 1_000_000.0) as u64,
+        latency_p99_ns: (p99_ms * 1_000_000.0) as u64,
+        window_duration: Duration::from_secs(3),
+        ..Default::default()
+    }
+}
+
+/// Force through warmup and wait for the progressive ceiling to open.
+/// Returns the baseline p99 (median of warmup samples = p99_ms).
+fn warmup_ramp(ctrl: &mut RampRateController, p99_ms: f64) {
+    let s = make_ramp_summary(100, p99_ms, 0.0);
+    ctrl.update(&s); // sample 1
+    ctrl.update(&s); // sample 2
+    ctrl.update(&s); // sample 3 → transitions + first ramping tick
+    // Let the progressive ceiling ramp to max_rps.
+    std::thread::sleep(Duration::from_millis(5));
+}
+
+#[test]
+fn ramp_warmup_holds_at_warmup_rate() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    let s = make_ramp_summary(100, 10.0, 0.0);
+
+    // First two updates are warmup — rate should stay at warmup_rps.
+    let d1 = ctrl.update(&s);
+    assert_eq!(d1.target_rps, 100.0, "warmup tick 1 should hold at warmup_rps");
+    let d2 = ctrl.update(&s);
+    assert_eq!(d2.target_rps, 100.0, "warmup tick 2 should hold at warmup_rps");
+}
+
+#[test]
+fn ramp_transitions_after_three_warmup_samples() {
+    let config = RampConfig {
+        warmup_duration: Duration::from_millis(0),
+        ..make_ramp_config()
+    };
+    let mut ctrl = RampRateController::new(config);
+    let s = make_ramp_summary(100, 10.0, 0.0);
+
+    ctrl.update(&s); // sample 1 — warmup
+    ctrl.update(&s); // sample 2 — warmup
+    // Third update: transitions to ramping and runs one ramping tick.
+    let d3 = ctrl.update(&s);
+    // After transition, rate is no longer simply warmup_rps — it ran a ramping
+    // tick. The ceiling is near warmup_rps so rate stays ~100, but the
+    // controller_info should show the ramping phase.
+    let info = ctrl.controller_info();
+    assert_eq!(
+        info.params["phase"], "ramping",
+        "should be in ramping phase after 3 samples"
+    );
+    // Rate should be close to warmup_rps (ceiling-bound on first tick).
+    assert!(
+        (d3.target_rps - 100.0).abs() < 20.0,
+        "first ramping tick should be near warmup_rps, got {}",
+        d3.target_rps
+    );
+}
+
+#[test]
+fn ramp_warmup_needs_minimum_three_samples() {
+    // Even with warmup_duration=0, we need 3 samples with valid p99.
+    let mut ctrl = RampRateController::new(make_ramp_config());
+
+    // Feed 2 samples with valid p99, then one with zero requests (no sample).
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    ctrl.update(&make_ramp_summary(0, 0.0, 0.0)); // no requests → no sample
+
+    let info = ctrl.controller_info();
+    assert_eq!(
+        info.params["phase"], "warmup",
+        "should still be warming up with only 2 valid samples"
+    );
+}
+
+#[test]
+fn ramp_baseline_is_median_of_warmup_samples() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    // Feed three different p99 values: 5, 10, 100. Median = 10.
+    ctrl.update(&make_ramp_summary(100, 5.0, 0.0));
+    ctrl.update(&make_ramp_summary(100, 100.0, 0.0));
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+
+    let info = ctrl.controller_info();
+    let baseline = info.params["baseline_p99_ms"].as_f64().unwrap();
+    assert!(
+        (baseline - 10.0).abs() < 0.01,
+        "baseline should be median of [5, 10, 100] = 10, got {baseline}"
+    );
+    let target = info.params["target_p99_ms"].as_f64().unwrap();
+    assert!(
+        (target - 30.0).abs() < 0.01,
+        "target should be 10 * 3.0 = 30, got {target}"
+    );
+}
+
+#[test]
+fn ramp_increases_rate_on_clean_tick() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0); // baseline=10ms, target=30ms
+
+    let rate_before = ctrl.current_rate();
+    // p99 well below target → clean tick → 10% increase.
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    let rate_after = ctrl.current_rate();
+
+    let expected = rate_before * 1.10;
+    assert!(
+        (rate_after - expected).abs() / expected < 0.02,
+        "clean tick should increase rate by ~10%: {rate_before:.1} → {rate_after:.1} (expected {expected:.1})"
+    );
+}
+
+#[test]
+fn ramp_compounds_increases_over_multiple_clean_ticks() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0);
+
+    let rate_start = ctrl.current_rate();
+    for _ in 0..5 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let rate_end = ctrl.current_rate();
+
+    // 5 clean ticks: rate * 1.10^5 ≈ 1.61x
+    let expected = rate_start * 1.10_f64.powi(5);
+    assert!(
+        (rate_end - expected).abs() / expected < 0.05,
+        "5 clean ticks should compound: {rate_start:.1} → {rate_end:.1} (expected {expected:.1})"
+    );
+}
+
+#[test]
+fn ramp_gentle_backoff_on_mild_violation() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0); // target = 30ms
+
+    // Increase a few times to establish rate and set ticks_since_increase=0.
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+
+    // Two consecutive violations with ratio 1.0-1.5 to trigger gentle backoff.
+    // p99 = 40ms → ratio = 40/30 ≈ 1.33 (self-caused since ticks_since_increase=0).
+    ctrl.update(&make_ramp_summary(100, 40.0, 0.0)); // streak=1, ratio=1.33 ≥ 1.3 → gentle backoff
+    let rate_before = ctrl.current_rate();
+
+    ctrl.update(&make_ramp_summary(100, 40.0, 0.0)); // streak=2 → gentle backoff
+    let rate_after = ctrl.current_rate();
+
+    let expected = rate_before * 0.90;
+    assert!(
+        (rate_after - expected).abs() / expected < 0.05,
+        "streak≥2 mild violation should gentle backoff (×0.90): {rate_before:.1} → {rate_after:.1} (expected {expected:.1})"
+    );
+}
+
+#[test]
+fn ramp_moderate_backoff_on_medium_violation() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0); // target = 30ms
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let rate_before = ctrl.current_rate();
+
+    // p99 = 50ms → ratio = 50/30 ≈ 1.67 → moderate backoff (×0.75) on first tick.
+    // Known-good floor limits the single-tick drop to ~80% of peak.
+    ctrl.update(&make_ramp_summary(100, 50.0, 0.0));
+    let rate_after = ctrl.current_rate();
+
+    assert!(
+        rate_after < rate_before * 0.88,
+        "moderate violation should drop by >12%: {rate_before:.1} → {rate_after:.1}"
+    );
+}
+
+#[test]
+fn ramp_hard_backoff_on_severe_violation() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0); // target = 30ms
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let rate_before = ctrl.current_rate();
+
+    // p99 = 100ms → ratio = 100/30 ≈ 3.33 → hard backoff even on first violation.
+    ctrl.update(&make_ramp_summary(100, 100.0, 0.0));
+    let rate_after = ctrl.current_rate();
+
+    let expected = rate_before * 0.50;
+    // Known-good floor (80% of max_recent_rate) may prevent going all the way.
+    assert!(
+        rate_after < rate_before * 0.85,
+        "severe violation should hard backoff: {rate_before:.1} → {rate_after:.1} (expected ≤{expected:.1})"
+    );
+}
+
+#[test]
+fn ramp_graduated_backoff_proportional_to_severity() {
+    // Verify that more severe violations cause equal or larger rate drops.
+    let drop_for = |p99_ms: f64| -> f64 {
+        let mut ctrl = RampRateController::new(make_ramp_config());
+        warmup_ramp(&mut ctrl, 10.0);
+        for _ in 0..5 {
+            ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+        }
+        let before = ctrl.current_rate();
+        ctrl.update(&make_ramp_summary(100, p99_ms, 0.0));
+        (before - ctrl.current_rate()) / before
+    };
+
+    let drop_gentle = drop_for(40.0); // ratio ~1.33 → gentle (×0.90)
+    let drop_moderate = drop_for(50.0); // ratio ~1.67 → moderate (×0.75)
+    let drop_hard = drop_for(100.0); // ratio ~3.33 → hard (×0.50)
+
+    assert!(
+        drop_gentle > 0.05,
+        "gentle should cause measurable drop: {:.1}%",
+        drop_gentle * 100.0
+    );
+    assert!(
+        drop_moderate >= drop_gentle - 0.01,
+        "moderate ≥ gentle: {:.1}% vs {:.1}%",
+        drop_moderate * 100.0,
+        drop_gentle * 100.0,
+    );
+    assert!(
+        drop_hard >= drop_moderate - 0.01,
+        "hard ≥ moderate: {:.1}% vs {:.1}%",
+        drop_hard * 100.0,
+        drop_moderate * 100.0,
+    );
+}
+
+#[test]
+fn ramp_single_mild_violation_holds_rate() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0); // target = 30ms
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let rate_before = ctrl.current_rate();
+
+    // p99 = 35ms → ratio = 35/30 ≈ 1.17 < 1.3, streak=1, self-caused → hold_mild.
+    ctrl.update(&make_ramp_summary(100, 35.0, 0.0));
+    let rate_after = ctrl.current_rate();
+
+    assert!(
+        (rate_after - rate_before).abs() / rate_before < 0.02,
+        "single mild self-caused violation should hold: {rate_before:.1} → {rate_after:.1}"
+    );
+}
+
+#[test]
+fn ramp_external_noise_holds_rate() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0); // target = 30ms
+
+    // Increase a few times, then wait (no increases) to set ticks_since_increase > 2.
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0)); // increases
+    }
+
+    // Feed 3 ticks right at the target to prevent increases but avoid violations.
+    // p99 = 29ms → ratio = 29/30 ≈ 0.97, no violation (< 1.0), so streak=0 → increase.
+    // Actually we need ticks where rate doesn't increase. Use violations that cause backoff
+    // to increment ticks_since_increase.
+    // Simpler: use set_rate to then wait for ticks_since_increase to grow.
+    // Actually, ticks_since_increase grows whenever new_rps <= current_rps.
+    // A hold or backoff tick will increment it. Let's cause gentle backoff ticks.
+    ctrl.update(&make_ramp_summary(100, 40.0, 0.0)); // violation, gentle backoff → ticks_since_increase++
+    ctrl.update(&make_ramp_summary(100, 40.0, 0.0)); // ticks_since_increase++
+    ctrl.update(&make_ramp_summary(100, 40.0, 0.0)); // ticks_since_increase=3
+
+    // Now recover latency, then introduce a new mild violation.
+    // Clean tick to reset streak.
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0)); // streak=0 → increase → ticks_since_increase=0
+
+    // Wait again for ticks_since_increase > 2.
+    ctrl.update(&make_ramp_summary(100, 40.0, 0.0)); // streak=1, ticks_since_increase=1
+    ctrl.update(&make_ramp_summary(100, 40.0, 0.0)); // streak=2, ticks_since_increase=2
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0)); // clean → streak=0, increase → ticks_since_increase=0
+
+    // We need a more direct approach: 3 hold/backoff ticks in a row without increase,
+    // then check that mild violation is treated as external.
+    // Use ceiling to prevent increase: set max_rps to current rate.
+    let current = ctrl.current_rate();
+    ctrl.set_max_rps(current);
+
+    // Now clean ticks hit the ceiling (no increase) → ticks_since_increase grows.
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0)); // ceiling-bound, ticks_since_increase++
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0)); // ticks_since_increase++
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0)); // ticks_since_increase=3+
+
+    // Re-open ceiling.
+    ctrl.set_max_rps(100_000.0);
+    let rate_before = ctrl.current_rate();
+
+    // Now a mild violation: not self-caused (ticks_since_increase > 2), ratio < 1.5 → hold_external.
+    ctrl.update(&make_ramp_summary(100, 40.0, 0.0));
+    let rate_after = ctrl.current_rate();
+
+    assert!(
+        (rate_after - rate_before).abs() / rate_before < 0.02,
+        "external noise (ticks_since_increase > 2) should hold: {rate_before:.1} → {rate_after:.1}"
+    );
+}
+
+#[test]
+fn ramp_error_rate_gentle_backoff() {
+    let mut ctrl = RampRateController::new(make_ramp_config()); // max_error_rate = 5%
+    warmup_ramp(&mut ctrl, 10.0);
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let rate_before = ctrl.current_rate();
+
+    // error_rate = 6% → error_pct = 6 > 5 → violation.
+    // error_pct = 6 < 5 * 1.5 = 7.5 → gentle backoff (×0.90).
+    // Latency is clean → latency_rate = current * 1.10.
+    // Conservative = min(1.10 * current, 0.90 * current) = 0.90 * current.
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.06));
+    let rate_after = ctrl.current_rate();
+
+    let expected = rate_before * 0.90;
+    assert!(
+        (rate_after - expected).abs() / expected < 0.05,
+        "error rate just above threshold should gentle backoff (×0.90): {rate_before:.1} → {rate_after:.1} (expected {expected:.1})"
+    );
+}
+
+#[test]
+fn ramp_error_rate_hard_backoff() {
+    let mut ctrl = RampRateController::new(make_ramp_config()); // max_error_rate = 5%
+    warmup_ramp(&mut ctrl, 10.0);
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let rate_before = ctrl.current_rate();
+
+    // error_rate = 10% → error_pct = 10 > 7.5 (5 * 1.5) → hard backoff (×0.50).
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.10));
+    let rate_after = ctrl.current_rate();
+
+    // Known-good floor may intervene, but rate should drop significantly.
+    assert!(
+        rate_after < rate_before * 0.85,
+        "high error rate should hard backoff: {rate_before:.1} → {rate_after:.1}"
+    );
+}
+
+#[test]
+fn ramp_conservative_constraint_takes_minimum() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0); // target = 30ms
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+
+    // Both latency and error above threshold simultaneously.
+    // p99 = 50ms → ratio ≈ 1.67 → moderate backoff (×0.75).
+    // error_rate = 10% → hard backoff (×0.50).
+    // Conservative = min(0.75 * rate, 0.50 * rate) = 0.50 * rate.
+    let rate_before = ctrl.current_rate();
+    ctrl.update(&make_ramp_summary(100, 50.0, 0.10));
+    let rate_after = ctrl.current_rate();
+
+    // Error hard backoff (×0.50) is more conservative than latency moderate (×0.75).
+    // Known-good floor may lift it, but it should be well below ×0.75.
+    assert!(
+        rate_after < rate_before * 0.85,
+        "should take most conservative constraint: {rate_before:.1} → {rate_after:.1}"
+    );
+}
+
+#[test]
+fn ramp_known_good_floor_prevents_deep_drop() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0);
+
+    // Ramp up to establish a known-good high rate.
+    for _ in 0..10 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let peak_rate = ctrl.current_rate();
+    assert!(peak_rate > 200.0, "should have ramped up from 100, got {peak_rate}");
+
+    // Multiple hard backoffs (severe latency violations).
+    for _ in 0..5 {
+        ctrl.update(&make_ramp_summary(100, 200.0, 0.0)); // ratio ≈ 6.67 → hard backoff
+    }
+    let floor_rate = ctrl.current_rate();
+
+    // Should not drop below 80% of peak_rate (known-good floor).
+    let expected_floor = peak_rate * 0.80;
+    assert!(
+        floor_rate >= expected_floor * 0.95,
+        "known-good floor should prevent deep drops: peak={peak_rate:.1}, floor={floor_rate:.1}, expected≥{expected_floor:.1}"
+    );
+}
+
+#[test]
+fn ramp_respects_min_rps_bound() {
+    let config = RampConfig {
+        min_rps: 50.0,
+        ..make_ramp_config()
+    };
+    let mut ctrl = RampRateController::new(config);
+    warmup_ramp(&mut ctrl, 10.0);
+
+    // Drive rate down with severe violations.
+    for _ in 0..100 {
+        ctrl.update(&make_ramp_summary(100, 500.0, 0.5));
+    }
+
+    assert!(
+        ctrl.current_rate() >= 50.0,
+        "rate should never go below min_rps=50, got {}",
+        ctrl.current_rate()
+    );
+}
+
+#[test]
+fn ramp_respects_max_rps_bound() {
+    let config = RampConfig {
+        max_rps: 500.0,
+        ..make_ramp_config()
+    };
+    let mut ctrl = RampRateController::new(config);
+    warmup_ramp(&mut ctrl, 10.0);
+
+    // Drive rate up with many clean ticks.
+    for _ in 0..100 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+
+    assert!(
+        ctrl.current_rate() <= 500.0,
+        "rate should never exceed max_rps=500, got {}",
+        ctrl.current_rate()
+    );
+}
+
+#[test]
+fn ramp_timeout_hard_backoff() {
+    let mut ctrl = RampRateController::new(make_ramp_config()); // max_error_rate = 5%
+    warmup_ramp(&mut ctrl, 10.0);
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let rate_before = ctrl.current_rate();
+
+    // hard_threshold = (5.0/100 * 2.5).max(0.05) = 0.125
+    // timeout_fraction = 20/100 = 0.20 > 0.125 → hard backoff (×0.50).
+    let mut s = make_ramp_summary(100, 10.0, 0.0);
+    s.timeout_count = 20;
+    ctrl.update(&s);
+    let rate_after = ctrl.current_rate();
+
+    let expected = rate_before * 0.50;
+    assert!(
+        (rate_after - expected).abs() / expected < 0.02,
+        "high timeout fraction should hard backoff (×0.50): {rate_before:.1} → {rate_after:.1} (expected {expected:.1})"
+    );
+}
+
+#[test]
+fn ramp_timeout_soft_backoff() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0);
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let rate_before = ctrl.current_rate();
+
+    // soft_threshold = (5.0/100 * 0.5).max(0.01) = 0.025
+    // timeout_fraction = 5/100 = 0.05 > 0.025 but < 0.125 → gentle backoff (×0.90).
+    let mut s = make_ramp_summary(100, 10.0, 0.0);
+    s.timeout_count = 5;
+    ctrl.update(&s);
+    let rate_after = ctrl.current_rate();
+
+    let expected = rate_before * 0.90;
+    assert!(
+        (rate_after - expected).abs() / expected < 0.02,
+        "moderate timeout fraction should gentle backoff (×0.90): {rate_before:.1} → {rate_after:.1} (expected {expected:.1})"
+    );
+}
+
+#[test]
+fn ramp_inflight_drops_gentle_backoff() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0);
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let rate = ctrl.current_rate();
+    let rate_before = rate;
+
+    // drop_rate = in_flight_drops / window_secs = drops / 3.0
+    // drop_fraction = drop_rate / current_rps
+    // Need drop_fraction > 0.01: drops > 0.01 * rate * 3.0
+    let drops = (0.02 * rate * 3.0) as u64; // ~2% drops
+    let mut s = make_ramp_summary(100, 10.0, 0.0);
+    s.in_flight_drops = drops;
+    ctrl.update(&s);
+    let rate_after = ctrl.current_rate();
+
+    let expected = rate_before * 0.90;
+    assert!(
+        (rate_after - expected).abs() / expected < 0.05,
+        ">1% in-flight drops should gentle backoff (×0.90): {rate_before:.1} → {rate_after:.1} (expected {expected:.1})"
+    );
+}
+
+#[test]
+fn ramp_inflight_drops_hold_at_edge() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0);
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let rate = ctrl.current_rate();
+    let rate_before = rate;
+
+    // Need 0.001 < drop_fraction < 0.01: drops between 0.001 * rate * 3 and 0.01 * rate * 3.
+    let drops = (0.005 * rate * 3.0) as u64; // ~0.5% drops
+    let mut s = make_ramp_summary(100, 10.0, 0.0);
+    s.in_flight_drops = drops;
+    ctrl.update(&s);
+    let rate_after = ctrl.current_rate();
+
+    assert!(
+        (rate_after - rate_before).abs() / rate_before < 0.02,
+        "0.1-1% in-flight drops should hold: {rate_before:.1} → {rate_after:.1}"
+    );
+}
+
+#[test]
+fn ramp_median_smoothing_rejects_single_outlier() {
+    let config = RampConfig {
+        smoothing_window: 3,
+        ..make_ramp_config()
+    };
+    let mut ctrl = RampRateController::new(config);
+    warmup_ramp(&mut ctrl, 10.0); // target = 30ms
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+
+    // Feed 2 normal + 1 outlier. Median of [10, 10, 200] = 10 → no violation.
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0)); // window: [10]
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0)); // window: [10, 10]
+    let rate_before = ctrl.current_rate();
+
+    ctrl.update(&make_ramp_summary(100, 200.0, 0.0)); // window: [10, 10, 200] → median=10
+    let rate_after = ctrl.current_rate();
+
+    // Median is 10ms, ratio = 10/30 < 1.0 → should increase, not backoff.
+    assert!(
+        rate_after >= rate_before,
+        "single outlier should be rejected by median smoothing: {rate_before:.1} → {rate_after:.1}"
+    );
+}
+
+#[test]
+fn ramp_ratio_freeze_holds_when_achieved_exceeds_target() {
+    let config = RampConfig {
+        enable_ratio_freeze: true,
+        ..make_ramp_config()
+    };
+    let mut ctrl = RampRateController::new(config);
+    warmup_ramp(&mut ctrl, 10.0);
+
+    // Burn through the 10-tick startup grace period.
+    for _ in 0..12 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let rate_before = ctrl.current_rate();
+
+    // Set achieved_rps >> target. The controller freezes when ratio > 2.0.
+    // request_rate in summary = achieved RPS. current_rps = rate_before.
+    // ratio = request_rate / current_rps > 2.0.
+    let mut s = make_ramp_summary(100, 10.0, 0.0);
+    s.request_rate = rate_before * 3.0; // ratio = 3.0 > 2.0
+    ctrl.update(&s);
+    let rate_after = ctrl.current_rate();
+
+    assert!(
+        (rate_after - rate_before).abs() < 0.01,
+        "ratio freeze should hold rate: {rate_before:.1} → {rate_after:.1}"
+    );
+}
+
+#[test]
+fn ramp_oscillates_around_equilibrium() {
+    // Verify the fundamental AIMD behavior: rate climbs on clean ticks,
+    // backs off when latency exceeds the target, then climbs again.
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0); // target = 30ms
+
+    let mut rates = Vec::new();
+    let threshold_rps = 300.0;
+
+    for i in 0..30 {
+        // Simulate a system where latency spikes above target when rate > threshold.
+        let current = ctrl.current_rate();
+        let p99 = if current > threshold_rps { 60.0 } else { 10.0 };
+        ctrl.update(&make_ramp_summary(100, p99, 0.0));
+        rates.push(ctrl.current_rate());
+
+        // Don't assert on first few ticks (settling).
+        if i > 5 {
+            // After settling, rate should stay in a bounded range around the threshold.
+            assert!(
+                ctrl.current_rate() > 50.0 && ctrl.current_rate() < 1000.0,
+                "rate should stay bounded during AIMD oscillation, tick {i}: {}",
+                ctrl.current_rate()
+            );
+        }
+    }
+
+    // Verify we saw both increases and decreases (the oscillation).
+    let increases = rates.windows(2).filter(|w| w[1] > w[0]).count();
+    let decreases = rates.windows(2).filter(|w| w[1] < w[0]).count();
+    assert!(
+        increases > 3 && decreases > 1,
+        "should oscillate: {increases} increases, {decreases} decreases in {rates:?}"
+    );
+}
+
+/// Regression test for the hysteresis-driven ratchet collapse.
+///
+/// Models a plant with slow-draining resources (like nginx keepalive
+/// connections consuming file descriptors):
+///
+///   - Resources accumulate proportional to the request rate.
+///   - Resources decay exponentially (time constant = 20 ticks, ~60s).
+///   - When resources exceed capacity, latency spikes hard.
+///
+/// Without cooldown + congestion avoidance, the AIMD ratchets down
+/// geometrically because:
+///   1. Aggressive ramp-up overshoots before old resources drain.
+///   2. The known-good floor expires during backoff, allowing deeper drops.
+///   3. Each cycle lowers the floor further.
+///
+/// With cooldown, the controller waits for plant recovery before
+/// ramping back up. With congestion avoidance, it approaches the
+/// failure rate linearly instead of exponentially. Together they
+/// prevent the ratchet and stabilize near the sustainable rate.
+#[test]
+fn ramp_stabilizes_despite_plant_hysteresis() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0); // baseline=10ms, target=30ms (3×)
+
+    // Plant parameters.
+    //
+    // Resources accumulate as: resources += rate * ACCUM per tick
+    // Resources decay as:      resources *= (1 - DECAY) per tick
+    // Steady-state resources:  rate * ACCUM / DECAY
+    // Sustainable rate:        CAPACITY * DECAY / ACCUM = 2500 RPS
+    let capacity = 500.0;
+    let accum = 0.01;  // resources consumed per RPS per tick
+    let decay = 0.05;  // fraction freed per tick (τ = 20 ticks ≈ 60s)
+    let sustainable_rate = capacity * decay / accum; // 2500.0
+    let mut resources = 0.0;
+
+    let mut rates = Vec::new();
+
+    for _ in 0..200 {
+        let current = ctrl.current_rate();
+
+        // Plant dynamics: resources are consumed by requests and freed slowly.
+        resources += current * accum;
+        resources *= 1.0 - decay;
+
+        // When resources exceed capacity, latency spikes to ~3× target
+        // (triggering backoff). Below capacity, latency is well below target.
+        let p99 = if resources > capacity {
+            100.0 // 100ms → lat_ratio ≈ 3.3 → hard backoff
+        } else {
+            10.0  // 10ms → lat_ratio ≈ 0.33 → increase
+        };
+
+        ctrl.update(&make_ramp_summary(100, p99, 0.0));
+        rates.push(ctrl.current_rate());
+    }
+
+    // The rate should stabilize near the sustainable rate, not collapse
+    // to min_rps. We check that the last quarter average is within 50%
+    // of the plant's true sustainable capacity.
+    let n = rates.len();
+    let last_quarter = &rates[n * 3 / 4..];
+    let avg_last = last_quarter.iter().sum::<f64>() / last_quarter.len() as f64;
+
+    assert!(
+        avg_last > sustainable_rate * 0.5,
+        "rate should stabilize near sustainable rate ({sustainable_rate:.0}), \
+         but last quarter average was {avg_last:.0} (ratchet collapse detected). \
+         Last 20 rates: {:?}",
+        &rates[n.saturating_sub(20)..]
+    );
+
+    // Verify the controller is still active (not stuck at a fixed rate).
+    // With congestion avoidance, it probes cautiously and may rarely
+    // overshoot, so we only require at least 1 backoff and some increases.
+    let increases = rates.windows(2).filter(|w| w[1] > w[0]).count();
+    let decreases = rates.windows(2).filter(|w| w[1] < w[0]).count();
+    assert!(
+        increases > 5 && decreases >= 1,
+        "controller should be actively probing, \
+         but saw only {increases} increases and {decreases} decreases"
+    );
+}
+
+#[test]
+fn ramp_set_latency_multiplier_updates_target() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0); // baseline=10, target=30 (3×)
+
+    let info = ctrl.controller_info();
+    assert!(
+        (info.params["target_p99_ms"].as_f64().unwrap() - 30.0).abs() < 0.01,
+        "initial target should be 30ms"
+    );
+
+    // Update multiplier mid-test via apply_update.
+    let result = ctrl.apply_update(
+        "set_latency_multiplier",
+        &serde_json::json!({"multiplier": 5.0}),
+    );
+    assert!(result.is_ok());
+
+    let info = ctrl.controller_info();
+    let new_target = info.params["target_p99_ms"].as_f64().unwrap();
+    assert!(
+        (new_target - 50.0).abs() < 0.01,
+        "target should be 10 * 5.0 = 50 after update, got {new_target}"
+    );
+}
+
+#[test]
+fn ramp_apply_update_set_max_rps() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0);
+
+    let result = ctrl.apply_update("set_max_rps", &serde_json::json!({"max_rps": 200.0}));
+    assert!(result.is_ok());
+
+    // Drive rate up — should be capped at 200.
+    for _ in 0..100 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    assert!(
+        ctrl.current_rate() <= 200.0,
+        "rate should be capped at new max_rps=200, got {}",
+        ctrl.current_rate()
+    );
+}
+
+#[test]
+fn ramp_apply_update_rejects_unknown_action() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    let result = ctrl.apply_update("set_bogus", &serde_json::json!({}));
+    assert!(result.is_err());
+}
+
+#[test]
+fn ramp_controller_state_empty_during_warmup() {
+    let config = RampConfig {
+        warmup_duration: Duration::from_secs(60), // long warmup
+        ..make_ramp_config()
+    };
+    let mut ctrl = RampRateController::new(config);
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+
+    let state = ctrl.controller_state();
+    assert!(
+        state.is_empty(),
+        "controller_state should be empty during warmup"
+    );
+}
+
+#[test]
+fn ramp_controller_state_populated_during_ramping() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0);
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+
+    let state = ctrl.controller_state();
+    let names: Vec<&str> = state.iter().map(|(name, _)| *name).collect();
+    assert!(
+        names.contains(&"netanvil_ramp_smoothed_p99_ms"),
+        "should expose smoothed_p99_ms gauge: {names:?}"
+    );
+    assert!(
+        names.contains(&"netanvil_ramp_latency_ratio"),
+        "should expose latency_ratio gauge: {names:?}"
     );
 }

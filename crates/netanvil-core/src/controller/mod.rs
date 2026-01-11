@@ -1,5 +1,6 @@
 pub mod autotune;
 pub mod builder;
+mod ceiling;
 mod composite_pid;
 mod pid;
 mod pid_autotune;

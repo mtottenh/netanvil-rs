@@ -23,9 +23,10 @@ pub use controller::{
     ControllerInfo, ControllerType, ControllerView, HoldCommand, HoldState,
 };
 pub use config::{
-    ConnectionConfig, ConnectionPolicy, EventLogOutput, HttpVersion, PidConstraint, PidGains,
-    PidTarget, PluginConfig, PluginType, ProtocolConfig, RateConfig, ResponseSignalConfig,
-    SchedulerConfig, SignalAggregation, TargetMetric, TestConfig, TlsConfig,
+    ConnectionConfig, ConnectionPolicy, EventLogOutput, ExternalConstraintConfig, HttpVersion,
+    MissingSignalBehavior, PidConstraint, PidGains, PidTarget, PluginConfig, PluginType,
+    ProtocolConfig, RateConfig, ResponseSignalConfig, SchedulerConfig, SignalAggregation,
+    SignalDirection, TargetMetric, TestConfig, TlsConfig,
 };
 pub use distribution::{CountDistribution, ValueDistribution, WeightedValue};
 pub use distributed::{MetricsFetcher, NodeCommander, NodeDiscovery, RemoteMetrics};

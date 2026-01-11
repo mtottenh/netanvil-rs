@@ -912,6 +912,7 @@ pub fn build_rate_config(
             max_error_rate: ramp.max_error_rate,
             min_rps: pid.min_rps,
             max_rps: pid.max_rps,
+            external_constraints: Vec::new(),
         }),
         other => {
             anyhow::bail!("unknown rate mode: {other} (use 'static', 'step', 'pid', or 'ramp')")

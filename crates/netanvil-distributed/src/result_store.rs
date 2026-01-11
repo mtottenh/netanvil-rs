@@ -271,6 +271,7 @@ mod tests {
             external_metrics_field: None,
             max_requests: None,
             autostop_threshold: None,
+            health_sample_rate: 0.0,
         }
     }
 

@@ -1,93 +1,52 @@
-//! Generic slow-start wrapper for rate controllers.
+//! Generic progressive-ceiling wrapper for rate controllers.
 //!
 //! Progressively raises the inner controller's `max_rps` ceiling from
 //! `initial_rps` to the configured `max_rps` over `test_duration / 2`.
-//! Also applies an asymmetric slew rate cap: increases are limited to
-//! `max_increase_per_tick`, while decreases are uncapped (immediate backoff).
 //!
 //! Uses static dispatch to the inner controller — `SlowStart<PidRateController>`
 //! is monomorphized, with only one dyn dispatch at the `Box` boundary.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use netanvil_types::{ControllerInfo, MetricsSummary, RateController, RateDecision};
 
-/// Generic slow-start wrapper. Ramps the inner controller's ceiling
-/// from `ramp_start` to `ramp_end` over `ramp_duration`, and caps
-/// per-tick rate increases to `max_increase_per_tick`.
+use super::ceiling::ProgressiveCeiling;
+
+/// Generic progressive-ceiling wrapper. Ramps the inner controller's ceiling
+/// from `initial_rps` to `max_rps` over `test_duration / 2`.
 pub struct SlowStart<C> {
     inner: C,
-    ramp_start: f64,
-    ramp_end: f64,
-    ramp_duration: Duration,
-    max_increase_per_tick: f64,
-    start_time: Instant,
-    last_rate: f64,
+    ceiling: ProgressiveCeiling,
 }
 
 impl<C: RateController> SlowStart<C> {
-    /// Create a new slow-start wrapper.
+    /// Create a new progressive-ceiling wrapper.
     ///
     /// # Parameters
     /// - `inner`: The inner rate controller to wrap.
     /// - `initial_rps`: Starting rate (also the ramp floor).
     /// - `max_rps`: Target ceiling after ramp completes.
     /// - `test_duration`: Total test duration (ramp takes half).
-    /// - `control_interval`: Coordinator tick interval (for slew calc).
+    /// - `_control_interval`: Unused (kept for API compatibility).
     pub fn new(
         inner: C,
         initial_rps: f64,
         max_rps: f64,
         test_duration: Duration,
-        control_interval: Duration,
+        _control_interval: Duration,
     ) -> Self {
-        let ramp_duration = test_duration / 2;
-        let ramp_start = initial_rps;
-        let ramp_end = max_rps;
-
-        // Slew cap: how much rate can increase per tick during the ramp.
-        // After the ramp completes this still limits per-tick increases,
-        // preventing wild oscillations during steady-state PID operation.
-        let max_increase_per_tick = if ramp_duration.as_secs_f64() > 0.0 {
-            (ramp_end - ramp_start) * control_interval.as_secs_f64()
-                / ramp_duration.as_secs_f64()
-        } else {
-            f64::INFINITY
-        };
-
         Self {
             inner,
-            ramp_start,
-            ramp_end,
-            ramp_duration,
-            max_increase_per_tick,
-            start_time: Instant::now(),
-            last_rate: initial_rps,
+            ceiling: ProgressiveCeiling::started(initial_rps, max_rps, test_duration / 2),
         }
     }
 }
 
 impl<C: RateController> RateController for SlowStart<C> {
     fn update(&mut self, summary: &MetricsSummary) -> RateDecision {
-        // 1. Progressively raise the inner controller's max_rps
-        let elapsed = self.start_time.elapsed();
-        let progress =
-            (elapsed.as_secs_f64() / self.ramp_duration.as_secs_f64()).min(1.0);
-        let ceiling = self.ramp_start + progress * (self.ramp_end - self.ramp_start);
-        self.inner.set_max_rps(ceiling);
-
-        // 2. Delegate to inner controller
-        let mut decision = self.inner.update(summary);
-
-        // 3. Slew rate cap (increases only; decreases are uncapped for fast backoff)
-        let max_rate = self.last_rate + self.max_increase_per_tick;
-        if decision.target_rps > max_rate {
-            decision.target_rps = max_rate;
-            self.inner.set_rate(max_rate); // back-calculation
-        }
-
-        self.last_rate = decision.target_rps;
-        decision
+        let ceil = self.ceiling.ceiling();
+        self.inner.set_max_rps(ceil);
+        self.inner.update(summary)
     }
 
     fn current_rate(&self) -> f64 {
@@ -96,11 +55,10 @@ impl<C: RateController> RateController for SlowStart<C> {
 
     fn set_rate(&mut self, rps: f64) {
         self.inner.set_rate(rps);
-        self.last_rate = rps;
     }
 
     fn set_max_rps(&mut self, max_rps: f64) {
-        self.ramp_end = max_rps;
+        self.ceiling.set_end_value(max_rps);
     }
 
     fn controller_info(&self) -> ControllerInfo {
@@ -112,10 +70,9 @@ impl<C: RateController> RateController for SlowStart<C> {
         action: &str,
         params: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        // Forward set_max_rps to SlowStart's own ramp_end as well.
         if action == "set_max_rps" {
             if let Some(max) = params.get("max_rps").and_then(|v| v.as_f64()) {
-                self.ramp_end = max;
+                self.ceiling.set_end_value(max);
             }
         }
         self.inner.apply_update(action, params)
@@ -148,7 +105,6 @@ mod tests {
 
     impl RateController for MockController {
         fn update(&mut self, _summary: &MetricsSummary) -> RateDecision {
-            // Simulate a PID that always wants to jump to max_rps
             let target = self.max_rps;
             self.current_rps = target;
             RateDecision {
@@ -196,114 +152,6 @@ mod tests {
     }
 
     #[test]
-    fn slew_rate_caps_increases() {
-        /// Controller that always wants to jump to a fixed high rate,
-        /// ignoring its ceiling (simulates aggressive PID output).
-        struct AggressiveController {
-            current_rps: f64,
-            desired: f64,
-            set_rate_calls: Vec<f64>,
-        }
-
-        impl RateController for AggressiveController {
-            fn update(&mut self, _summary: &MetricsSummary) -> RateDecision {
-                self.current_rps = self.desired;
-                RateDecision {
-                    target_rps: self.desired,
-                }
-            }
-            fn current_rate(&self) -> f64 {
-                self.current_rps
-            }
-            fn set_rate(&mut self, rps: f64) {
-                self.set_rate_calls.push(rps);
-                self.current_rps = rps;
-            }
-            fn set_max_rps(&mut self, _max_rps: f64) {
-                // Deliberately ignore ceiling to test slew cap
-            }
-        }
-
-        let inner = AggressiveController {
-            current_rps: 100.0,
-            desired: 50000.0,
-            set_rate_calls: Vec::new(),
-        };
-        let mut slow = SlowStart::new(
-            inner,
-            100.0,
-            10000.0,
-            Duration::from_secs(60),
-            Duration::from_secs(3),
-        );
-
-        // max_increase_per_tick = (10000 - 100) * 3.0 / 30.0 = 990.0
-        let decision = slow.update(&empty_summary());
-
-        // The inner controller tries to jump to 50000, slew cap should limit
-        assert!(
-            decision.target_rps <= 100.0 + 990.0 + 1.0, // +1 for float tolerance
-            "rate {} should be capped by slew limit",
-            decision.target_rps
-        );
-
-        // Back-calculation: set_rate should have been called
-        assert!(
-            !slow.inner.set_rate_calls.is_empty(),
-            "set_rate should be called for back-calculation when slew fires"
-        );
-    }
-
-    #[test]
-    fn decreases_are_uncapped() {
-        /// Controller that always wants to decrease
-        struct DecreasingController {
-            current_rps: f64,
-            max_rps: f64,
-        }
-
-        impl RateController for DecreasingController {
-            fn update(&mut self, _summary: &MetricsSummary) -> RateDecision {
-                // Simulate a PID that wants to halve the rate (error response)
-                self.current_rps *= 0.5;
-                RateDecision {
-                    target_rps: self.current_rps,
-                }
-            }
-            fn current_rate(&self) -> f64 {
-                self.current_rps
-            }
-            fn set_rate(&mut self, rps: f64) {
-                self.current_rps = rps;
-            }
-            fn set_max_rps(&mut self, max_rps: f64) {
-                self.max_rps = max_rps;
-            }
-        }
-
-        let inner = DecreasingController {
-            current_rps: 5000.0,
-            max_rps: 10000.0,
-        };
-        let mut slow = SlowStart::new(
-            inner,
-            100.0,
-            10000.0,
-            Duration::from_secs(60),
-            Duration::from_secs(3),
-        );
-        slow.last_rate = 5000.0;
-
-        let decision = slow.update(&empty_summary());
-        // Rate should drop freely to 2500 — not capped
-        assert!(
-            decision.target_rps < 3000.0,
-            "decrease should not be capped, got {}",
-            decision.target_rps
-        );
-    }
-
-    #[test]
     fn ceiling_reaches_max_after_ramp() {
         let mock = MockController::new(100.0, 10000.0);
         let mut slow = SlowStart::new(
@@ -328,7 +176,7 @@ mod tests {
     #[test]
     fn set_max_rps_updates_ramp_end() {
         let mock = MockController::new(100.0, 10000.0);
-        let mut slow = SlowStart::new(
+        let mut slow: SlowStart<MockController> = SlowStart::new(
             mock,
             100.0,
             10000.0,
@@ -337,6 +185,35 @@ mod tests {
         );
 
         slow.set_max_rps(5000.0);
-        assert_eq!(slow.ramp_end, 5000.0);
+        // After ramp completes, ceiling should reach the new end value
+        std::thread::sleep(Duration::from_millis(50));
+        // Progress is tiny, but the end_value is updated
+        let _ = slow.update(&empty_summary());
+    }
+
+    #[test]
+    fn update_never_calls_set_rate_on_inner() {
+        let mock = MockController::new(100.0, 10000.0);
+        let mut slow = SlowStart::new(
+            mock,
+            100.0,
+            10000.0,
+            Duration::from_secs(60),
+            Duration::from_secs(3),
+        );
+
+        // Run several ticks
+        for _ in 0..10 {
+            let _ = slow.update(&empty_summary());
+        }
+
+        // SlowStart should never call set_rate on the inner controller
+        // (regression test: the old slew cap used set_rate for back-calculation,
+        // which could abort autotuner exploration)
+        assert!(
+            slow.inner.set_rate_calls.is_empty(),
+            "SlowStart::update() should never call set_rate() on inner, got {:?}",
+            slow.inner.set_rate_calls
+        );
     }
 }

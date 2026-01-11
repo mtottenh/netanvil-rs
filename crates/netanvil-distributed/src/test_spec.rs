@@ -166,6 +166,10 @@ pub struct TestSpec {
     /// Stop if error count exceeds this.
     #[serde(default)]
     pub autostop_threshold: Option<u64>,
+
+    /// Fraction of TCP reads to sample for health observation (0.0–1.0).
+    #[serde(default)]
+    pub health_sample_rate: f64,
 }
 
 fn default_method() -> String {
@@ -204,6 +208,8 @@ pub enum RateSpecConfig {
         #[serde(default = "default_min_rps")]
         min_rps: f64,
         max_rps: f64,
+        #[serde(default)]
+        external_constraints: Vec<netanvil_types::ExternalConstraintConfig>,
     },
     Pid {
         initial_rps: f64,
@@ -292,6 +298,7 @@ impl TestSpec {
             md5_check_enabled: false,
             response_signal_headers: Vec::new(),
             event_log: None,
+            health_sample_rate: self.health_sample_rate,
         })
     }
 
@@ -334,6 +341,7 @@ fn convert_rate(spec: RateSpecConfig) -> Result<RateConfig, SpecError> {
             max_error_rate,
             min_rps,
             max_rps,
+            external_constraints,
         } => {
             let wd = parse_duration(&warmup_duration).map_err(|e| {
                 SpecError(format!(
@@ -347,6 +355,7 @@ fn convert_rate(spec: RateSpecConfig) -> Result<RateConfig, SpecError> {
                 max_error_rate,
                 min_rps,
                 max_rps,
+                external_constraints,
             })
         }
         RateSpecConfig::Pid {
@@ -504,6 +513,7 @@ mod tests {
             external_metrics_field: None,
             max_requests: None,
             autostop_threshold: None,
+            health_sample_rate: 0.0,
         };
         let summary = spec.summary();
         assert!(summary.contains("Ramp"), "got: {summary}");
@@ -530,6 +540,7 @@ mod tests {
             external_metrics_field: None,
             max_requests: None,
             autostop_threshold: None,
+            health_sample_rate: 0.01,
         };
         let config = spec.into_config().unwrap();
         assert_eq!(config.duration, Duration::from_secs(120));

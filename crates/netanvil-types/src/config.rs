@@ -109,6 +109,11 @@ pub struct TestConfig {
     /// per completed request (timing, status, bytes, errors).
     #[serde(default)]
     pub event_log: Option<EventLogOutput>,
+    /// Fraction of TCP reads to sample for CPU affinity observation (0.0-1.0).
+    /// When > 0.0, uses io_uring linked SQEs to atomically read SO_INCOMING_CPU.
+    /// Default: 0.0 (disabled).
+    #[serde(default)]
+    pub health_sample_rate: f64,
 }
 
 /// Per-request event log output configuration.
@@ -261,6 +266,7 @@ impl Default for TestConfig {
             md5_check_enabled: false,
             response_signal_headers: Vec::new(),
             event_log: None,
+            health_sample_rate: 0.0,
         }
     }
 }
@@ -313,6 +319,10 @@ pub enum RateConfig {
         min_rps: f64,
         /// Maximum RPS ceiling
         max_rps: f64,
+        /// External signal constraints. Empty = no external constraints (default).
+        /// Each maps a named signal to a backoff threshold.
+        #[serde(default)]
+        external_constraints: Vec<ExternalConstraintConfig>,
     },
 }
 
@@ -397,6 +407,11 @@ pub struct ConnectionConfig {
     /// manually and filters by address family before connecting.
     #[serde(default)]
     pub dns_mode: Option<DnsMode>,
+    /// Maximum concurrent in-flight requests per I/O core. When at capacity,
+    /// new fire events are dropped (not queued), creating visible backpressure.
+    /// 0 = auto-compute from max_rps, cores, and latency budget.
+    #[serde(default)]
+    pub max_in_flight_per_core: usize,
 }
 
 impl Default for ConnectionConfig {
@@ -407,6 +422,7 @@ impl Default for ConnectionConfig {
             request_timeout: Duration::from_secs(30),
             connection_policy: ConnectionPolicy::KeepAlive,
             dns_mode: None,
+            max_in_flight_per_core: 0, // auto
         }
     }
 }
@@ -532,6 +548,68 @@ pub enum SignalAggregation {
     Max,
     /// Most recent value seen in the window.
     Last,
+}
+
+// ---------------------------------------------------------------------------
+// External signal constraints (for ramp controller)
+// ---------------------------------------------------------------------------
+
+/// Configuration for an external signal constraint in the ramp controller.
+///
+/// Maps a named signal from `MetricsSummary::external_signals` to a
+/// backoff constraint. The ramp controller backs off when the signal
+/// exceeds (or falls below, depending on `direction`) the threshold.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalConstraintConfig {
+    /// Signal name matching a key in `MetricsSummary::external_signals`.
+    pub signal_name: String,
+    /// Threshold at which severity = 1.0 (violation begins).
+    pub threshold: f64,
+    /// Whether higher or lower signal values indicate worse conditions.
+    #[serde(default)]
+    pub direction: SignalDirection,
+    /// What to do when the signal is absent or stale.
+    #[serde(default)]
+    pub on_missing: MissingSignalBehavior,
+    /// Number of ticks without a signal update before it's considered stale.
+    #[serde(default = "default_stale_ticks")]
+    pub stale_after_ticks: u32,
+    /// Consecutive ticks of violation required before triggering backoff.
+    /// Higher values filter noise at the cost of slower response.
+    #[serde(default = "default_constraint_persistence")]
+    pub persistence: u32,
+}
+
+fn default_stale_ticks() -> u32 {
+    3
+}
+
+fn default_constraint_persistence() -> u32 {
+    1
+}
+
+/// Whether higher or lower signal values indicate worse conditions.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub enum SignalDirection {
+    /// Higher values are worse (e.g., drop_rate, cpu_pct, queue_depth).
+    /// Severity = value / threshold.
+    #[default]
+    HigherIsWorse,
+    /// Lower values are worse (e.g., free_fds, available_memory).
+    /// Severity = threshold / value.
+    LowerIsWorse,
+}
+
+/// Behavior when an expected signal is not present in `MetricsSummary`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub enum MissingSignalBehavior {
+    /// Act as if the constraint doesn't exist (no restriction).
+    #[default]
+    Ignore,
+    /// Suppress rate increases but don't back off.
+    Hold,
+    /// Treat as worst-case violation (hard backoff).
+    Backoff,
 }
 
 /// TLS configuration for mTLS between leader and agent nodes.

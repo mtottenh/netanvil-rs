@@ -213,9 +213,21 @@ fn aggregate_merges_scheduling_delay_fields() {
         response_size_histogram: empty_size_hist(),
         md5_mismatches: 0,
         response_signals: std::collections::HashMap::new(),
+        cpu_affinity_hits: 0,
+        cpu_affinity_misses: 0,
+        cpu_affinity_unknown: 0,
+        tcp_rtt_sum_us: 0,
+        tcp_rtt_count: 0,
+        tcp_rtt_max_us: 0,
+        tcp_retransmits: 0,
+        tcp_lost: 0,
         packets_sent: 0,
         packets_received: 0,
         packets_lost: 0,
+        timeout_count: 0,
+        in_flight_drops: 0,
+        in_flight_count: 0,
+        in_flight_capacity: 0,
     };
 
     let snap_b = MetricsSnapshot {
@@ -233,9 +245,21 @@ fn aggregate_merges_scheduling_delay_fields() {
         response_size_histogram: empty_size_hist(),
         md5_mismatches: 0,
         response_signals: std::collections::HashMap::new(),
+        cpu_affinity_hits: 0,
+        cpu_affinity_misses: 0,
+        cpu_affinity_unknown: 0,
+        tcp_rtt_sum_us: 0,
+        tcp_rtt_count: 0,
+        tcp_rtt_max_us: 0,
+        tcp_retransmits: 0,
+        tcp_lost: 0,
         packets_sent: 0,
         packets_received: 0,
         packets_lost: 0,
+        timeout_count: 0,
+        in_flight_drops: 0,
+        in_flight_count: 0,
+        in_flight_capacity: 0,
     };
 
     let mut agg = AggregateMetrics::new();
@@ -261,7 +285,14 @@ fn saturation_healthy_when_no_signals() {
         scheduling_delay_max_ms: 0.5,
         delayed_request_ratio: 0.0,
         rate_achievement: 1.0,
+        cpu_affinity_ratio: 0.0,
+        tcp_rtt_mean_ms: 0.0,
+        tcp_rtt_max_ms: 0.0,
+        tcp_retransmit_ratio: 0.0,
         assessment: SaturationAssessment::Healthy,
+        in_flight_drops: 0,
+        in_flight_count: 0,
+        in_flight_capacity: 0,
     };
     assert_eq!(info.assessment, SaturationAssessment::Healthy);
 }
@@ -276,7 +307,14 @@ fn saturation_client_when_backpressure() {
         scheduling_delay_max_ms: 0.5,
         delayed_request_ratio: 0.0,
         rate_achievement: 0.95,
+        cpu_affinity_ratio: 0.0,
+        tcp_rtt_mean_ms: 0.0,
+        tcp_rtt_max_ms: 0.0,
+        tcp_retransmit_ratio: 0.0,
         assessment: SaturationAssessment::ClientSaturated,
+        in_flight_drops: 0,
+        in_flight_count: 0,
+        in_flight_capacity: 0,
     };
     assert_eq!(info.assessment, SaturationAssessment::ClientSaturated);
 }
@@ -290,7 +328,14 @@ fn saturation_info_serializes_to_json() {
         scheduling_delay_max_ms: 50.0,
         delayed_request_ratio: 0.15,
         rate_achievement: 0.88,
+        cpu_affinity_ratio: 0.0,
+        tcp_rtt_mean_ms: 0.0,
+        tcp_rtt_max_ms: 0.0,
+        tcp_retransmit_ratio: 0.0,
         assessment: SaturationAssessment::ClientSaturated,
+        in_flight_drops: 0,
+        in_flight_count: 0,
+        in_flight_capacity: 0,
     };
 
     let json = serde_json::to_string(&info).unwrap();

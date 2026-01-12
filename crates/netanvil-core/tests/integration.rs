@@ -169,7 +169,7 @@ fn full_pipeline_generates_load_at_target_rate() {
     let server = start_test_server();
     let config = make_config(&server, 200.0, Duration::from_secs(3), 2);
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(10))
     })
     .unwrap();
@@ -202,7 +202,7 @@ fn rate_accuracy_across_core_counts() {
         server.reset_count();
 
         let config = make_config(&server, 150.0, Duration::from_secs(2), num_cores);
-        let result = run_test(config, || {
+        let result = run_test(config, |_| {
             HttpExecutor::with_timeout(Duration::from_secs(10))
         })
         .unwrap();
@@ -247,7 +247,7 @@ fn step_rate_changes_throughput() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(10))
     })
     .unwrap();
@@ -281,7 +281,7 @@ fn error_endpoint_tracks_errors() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(10))
     })
     .unwrap();
@@ -318,7 +318,7 @@ fn latency_reflects_server_delay() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(10))
     })
     .unwrap();
@@ -353,7 +353,7 @@ fn coordinated_omission_detected_with_intermittent_delays() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(10))
     })
     .unwrap();
@@ -395,7 +395,7 @@ fn poisson_scheduler_generates_load_at_target_rate() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(10))
     })
     .unwrap();
@@ -433,7 +433,7 @@ fn custom_headers_reach_the_server() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(10))
     })
     .unwrap();
@@ -481,7 +481,7 @@ fn http_method_is_configurable() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(10))
     })
     .unwrap();
@@ -515,7 +515,7 @@ fn error_threshold_zero_ignores_http_errors() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(10))
     })
     .unwrap();
@@ -547,7 +547,7 @@ fn error_threshold_500_only_counts_server_errors() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(10))
     })
     .unwrap();
@@ -580,7 +580,7 @@ fn error_threshold_default_counts_4xx_and_5xx() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(10))
     })
     .unwrap();

@@ -81,6 +81,7 @@ impl SharedState {
             packets_sent: update.packets_sent,
             packets_received: update.packets_received,
             packets_lost: update.packets_lost,
+            timeout_count: update.total_timeouts,
         });
     }
 
@@ -186,6 +187,11 @@ pub struct MetricsView {
     /// Protocol-level packets declared lost (cumulative).
     #[serde(default)]
     pub packets_lost: u64,
+    /// Requests that completed due to timeout (cumulative).
+    /// Tracked separately because timeout "latency" is the timeout duration,
+    /// not the server's response time, and is excluded from the histogram.
+    #[serde(default)]
+    pub timeout_count: u64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

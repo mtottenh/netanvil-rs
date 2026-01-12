@@ -345,12 +345,24 @@ where
             );
         }
 
-        tracing::debug!(
-            total_requests = summary.total_requests,
-            target_rps = decision.target_rps,
-            active_nodes = nodes.len(),
-            "distributed coordinator tick"
-        );
+        // Debug: per-agent rate breakdown for diagnosing accounting mismatches.
+        // A persistent ratio of achieved/target != 1.0 indicates a systematic bug.
+        {
+            let per_agent: Vec<_> = self
+                .node_metrics
+                .iter()
+                .map(|(id, m)| format!("{}={:.0}", id.0, m.current_rps))
+                .collect();
+            tracing::debug!(
+                total_requests = summary.total_requests,
+                summary_request_rate = format!("{:.0}", summary.request_rate),
+                controller_target = format!("{:.0}", decision.target_rps),
+                controller_current = format!("{:.0}", previous_rps),
+                active_nodes = nodes.len(),
+                per_agent = ?per_agent,
+                "distributed coordinator tick"
+            );
+        }
 
         // Recompute weights (nodes may have changed)
         self.compute_weights(nodes);
@@ -464,6 +476,8 @@ where
             throughput_send_bps: 0.0,
             throughput_recv_bps: 0.0,
             external_signals: Vec::new(),
+            timeout_count: self.node_metrics.values().map(|m| m.timeout_count).sum(),
+            in_flight_drops: self.node_metrics.values().map(|m| m.in_flight_drops).sum(),
         }
     }
 

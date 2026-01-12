@@ -86,4 +86,16 @@ pub struct RemoteMetrics {
     pub latency_p50_ms: f64,
     pub latency_p90_ms: f64,
     pub latency_p99_ms: f64,
+    /// Requests that completed due to timeout this window.
+    #[serde(default)]
+    pub timeout_count: u64,
+    /// Requests declined by per-core in-flight limit this window.
+    #[serde(default)]
+    pub in_flight_drops: u64,
+    /// Current in-flight request count across all cores.
+    #[serde(default)]
+    pub in_flight_count: u64,
+    /// Total in-flight capacity across all cores.
+    #[serde(default)]
+    pub in_flight_capacity: u64,
 }

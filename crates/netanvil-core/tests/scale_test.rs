@@ -87,7 +87,7 @@ fn run_at_rate(
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(10))
     })
     .unwrap();

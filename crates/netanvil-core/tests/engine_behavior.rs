@@ -99,7 +99,7 @@ fn engine_runs_constant_rate_test_with_correct_request_count() {
         ..Default::default()
     };
 
-    let result = run_test(config, MockExecutor::instant).unwrap();
+    let result = run_test(config, |_| MockExecutor::instant()).unwrap();
 
     let expected = 400u64; // 200 RPS * 2s
     let lower = (expected as f64 * 0.70) as u64;
@@ -130,7 +130,7 @@ fn engine_records_latency_percentiles() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         MockExecutor::with_latency(Duration::from_millis(5))
     })
     .unwrap();
@@ -157,7 +157,7 @@ fn engine_tracks_errors() {
         ..Default::default()
     };
 
-    let result = run_test(config, || ErrorExecutor).unwrap();
+    let result = run_test(config, |_| ErrorExecutor).unwrap();
 
     assert!(result.total_requests > 50);
     assert_eq!(result.total_requests, result.total_errors);
@@ -182,7 +182,7 @@ fn engine_scales_across_cores() {
             ..Default::default()
         };
 
-        let result = run_test(config, MockExecutor::instant).unwrap();
+        let result = run_test(config, |_| MockExecutor::instant()).unwrap();
 
         let expected = 400u64;
         let lower = (expected as f64 * 0.65) as u64;
@@ -213,7 +213,7 @@ fn engine_step_rate_changes_throughput() {
         ..Default::default()
     };
 
-    let result = run_test(config, MockExecutor::instant).unwrap();
+    let result = run_test(config, |_| MockExecutor::instant()).unwrap();
 
     // 2s at 100 RPS + 2s at 400 RPS = 200 + 800 = 1000
     let expected = 1000u64;

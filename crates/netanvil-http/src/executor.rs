@@ -6,21 +6,23 @@ use netanvil_types::{
     TimingBreakdown,
 };
 
-use crate::connector::ThrottledConnector;
+use crate::connector::{Identity, ThrottledConnector, WrapTcp};
 use crate::tls::build_tls_connector;
 
-type HyperThrottledClient =
-    hyper_util::client::legacy::Client<ThrottledConnector, http_body_util::Full<bytes::Bytes>>;
+type HyperClient<W> = hyper_util::client::legacy::Client<
+    ThrottledConnector<W>,
+    http_body_util::Full<bytes::Bytes>,
+>;
 
 /// The underlying HTTP client — either the standard cyper client or our
 /// custom throttled hyper client. Using an enum avoids `Option` juggling
 /// and makes the active variant explicit.
-enum HttpClient {
+enum HttpClient<W: WrapTcp = Identity> {
     /// Standard cyper client — zero overhead, used when no bandwidth limit.
     Standard(cyper::Client),
     /// Custom hyper client with per-socket SO_RCVBUF / TCP_WINDOW_CLAMP
     /// tuning and token-bucket read throttling.
-    Throttled(HyperThrottledClient),
+    Throttled(HyperClient<W>),
 }
 
 /// HTTP executor using cyper (compio + hyper bridge).
@@ -29,12 +31,16 @@ enum HttpClient {
 /// uses `Arc` internally so `clone()` is cheap, but each core's executor is
 /// independent — no cross-core connection sharing.
 ///
+/// Generic over `W: WrapTcp` which determines the inner TCP stream type.
+/// Default `W = Identity` gives plain `TcpStream` (zero overhead).
+/// Use `W = Observe` for health sampling via linked io_uring SQEs.
+///
 /// When bandwidth throttling is enabled, a custom hyper client is used instead
 /// of cyper, with per-socket `SO_RCVBUF` / `TCP_WINDOW_CLAMP` tuning and a
 /// token-bucket rate limiter on the read path. This creates real TCP
 /// backpressure — the server sees the client's receive window shrinking.
-pub struct HttpExecutor {
-    client: HttpClient,
+pub struct HttpExecutor<W: WrapTcp = Identity> {
+    client: HttpClient<W>,
     request_timeout: Duration,
     /// When true, response headers are captured in ExecutionResult.
     capture_headers: bool,
@@ -45,13 +51,13 @@ pub struct HttpExecutor {
     capture_body_pct: u32,
 }
 
-impl Default for HttpExecutor {
+impl Default for HttpExecutor<Identity> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl HttpExecutor {
+impl HttpExecutor<Identity> {
     pub fn new() -> Self {
         Self {
             client: HttpClient::Standard(cyper::Client::new()),
@@ -121,10 +127,6 @@ impl HttpExecutor {
     }
 
     /// Create an executor with TLS configuration and optional bandwidth throttling.
-    ///
-    /// Uses rustls with the ring crypto provider. All HTTPS connections go
-    /// through [`ThrottledConnector`] with the pre-configured TLS connector,
-    /// bypassing cyper's built-in TLS handling.
     pub fn with_tls_config(
         tls_config: &TlsClientConfig,
         bandwidth_bps: Option<u64>,
@@ -158,17 +160,6 @@ impl HttpExecutor {
             capture_body: false,
             capture_body_pct: 0,
         })
-    }
-
-    /// Enable response header and/or body capture.
-    ///
-    /// When headers are captured, `ExecutionResult.response_headers` is populated.
-    /// When body is captured, `ExecutionResult.response_body` is populated for
-    /// `body_pct`% of requests (0 = never, 100 = always).
-    pub fn enable_capture(&mut self, headers: bool, body_pct: u32) {
-        self.capture_headers = headers;
-        self.capture_body = body_pct > 0;
-        self.capture_body_pct = body_pct.min(100);
     }
 
     /// Create an executor with connection settings from TestConfig.
@@ -205,29 +196,88 @@ impl HttpExecutor {
         connector.set_noreuse(noreuse);
         connector.set_dns_mode(dns_mode);
 
-        let mut builder = hyper_util::client::legacy::Client::builder(cyper_core::CompioExecutor);
-        builder.set_host(true);
-        builder.timer(cyper_core::CompioTimer);
-        apply_http_version(&mut builder, http_version);
-
-        // When noreuse is active, disable connection pooling so each request
-        // gets a fresh connection (the old one's fd leaks intentionally).
-        if noreuse {
-            builder.pool_max_idle_per_host(0);
-        }
-
-        let client = builder.build(connector);
-        Ok(Self {
-            client: HttpClient::Throttled(client),
-            request_timeout: timeout,
-            capture_headers: false,
-            capture_body: false,
-            capture_body_pct: 0,
-        })
+        build_throttled_executor(connector, timeout, noreuse, http_version)
     }
 }
 
-impl RequestExecutor for HttpExecutor {
+impl<W: WrapTcp> HttpExecutor<W> {
+    /// Create an executor with connection settings and a custom TCP wrapper.
+    ///
+    /// Same as `with_connection_config` but takes a `W: WrapTcp` to
+    /// transform the `TcpStream` before TLS/throttle wrapping.
+    /// Always uses the ThrottledConnector path (never the Standard cyper client).
+    pub fn with_connection_config_wrapped(
+        tls_config: Option<&TlsClientConfig>,
+        bandwidth_bps: Option<u64>,
+        timeout: Duration,
+        noreuse: bool,
+        dns_mode: Option<netanvil_types::config::DnsMode>,
+        http_version: HttpVersion,
+        wrapper: W,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>>
+    where
+        W::Stream: Unpin,
+    {
+        let base_connector = match tls_config {
+            Some(tls) => {
+                let compio_tls = build_tls_connector(tls, http_version)?;
+                ThrottledConnector::with_tls(bandwidth_bps, compio_tls, tls.sni_override.clone())
+            }
+            None => ThrottledConnector::new(bandwidth_bps),
+        };
+
+        let mut connector = base_connector.with_wrapper(wrapper);
+        connector.set_noreuse(noreuse);
+        connector.set_dns_mode(dns_mode);
+
+        build_throttled_executor(connector, timeout, noreuse, http_version)
+    }
+
+    /// Enable response header and/or body capture.
+    ///
+    /// When headers are captured, `ExecutionResult.response_headers` is populated.
+    /// When body is captured, `ExecutionResult.response_body` is populated for
+    /// `body_pct`% of requests (0 = never, 100 = always).
+    pub fn enable_capture(&mut self, headers: bool, body_pct: u32) {
+        self.capture_headers = headers;
+        self.capture_body = body_pct > 0;
+        self.capture_body_pct = body_pct.min(100);
+    }
+}
+
+/// Build an HttpExecutor from a fully-configured connector.
+fn build_throttled_executor<W: WrapTcp>(
+    connector: ThrottledConnector<W>,
+    timeout: Duration,
+    noreuse: bool,
+    http_version: HttpVersion,
+) -> Result<HttpExecutor<W>, Box<dyn std::error::Error + Send + Sync>>
+where
+    W::Stream: Unpin,
+{
+    let mut builder = hyper_util::client::legacy::Client::builder(cyper_core::CompioExecutor);
+    builder.set_host(true);
+    builder.timer(cyper_core::CompioTimer);
+    apply_http_version(&mut builder, http_version);
+
+    if noreuse {
+        builder.pool_max_idle_per_host(0);
+    }
+
+    let client = builder.build(connector);
+    Ok(HttpExecutor {
+        client: HttpClient::Throttled(client),
+        request_timeout: timeout,
+        capture_headers: false,
+        capture_body: false,
+        capture_body_pct: 0,
+    })
+}
+
+impl<W: WrapTcp> RequestExecutor for HttpExecutor<W>
+where
+    W::Stream: Unpin,
+{
     type Spec = HttpRequestSpec;
     type PacketSource = netanvil_types::NoopPacketSource;
 
@@ -310,7 +360,6 @@ struct HttpResult {
     /// Response headers (only when capture_headers is true).
     headers: Option<Vec<(String, String)>>,
     /// Response body bytes (only when capture_body is true).
-    /// Uses `bytes::Bytes` for zero-copy reference counting.
     body: Option<bytes::Bytes>,
 }
 
@@ -342,7 +391,6 @@ async fn do_execute_cyper(
     let ttfb = request_sent.elapsed();
     let status = response.status().as_u16();
 
-    // Capture response headers before consuming the body
     let headers = if capture_headers {
         Some(
             response
@@ -382,16 +430,18 @@ async fn do_execute_cyper(
 }
 
 /// Execute a request using the throttled hyper client.
-async fn do_execute_throttled(
-    client: &HyperThrottledClient,
+async fn do_execute_throttled<W: WrapTcp>(
+    client: &HyperClient<W>,
     spec: &HttpRequestSpec,
     start: Instant,
     capture_headers: bool,
     capture_body: bool,
-) -> Result<HttpResult, ExecutionError> {
+) -> Result<HttpResult, ExecutionError>
+where
+    W::Stream: Unpin,
+{
     use http_body_util::BodyExt;
 
-    // Build hyper request
     let mut builder = hyper::Request::builder()
         .method(spec.method.clone())
         .uri(&spec.url);
@@ -417,7 +467,6 @@ async fn do_execute_throttled(
     let ttfb = request_sent.elapsed();
     let status = response.status().as_u16();
 
-    // Capture response headers before consuming the body
     let headers = if capture_headers {
         Some(
             response
@@ -459,24 +508,16 @@ async fn do_execute_throttled(
 }
 
 /// Configure the hyper client builder for the requested HTTP version.
-///
-/// - `Http1` → no change (default is HTTP/1.1; ALPN set to h1.1 elsewhere)
-/// - `Http2` / `Http2c` → `.http2_only(true)` (use h2 prior knowledge or fail)
-/// - `Auto` → default (try h2, fall back to h1 based on ALPN)
 fn apply_http_version(
     builder: &mut hyper_util::client::legacy::Builder,
     http_version: HttpVersion,
 ) {
     match http_version {
-        HttpVersion::Http1 => {
-            // Default behavior: HTTP/1.1 only (ALPN set to h1.1 in TLS config)
-        }
+        HttpVersion::Http1 => {}
         HttpVersion::Http2 | HttpVersion::Http2c => {
             builder.http2_only(true);
         }
-        HttpVersion::Auto => {
-            // Default behavior: let ALPN negotiate
-        }
+        HttpVersion::Auto => {}
     }
 }
 

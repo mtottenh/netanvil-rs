@@ -41,6 +41,7 @@ pub async fn io_worker_loop<G, T, E, M>(
     executor: Rc<E>,
     metrics: Rc<M>,
     event_recorder: Rc<dyn EventRecorder>,
+    in_flight_limit: Rc<crate::in_flight::InFlightLimit>,
 ) where
     G: RequestGenerator,
     T: RequestTransformer<Spec = G::Spec> + 'static,
@@ -56,6 +57,8 @@ pub async fn io_worker_loop<G, T, E, M>(
     } = config;
     let mut request_seq: u64 = 0;
     let mut last_report = Instant::now();
+    let in_flight_drops = std::sync::atomic::AtomicU64::new(0);
+    let mut last_in_flight_drops: u64 = 0; // for per-window delta
 
     // Create response feedback channel only if the generator opts in.
     // When disabled (default), zero overhead — no channel, no result cloning.
@@ -103,6 +106,8 @@ pub async fn io_worker_loop<G, T, E, M>(
             &metrics,
             &event_recorder,
             &response_tx,
+            &in_flight_limit,
+            &in_flight_drops,
             &mut request_seq,
             core_id,
         ) {
@@ -133,6 +138,8 @@ pub async fn io_worker_loop<G, T, E, M>(
                 &metrics,
                 &event_recorder,
                 &response_tx,
+                &in_flight_limit,
+                &in_flight_drops,
                 &mut request_seq,
                 core_id,
             ) {
@@ -144,7 +151,11 @@ pub async fn io_worker_loop<G, T, E, M>(
                 );
                 // Flush events and send final snapshot before exiting
                 event_recorder.flush();
-                let snapshot = metrics.snapshot();
+                let mut snapshot = metrics.snapshot();
+                let current_drops = in_flight_drops.load(std::sync::atomic::Ordering::Relaxed);
+                snapshot.in_flight_drops = current_drops - last_in_flight_drops;
+                snapshot.in_flight_count = in_flight_limit.in_flight() as u64;
+                snapshot.in_flight_capacity = in_flight_limit.capacity() as u64;
                 let _ = metrics_tx.try_send(snapshot);
                 return;
             }
@@ -161,10 +172,18 @@ pub async fn io_worker_loop<G, T, E, M>(
 
         // Periodic metrics reporting + event flush
         if last_report.elapsed() >= metrics_interval {
-            let snapshot = metrics.snapshot();
+            let mut snapshot = metrics.snapshot();
+            // Stamp in-flight data onto snapshot (per-window delta for drops)
+            let current_drops = in_flight_drops.load(std::sync::atomic::Ordering::Relaxed);
+            snapshot.in_flight_drops = current_drops - last_in_flight_drops;
+            last_in_flight_drops = current_drops;
+            snapshot.in_flight_count = in_flight_limit.in_flight() as u64;
+            snapshot.in_flight_capacity = in_flight_limit.capacity() as u64;
             tracing::debug!(
                 core_id,
                 total_requests = snapshot.total_requests,
+                in_flight = snapshot.in_flight_count,
+                in_flight_drops = snapshot.in_flight_drops,
                 "sending periodic metrics snapshot"
             );
             let _ = metrics_tx.try_send(snapshot);
@@ -192,11 +211,16 @@ pub async fn io_worker_loop<G, T, E, M>(
     event_recorder.flush();
 
     // Send final snapshot
-    let snapshot = metrics.snapshot();
+    let mut snapshot = metrics.snapshot();
+    let current_drops = in_flight_drops.load(std::sync::atomic::Ordering::Relaxed);
+    snapshot.in_flight_drops = current_drops - last_in_flight_drops;
+    snapshot.in_flight_count = in_flight_limit.in_flight() as u64;
+    snapshot.in_flight_capacity = in_flight_limit.capacity() as u64;
     tracing::info!(
         core_id,
         request_seq,
         final_requests = snapshot.total_requests,
+        total_in_flight_drops = current_drops,
         "sending final snapshot and exiting"
     );
     let _ = metrics_tx.try_send(snapshot);
@@ -213,6 +237,8 @@ fn handle_message<G, T, E, M>(
     metrics: &Rc<M>,
     event_recorder: &Rc<dyn EventRecorder>,
     response_tx: &Option<flume::Sender<ExecutionResult>>,
+    in_flight_limit: &Rc<crate::in_flight::InFlightLimit>,
+    in_flight_drops: &std::sync::atomic::AtomicU64,
     seq: &mut u64,
     core_id: usize,
 ) -> bool
@@ -224,6 +250,16 @@ where
 {
     match msg {
         ScheduledRequest::Fire(intended_time) => {
+            // Check in-flight limit before spawning. If at capacity, count
+            // as an in_flight_drop (distinct from fire_channel_drops).
+            let permit = match in_flight_limit.try_acquire() {
+                Some(p) => p,
+                None => {
+                    in_flight_drops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return true; // continue processing, just skip this request
+                }
+            };
+
             let context = RequestContext {
                 request_id: core_id as u64 * 1_000_000_000 + *seq,
                 intended_time,
@@ -248,6 +284,7 @@ where
                 if let Some(tx) = resp_tx {
                     let _ = tx.try_send(result); // drop on backpressure
                 }
+                drop(permit); // release in-flight slot
             })
             .detach();
 

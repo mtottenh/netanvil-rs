@@ -236,7 +236,7 @@ pub trait RateController {
 
     /// Return controller-specific state as key-value pairs for Prometheus.
     /// The distributed coordinator includes these in progress updates so
-    /// they can be rendered as gauges (e.g., ramp ceiling, slew cap state).
+    /// they can be rendered as gauges (e.g., ramp ceiling, effective ceiling).
     /// Default: empty (no custom state to export).
     fn controller_state(&self) -> Vec<(&'static str, f64)> {
         Vec::new()

@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 
 use netanvil_api::{ControlServer, SharedState};
 use netanvil_core::{report::ProgressLine, GenericTestBuilder, TestBuilder};
-use netanvil_http::HttpExecutor;
+use netanvil_http::{HttpExecutor, Observe, ObserveConfig, SendObserveConfig};
 use netanvil_types::{ConnectionConfig, RateConfig, TestConfig};
 
 use crate::output;
@@ -58,6 +58,7 @@ pub fn run(
     ramp_max_errors: f64,
     event_log_dir: Option<String>,
     event_sample_rate: f64,
+    health_sample_rate: f64,
 ) -> Result<()> {
     let duration = parse_duration(&duration).context("invalid --duration")?;
     let timeout = parse_duration(&timeout).context("invalid --timeout")?;
@@ -263,7 +264,7 @@ pub fn run(
 
             let mut builder = GenericTestBuilder::new(
                 config,
-                move || {
+                move |_| {
                     netanvil_tcp::TcpExecutor::with_pool(
                         request_timeout,
                         max_conns,
@@ -323,7 +324,7 @@ pub fn run(
 
             let mut builder = GenericTestBuilder::new(
                 config,
-                move || netanvil_udp::UdpExecutor::with_timeout(request_timeout),
+                move |_| netanvil_udp::UdpExecutor::with_timeout(request_timeout),
                 gen_factory,
                 trans_factory,
             )
@@ -380,7 +381,7 @@ pub fn run(
 
             let mut builder = GenericTestBuilder::new(
                 config,
-                move || netanvil_dns::DnsExecutor::with_timeout(request_timeout),
+                move |_| netanvil_dns::DnsExecutor::with_timeout(request_timeout),
                 gen_factory,
                 trans_factory,
             )
@@ -423,7 +424,7 @@ pub fn run(
 
             let mut builder = GenericTestBuilder::new(
                 config,
-                move || netanvil_redis::RedisExecutor::new(request_timeout),
+                move |_| netanvil_redis::RedisExecutor::new(request_timeout),
                 gen_factory,
                 trans_factory,
             )
@@ -437,26 +438,6 @@ pub fn run(
         }
 
         DetectedProtocol::Http => {
-            // Build executor factory -- with TLS config, bandwidth throttling,
-            // HTTP version pinning, or default
-            let tls_client = config.tls_client.clone();
-            let make_executor = move || -> HttpExecutor {
-                match &tls_client {
-                    Some(tls_config) => HttpExecutor::with_tls_and_version(
-                        tls_config,
-                        bandwidth_bps,
-                        request_timeout,
-                        http_version,
-                    )
-                    .expect("TLS configuration error"),
-                    None => HttpExecutor::with_http_version(
-                        http_version,
-                        bandwidth_bps,
-                        request_timeout,
-                    ),
-                }
-            };
-
             // Build plugin generator factory if --plugin is specified
             let plugin_factory = if let Some(ref plugin_path) = plugin {
                 let ptype = detect_plugin_type(plugin_path, &plugin_type)?;
@@ -471,46 +452,60 @@ pub fn run(
                 None
             };
 
-            if let Some(port) = api_port {
-                let shared_state = SharedState::new();
-                let (ext_cmd_tx, ext_cmd_rx) = flume::unbounded();
+            if health_sample_rate > 0.0 {
+                // Verify kernel support before enabling health sampling.
+                anyhow::ensure!(
+                    netanvil_http::is_health_sampling_supported(),
+                    "--health-sample-rate requires kernel >= 6.0 with io_uring URING_CMD support"
+                );
 
-                let server = ControlServer::new(port, shared_state.clone(), ext_cmd_tx)
-                    .context(format!("failed to start API server on port {port}"))?;
-                let _server_handle = server.spawn();
-                tracing::info!(port, "control API listening");
+                config.health_sample_rate = health_sample_rate;
 
-                let progress_state = shared_state.clone();
-                let signal_state = shared_state.clone();
-                let mut builder = TestBuilder::new(config, make_executor)
-                    .on_progress(move |update| {
-                        progress_state.update_from_progress(update);
-                        eprint!("\r{}", ProgressLine::new(update));
-                    })
-                    .external_commands(ext_cmd_rx)
-                    .pushed_signal_source(move || signal_state.drain_pushed_signals());
+                let tls_client = config.tls_client.clone();
+                let make_executor = move |health: Option<netanvil_types::HealthCounters>| -> HttpExecutor<Observe> {
+                    let health = health.expect(
+                        "engine must provide HealthCounters when health_sample_rate > 0"
+                    );
+                    let observe_config = ObserveConfig {
+                        sample_rate: health_sample_rate,
+                        worker_cpu: 0,
+                        counters: health.affinity,
+                        tcp_health: health.tcp_health,
+                    };
+                    let wrapper = Observe(SendObserveConfig::new(observe_config));
+                    HttpExecutor::with_connection_config_wrapped(
+                        tls_client.as_ref(),
+                        bandwidth_bps,
+                        request_timeout,
+                        false,
+                        None,
+                        http_version,
+                        wrapper,
+                    )
+                    .expect("executor configuration error")
+                };
 
-                if let Some(factory) = plugin_factory {
-                    builder = builder.generator_factory(factory);
-                }
-                if let Some(factory) = event_recorder_factory {
-                    builder = builder.event_recorder_factory(factory);
-                }
-
-                builder.run().context("load test failed")?
+                run_http_test(config, make_executor, plugin_factory, event_recorder_factory, api_port)?
             } else {
-                let mut builder = TestBuilder::new(config, make_executor).on_progress(|update| {
-                    eprint!("\r{}", ProgressLine::new(update));
-                });
+                let tls_client = config.tls_client.clone();
+                let make_executor = move |_health: Option<netanvil_types::HealthCounters>| -> HttpExecutor {
+                    match &tls_client {
+                        Some(tls_config) => HttpExecutor::with_tls_and_version(
+                            tls_config,
+                            bandwidth_bps,
+                            request_timeout,
+                            http_version,
+                        )
+                        .expect("TLS configuration error"),
+                        None => HttpExecutor::with_http_version(
+                            http_version,
+                            bandwidth_bps,
+                            request_timeout,
+                        ),
+                    }
+                };
 
-                if let Some(factory) = plugin_factory {
-                    builder = builder.generator_factory(factory);
-                }
-                if let Some(factory) = event_recorder_factory {
-                    builder = builder.event_recorder_factory(factory);
-                }
-
-                builder.run().context("load test failed")?
+                run_http_test(config, make_executor, plugin_factory, event_recorder_factory, api_port)?
             }
         }
     };
@@ -521,6 +516,64 @@ pub fn run(
     output::print_results(&result, output_format);
 
     Ok(())
+}
+
+/// Run an HTTP load test with a generic executor factory.
+///
+/// Encapsulates the builder pattern (with/without API port, plugins, events)
+/// so the caller only needs to provide the executor factory.
+fn run_http_test<E, F>(
+    config: TestConfig,
+    make_executor: F,
+    plugin_factory: Option<Box<dyn Fn(usize) -> Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::HttpRequestSpec>> + Send>>,
+    event_recorder_factory: Option<Box<dyn Fn(usize) -> Box<dyn netanvil_types::EventRecorder> + Send>>,
+    api_port: Option<u16>,
+) -> Result<netanvil_core::TestResult>
+where
+    E: netanvil_types::RequestExecutor<Spec = netanvil_types::HttpRequestSpec> + 'static,
+    F: Fn(Option<netanvil_types::HealthCounters>) -> E + Send + 'static,
+{
+    if let Some(port) = api_port {
+        let shared_state = SharedState::new();
+        let (ext_cmd_tx, ext_cmd_rx) = flume::unbounded();
+
+        let server = ControlServer::new(port, shared_state.clone(), ext_cmd_tx)
+            .context(format!("failed to start API server on port {port}"))?;
+        let _server_handle = server.spawn();
+        tracing::info!(port, "control API listening");
+
+        let progress_state = shared_state.clone();
+        let signal_state = shared_state.clone();
+        let mut builder = TestBuilder::new(config, make_executor)
+            .on_progress(move |update| {
+                progress_state.update_from_progress(update);
+                eprint!("\r{}", ProgressLine::new(update));
+            })
+            .external_commands(ext_cmd_rx)
+            .pushed_signal_source(move || signal_state.drain_pushed_signals());
+
+        if let Some(factory) = plugin_factory {
+            builder = builder.generator_factory(factory);
+        }
+        if let Some(factory) = event_recorder_factory {
+            builder = builder.event_recorder_factory(factory);
+        }
+
+        builder.run().context("load test failed")
+    } else {
+        let mut builder = TestBuilder::new(config, make_executor).on_progress(|update| {
+            eprint!("\r{}", ProgressLine::new(update));
+        });
+
+        if let Some(factory) = plugin_factory {
+            builder = builder.generator_factory(factory);
+        }
+        if let Some(factory) = event_recorder_factory {
+            builder = builder.event_recorder_factory(factory);
+        }
+
+        builder.run().context("load test failed")
+    }
 }
 
 /// Derive the protocol name for event logging from the config.

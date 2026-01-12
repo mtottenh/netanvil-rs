@@ -107,6 +107,10 @@ impl MetricsFetcher for HttpMetricsFetcher {
             latency_p50_ms: Option<f64>,
             latency_p90_ms: Option<f64>,
             latency_p99_ms: Option<f64>,
+            #[serde(default)]
+            saturation: netanvil_types::SaturationInfo,
+            #[serde(default)]
+            timeout_count: u64,
         }
 
         let resp: MetricsResp = resp.json().await.ok()?;
@@ -121,6 +125,10 @@ impl MetricsFetcher for HttpMetricsFetcher {
             latency_p50_ms: resp.latency_p50_ms.unwrap_or(0.0),
             latency_p90_ms: resp.latency_p90_ms.unwrap_or(0.0),
             latency_p99_ms: resp.latency_p99_ms.unwrap_or(0.0),
+            timeout_count: resp.timeout_count,
+            in_flight_drops: resp.saturation.in_flight_drops,
+            in_flight_count: resp.saturation.in_flight_count,
+            in_flight_capacity: resp.saturation.in_flight_capacity,
         })
     }
 }
@@ -251,6 +259,10 @@ impl MetricsFetcher for MtlsMetricsFetcher {
             latency_p50_ms: Option<f64>,
             latency_p90_ms: Option<f64>,
             latency_p99_ms: Option<f64>,
+            #[serde(default)]
+            saturation: netanvil_types::SaturationInfo,
+            #[serde(default)]
+            timeout_count: u64,
         }
 
         let resp: MetricsResp = resp.json().await.ok()?;
@@ -265,6 +277,10 @@ impl MetricsFetcher for MtlsMetricsFetcher {
             latency_p50_ms: resp.latency_p50_ms.unwrap_or(0.0),
             latency_p90_ms: resp.latency_p90_ms.unwrap_or(0.0),
             latency_p99_ms: resp.latency_p99_ms.unwrap_or(0.0),
+            timeout_count: resp.timeout_count,
+            in_flight_drops: resp.saturation.in_flight_drops,
+            in_flight_count: resp.saturation.in_flight_count,
+            in_flight_capacity: resp.saturation.in_flight_capacity,
         })
     }
 }

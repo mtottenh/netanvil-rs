@@ -57,6 +57,7 @@ pub fn run(
     ramp_max_errors: f64,
     metrics_port: Option<u16>,
     output: String,
+    health_sample_rate: f64,
 ) -> Result<()> {
     let output_format =
         crate::output::OutputFormat::parse(&output).map_err(|e| anyhow::anyhow!(e))?;
@@ -131,6 +132,7 @@ pub fn run(
         http_version,
         plugin: plugin_config,
         response_signal_headers: parse_response_signals(&response_signals)?,
+        health_sample_rate,
         ..Default::default()
     };
 
@@ -216,6 +218,7 @@ pub fn run(
         rps,
         duration = config.duration.as_secs_f64(),
         plugin = plugin.as_deref().unwrap_or("none"),
+        version = crate::VERSION,
         "starting distributed test"
     );
 

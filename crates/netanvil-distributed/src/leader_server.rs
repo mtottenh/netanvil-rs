@@ -90,6 +90,7 @@ pub async fn handle_prometheus(
 /// Format aggregated distributed metrics as Prometheus text exposition.
 fn format_prometheus(p: &DistributedProgressUpdate) -> String {
     let mut out = String::with_capacity(2048);
+    let label = "{node_id=\"leader\"}";
 
     let total_requests = p.total_requests;
     let total_errors = p.total_errors;
@@ -122,61 +123,61 @@ fn format_prometheus(p: &DistributedProgressUpdate) -> String {
     // -- Counters --
     out.push_str("# HELP netanvil_requests_total Total requests sent across all agents.\n");
     out.push_str("# TYPE netanvil_requests_total counter\n");
-    out.push_str(&format!("netanvil_requests_total {total_requests}\n"));
+    out.push_str(&format!("netanvil_requests_total{label} {total_requests}\n"));
 
     out.push_str("# HELP netanvil_errors_total Total errors across all agents.\n");
     out.push_str("# TYPE netanvil_errors_total counter\n");
-    out.push_str(&format!("netanvil_errors_total {total_errors}\n"));
+    out.push_str(&format!("netanvil_errors_total{label} {total_errors}\n"));
 
     // -- Gauges --
     out.push_str("# HELP netanvil_request_rate Current aggregate requests per second.\n");
     out.push_str("# TYPE netanvil_request_rate gauge\n");
-    out.push_str(&format!("netanvil_request_rate {current_rps:.1}\n"));
+    out.push_str(&format!("netanvil_request_rate{label} {current_rps:.1}\n"));
 
     out.push_str("# HELP netanvil_target_rps Target requests per second (total).\n");
     out.push_str("# TYPE netanvil_target_rps gauge\n");
-    out.push_str(&format!("netanvil_target_rps {:.1}\n", p.target_rps));
+    out.push_str(&format!("netanvil_target_rps{label} {:.1}\n", p.target_rps));
 
     out.push_str("# HELP netanvil_error_rate Aggregate error rate (0-1).\n");
     out.push_str("# TYPE netanvil_error_rate gauge\n");
-    out.push_str(&format!("netanvil_error_rate {error_rate:.6}\n"));
+    out.push_str(&format!("netanvil_error_rate{label} {error_rate:.6}\n"));
 
     out.push_str("# HELP netanvil_elapsed_seconds Test elapsed time.\n");
     out.push_str("# TYPE netanvil_elapsed_seconds gauge\n");
     out.push_str(&format!(
-        "netanvil_elapsed_seconds {:.1}\n",
+        "netanvil_elapsed_seconds{label} {:.1}\n",
         p.elapsed.as_secs_f64()
     ));
 
     out.push_str("# HELP netanvil_active_nodes Number of active agent nodes.\n");
     out.push_str("# TYPE netanvil_active_nodes gauge\n");
-    out.push_str(&format!("netanvil_active_nodes {}\n", p.active_nodes));
+    out.push_str(&format!("netanvil_active_nodes{label} {}\n", p.active_nodes));
 
     // -- Latency gauges (max across nodes, conservative) --
     out.push_str(
         "# HELP netanvil_latency_p50_seconds 50th percentile latency (max across agents).\n",
     );
     out.push_str("# TYPE netanvil_latency_p50_seconds gauge\n");
-    out.push_str(&format!("netanvil_latency_p50_seconds {:.6}\n", p50 / 1000.0));
+    out.push_str(&format!("netanvil_latency_p50_seconds{label} {:.6}\n", p50 / 1000.0));
 
     out.push_str(
         "# HELP netanvil_latency_p90_seconds 90th percentile latency (max across agents).\n",
     );
     out.push_str("# TYPE netanvil_latency_p90_seconds gauge\n");
-    out.push_str(&format!("netanvil_latency_p90_seconds {:.6}\n", p90 / 1000.0));
+    out.push_str(&format!("netanvil_latency_p90_seconds{label} {:.6}\n", p90 / 1000.0));
 
     out.push_str(
         "# HELP netanvil_latency_p99_seconds 99th percentile latency (max across agents).\n",
     );
     out.push_str("# TYPE netanvil_latency_p99_seconds gauge\n");
-    out.push_str(&format!("netanvil_latency_p99_seconds {:.6}\n", p99 / 1000.0));
+    out.push_str(&format!("netanvil_latency_p99_seconds{label} {:.6}\n", p99 / 1000.0));
 
     // -- Per-node breakdown --
     out.push_str("# HELP netanvil_node_requests_total Total requests per agent node.\n");
     out.push_str("# TYPE netanvil_node_requests_total counter\n");
     for (id, m) in &p.per_node {
         out.push_str(&format!(
-            "netanvil_node_requests_total{{node=\"{id}\"}} {}\n",
+            "netanvil_node_requests_total{{node_id=\"{id}\"}} {}\n",
             m.total_requests
         ));
     }
@@ -185,7 +186,7 @@ fn format_prometheus(p: &DistributedProgressUpdate) -> String {
     out.push_str("# TYPE netanvil_node_request_rate gauge\n");
     for (id, m) in &p.per_node {
         out.push_str(&format!(
-            "netanvil_node_request_rate{{node=\"{id}\"}} {:.1}\n",
+            "netanvil_node_request_rate{{node_id=\"{id}\"}} {:.1}\n",
             m.current_rps
         ));
     }
@@ -194,7 +195,7 @@ fn format_prometheus(p: &DistributedProgressUpdate) -> String {
     out.push_str("# TYPE netanvil_node_latency_p99_seconds gauge\n");
     for (id, m) in &p.per_node {
         out.push_str(&format!(
-            "netanvil_node_latency_p99_seconds{{node=\"{id}\"}} {:.6}\n",
+            "netanvil_node_latency_p99_seconds{{node_id=\"{id}\"}} {:.6}\n",
             m.latency_p99_ms / 1000.0
         ));
     }
@@ -235,6 +236,10 @@ mod tests {
                         latency_p50_ms: 5.0,
                         latency_p90_ms: 15.0,
                         latency_p99_ms: 45.0,
+                        timeout_count: 0,
+                        in_flight_drops: 0,
+                        in_flight_count: 0,
+                        in_flight_capacity: 0,
                     },
                 ),
                 (
@@ -249,6 +254,10 @@ mod tests {
                         latency_p50_ms: 4.0,
                         latency_p90_ms: 12.0,
                         latency_p99_ms: 50.0,
+                        timeout_count: 0,
+                        in_flight_drops: 0,
+                        in_flight_count: 0,
+                        in_flight_capacity: 0,
                     },
                 ),
             ],
@@ -261,16 +270,16 @@ mod tests {
         let p = make_progress();
         let body = format_prometheus(&p);
 
-        assert!(body.contains("netanvil_requests_total 5000"));
-        assert!(body.contains("netanvil_errors_total 10"));
-        assert!(body.contains("netanvil_target_rps 1000.0"));
-        assert!(body.contains("netanvil_active_nodes 2"));
+        assert!(body.contains("netanvil_requests_total{node_id=\"leader\"} 5000"));
+        assert!(body.contains("netanvil_errors_total{node_id=\"leader\"} 10"));
+        assert!(body.contains("netanvil_target_rps{node_id=\"leader\"} 1000.0"));
+        assert!(body.contains("netanvil_active_nodes{node_id=\"leader\"} 2"));
         // current_rps = 450 + 480 = 930
-        assert!(body.contains("netanvil_request_rate 930.0"));
+        assert!(body.contains("netanvil_request_rate{node_id=\"leader\"} 930.0"));
         // p99 = max(45, 50) = 50ms = 0.050000s
-        assert!(body.contains("netanvil_latency_p99_seconds 0.050000"));
+        assert!(body.contains("netanvil_latency_p99_seconds{node_id=\"leader\"} 0.050000"));
         // p50 = max(5, 4) = 5ms = 0.005000s
-        assert!(body.contains("netanvil_latency_p50_seconds 0.005000"));
+        assert!(body.contains("netanvil_latency_p50_seconds{node_id=\"leader\"} 0.005000"));
     }
 
     #[test]
@@ -278,10 +287,10 @@ mod tests {
         let p = make_progress();
         let body = format_prometheus(&p);
 
-        assert!(body.contains("netanvil_node_requests_total{node=\"agent-1\"} 2400"));
-        assert!(body.contains("netanvil_node_requests_total{node=\"agent-2\"} 2600"));
-        assert!(body.contains("netanvil_node_request_rate{node=\"agent-1\"} 450.0"));
-        assert!(body.contains("netanvil_node_request_rate{node=\"agent-2\"} 480.0"));
+        assert!(body.contains("netanvil_node_requests_total{node_id=\"agent-1\"} 2400"));
+        assert!(body.contains("netanvil_node_requests_total{node_id=\"agent-2\"} 2600"));
+        assert!(body.contains("netanvil_node_request_rate{node_id=\"agent-1\"} 450.0"));
+        assert!(body.contains("netanvil_node_request_rate{node_id=\"agent-2\"} 480.0"));
     }
 
     #[test]

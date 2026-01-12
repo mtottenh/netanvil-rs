@@ -26,7 +26,7 @@ use netanvil_types::{
 pub fn run_test<E, F>(config: TestConfig, executor_factory: F) -> netanvil_types::Result<TestResult>
 where
     E: RequestExecutor<Spec = netanvil_types::HttpRequestSpec> + 'static,
-    F: Fn() -> E + Send + 'static,
+    F: Fn(Option<netanvil_types::HealthCounters>) -> E + Send + 'static,
 {
     TestBuilder::new(config, executor_factory).run()
 }
@@ -39,7 +39,7 @@ pub fn run_test_with_progress<E, F, P>(
 ) -> netanvil_types::Result<TestResult>
 where
     E: RequestExecutor<Spec = netanvil_types::HttpRequestSpec> + 'static,
-    F: Fn() -> E + Send + 'static,
+    F: Fn(Option<netanvil_types::HealthCounters>) -> E + Send + 'static,
     P: FnMut(&crate::coordinator::ProgressUpdate) + 'static,
 {
     TestBuilder::new(config, executor_factory)
@@ -59,7 +59,7 @@ pub fn run_test_with_api<E, F, P>(
 ) -> netanvil_types::Result<TestResult>
 where
     E: RequestExecutor<Spec = netanvil_types::HttpRequestSpec> + 'static,
-    F: Fn() -> E + Send + 'static,
+    F: Fn(Option<netanvil_types::HealthCounters>) -> E + Send + 'static,
     P: FnMut(&crate::coordinator::ProgressUpdate) + 'static,
 {
     TestBuilder::new(config, executor_factory)
@@ -129,7 +129,7 @@ where
 pub struct TestBuilder<E, F>
 where
     E: RequestExecutor<Spec = netanvil_types::HttpRequestSpec> + 'static,
-    F: Fn() -> E + Send + 'static,
+    F: Fn(Option<netanvil_types::HealthCounters>) -> E + Send + 'static,
 {
     config: TestConfig,
     executor_factory: F,
@@ -145,9 +145,13 @@ where
 impl<E, F> TestBuilder<E, F>
 where
     E: RequestExecutor<Spec = netanvil_types::HttpRequestSpec> + 'static,
-    F: Fn() -> E + Send + 'static,
+    F: Fn(Option<netanvil_types::HealthCounters>) -> E + Send + 'static,
 {
     /// Create a new test builder with the given configuration and executor factory.
+    ///
+    /// The factory receives an `Option<Rc<CpuAffinityCounters>>`: `Some` when
+    /// `config.health_sample_rate > 0`, `None` otherwise. The executor should
+    /// pass these counters to its connection health observation layer.
     pub fn new(config: TestConfig, executor_factory: F) -> Self {
         Self {
             config,
@@ -276,7 +280,7 @@ where
 pub struct GenericTestBuilder<E, F>
 where
     E: RequestExecutor + 'static,
-    F: Fn() -> E + Send + 'static,
+    F: Fn(Option<netanvil_types::HealthCounters>) -> E + Send + 'static,
 {
     config: TestConfig,
     executor_factory: F,
@@ -292,7 +296,7 @@ where
 impl<E, F> GenericTestBuilder<E, F>
 where
     E: RequestExecutor + 'static,
-    F: Fn() -> E + Send + 'static,
+    F: Fn(Option<netanvil_types::HealthCounters>) -> E + Send + 'static,
 {
     /// Create a new generic test builder. Generator and transformer factories are required.
     pub fn new(
@@ -381,7 +385,7 @@ fn run_test_impl<E, F>(
 ) -> netanvil_types::Result<TestResult>
 where
     E: RequestExecutor<Spec = netanvil_types::HttpRequestSpec> + 'static,
-    F: Fn() -> E + Send + 'static,
+    F: Fn(Option<netanvil_types::HealthCounters>) -> E + Send + 'static,
 {
     // Fill in HTTP-specific defaults for generator
     let gen_factory: crate::GeneratorFactory = match generator_factory {
@@ -450,7 +454,7 @@ fn run_test_core<E, F>(
 ) -> netanvil_types::Result<TestResult>
 where
     E: RequestExecutor + 'static,
-    F: Fn() -> E + Send + 'static,
+    F: Fn(Option<netanvil_types::HealthCounters>) -> E + Send + 'static,
 {
     // ── Core budget: reserve 1 for timer, 1 for coordinator/API ──
     let available_cores = std::thread::available_parallelism()
@@ -625,23 +629,44 @@ where
                 rt.block_on(async {
                     let generator = generator_factory(core_id);
                     let transformer = transformer_factory(core_id);
-                    let executor = executor_factory();
+
+                    // Create shared health counters when health sampling is
+                    // enabled. Shared between executor (writer) and collector (reader).
+                    let health_counters = if config.health_sample_rate > 0.0 {
+                        Some(netanvil_types::HealthCounters {
+                            affinity: Rc::new(netanvil_types::CpuAffinityCounters::new()),
+                            tcp_health: Rc::new(netanvil_types::TcpHealthCounters::new()),
+                        })
+                    } else {
+                        None
+                    };
+
+                    let executor = executor_factory(health_counters.clone());
                     let packet_source = executor
                         .packet_counter_source()
                         .unwrap_or_default();
-                    let collector = HdrMetricsCollector::with_packet_source(
+                    let mut collector = HdrMetricsCollector::with_packet_source(
                         config.error_status_threshold,
                         config.tracked_response_headers.clone(),
                         config.md5_check_enabled,
                         config.response_signal_headers.clone(),
                         packet_source,
                     );
+                    if let Some(ref hc) = health_counters {
+                        collector.set_affinity_counters(hc.affinity.clone());
+                        collector.set_tcp_health_counters(hc.tcp_health.clone());
+                    }
 
                     let event_recorder: Rc<dyn EventRecorder> =
                         match event_recorder_factory {
                             Some(factory) => Rc::from(factory(core_id)),
                             None => Rc::new(NoopEventRecorder),
                         };
+
+                    let in_flight_cap = config.connections.max_in_flight_per_core;
+                    let in_flight_limit = Rc::new(
+                        crate::in_flight::InFlightLimit::new(in_flight_cap),
+                    );
 
                     io_worker_loop(
                         crate::io_worker::IoWorkerConfig {
@@ -656,6 +681,7 @@ where
                         Rc::new(executor),
                         Rc::new(collector),
                         event_recorder,
+                        in_flight_limit,
                     )
                     .await;
                 });

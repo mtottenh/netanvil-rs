@@ -126,7 +126,7 @@ fn pid_controller_adapts_rate_based_on_external_server_load() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(5))
     })
     .unwrap();
@@ -186,7 +186,7 @@ fn pid_without_external_signal_generates_requests() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(5))
     })
     .unwrap();
@@ -216,7 +216,7 @@ fn high_rps_does_not_stall_worker() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(5))
     })
     .unwrap();
@@ -256,7 +256,7 @@ fn external_signal_not_configured_does_not_affect_static_rate() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(5))
     })
     .unwrap();

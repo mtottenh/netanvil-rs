@@ -333,8 +333,9 @@ async fn put_rate(
 ) -> impl IntoResponse {
     let body = json_or_error(body)?;
     let tx = require_command_tx(&state.inner)?;
-    tracing::warn!(rps = body.rps, "PUT /rate is deprecated, use PUT /hold instead");
-    let _ = tx.send(WorkerCommand::Hold(HoldCommand::Hold(body.rps)));
+    // Agent-level PUT /rate uses UpdateRate (not Hold) because agents run
+    // StaticRateController and the leader distributes rate shares this way.
+    let _ = tx.send(WorkerCommand::UpdateRate(body.rps));
     Ok::<_, (StatusCode, Json<ApiResponse>)>(Json(ApiResponse::success()))
 }
 
@@ -524,12 +525,20 @@ async fn start_test_async(
 /// Separated from the readiness wait so the wait can be async.
 fn start_test_spawn(
     inner: &Arc<Mutex<AgentInner>>,
-    test_config: TestConfig,
+    mut test_config: TestConfig,
 ) -> Result<flume::Receiver<()>, String> {
     let (cmd_rx, shared_state) = {
         let mut agent = inner.lock().unwrap();
         if agent.state == NodeState::Running {
             return Err("test already running".into());
+        }
+
+        // Override auto-detect with the agent's pre-computed core count.
+        // After CPU isolation, the engine thread's affinity mask may be
+        // restricted to the housekeeping core, causing available_parallelism()
+        // to return 1. Use the value computed at agent startup (before isolation).
+        if test_config.num_cores == 0 {
+            test_config.num_cores = agent.cores;
         }
 
         let (cmd_tx, cmd_rx) = flume::unbounded();
@@ -646,23 +655,33 @@ fn start_test_spawn(
                 }
             };
 
-            let mut agent = inner_clone.lock().unwrap();
-            agent.state = NodeState::Idle;
-            agent.command_tx = None;
-            agent.shared_state.reset_metrics();
-            match result {
-                Ok(r) => {
-                    tracing::info!(
-                        total_requests = r.total_requests,
-                        total_errors = r.total_errors,
-                        "test completed"
-                    );
-                    agent.last_result = Some(r);
+            let shared_state_for_reset = {
+                let mut agent = inner_clone.lock().unwrap();
+                agent.state = NodeState::Idle;
+                agent.command_tx = None;
+                match result {
+                    Ok(r) => {
+                        tracing::info!(
+                            total_requests = r.total_requests,
+                            total_errors = r.total_errors,
+                            "test completed"
+                        );
+                        agent.last_result = Some(r);
+                    }
+                    Err(e) => {
+                        tracing::error!("test failed: {e}");
+                    }
                 }
-                Err(e) => {
-                    tracing::error!("test failed: {e}");
-                }
-            }
+                agent.shared_state.clone()
+            };
+            // Defer metrics reset so the leader (and Prometheus) can fetch
+            // final metrics before they're cleared. The next test start also
+            // resets metrics, so this is just a cleanup backstop.
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                shared_state_for_reset.reset_metrics();
+                tracing::debug!("deferred metrics reset complete");
+            });
         })
         .map_err(|e| format!("spawn test thread: {e}"))?;
 
@@ -681,7 +700,7 @@ fn run_http_test(
     let tls_client = config.tls_client.clone();
     let bandwidth_bps = config.bandwidth_limit_bps;
     let http_version = config.http_version;
-    let make_executor = move || -> HttpExecutor {
+    let make_executor = move |_: Option<netanvil_types::HealthCounters>| -> HttpExecutor {
         match &tls_client {
             Some(tls_config) => HttpExecutor::with_tls_and_version(
                 tls_config,
@@ -789,7 +808,7 @@ fn run_tcp_test(
 
     netanvil_core::GenericTestBuilder::new(
         config,
-        move || TcpExecutor::with_pool(timeout, max_conns, policy.clone()),
+        move |_| TcpExecutor::with_pool(timeout, max_conns, policy.clone()),
         gen_factory,
         trans_factory,
     )
@@ -844,7 +863,7 @@ fn run_udp_test(
 
     netanvil_core::GenericTestBuilder::new(
         config,
-        move || UdpExecutor::with_timeout(timeout),
+        move |_| UdpExecutor::with_timeout(timeout),
         gen_factory,
         trans_factory,
     )
@@ -905,7 +924,7 @@ fn run_dns_test(
 
     netanvil_core::GenericTestBuilder::new(
         config,
-        move || DnsExecutor::with_timeout(timeout),
+        move |_| DnsExecutor::with_timeout(timeout),
         gen_factory,
         trans_factory,
     )
@@ -1205,7 +1224,7 @@ fn run_redis_test(
 
     netanvil_core::GenericTestBuilder::new(
         config,
-        move || RedisExecutor::with_auth(timeout, password.clone(), db),
+        move |_| RedisExecutor::with_auth(timeout, password.clone(), db),
         gen_factory,
         trans_factory,
     )

@@ -7,6 +7,7 @@ pub mod dropping;
 pub mod engine;
 pub mod generator;
 pub mod handle;
+pub mod in_flight;
 pub mod io_worker;
 pub mod isolation;
 pub mod lifecycle;

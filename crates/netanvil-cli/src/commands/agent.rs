@@ -31,8 +31,12 @@ pub fn run(
     netanvil_core::isolation::reset_affinity();
 
     let cores = if cores == 0 {
+        // Auto-detect: use the I/O worker count (available - 2 reserved for
+        // timer + housekeeping), matching what the engine actually uses.
+        // This is what gets reported via /info and used by the leader for
+        // weight computation and semaphore sizing.
         std::thread::available_parallelism()
-            .map(|n| n.get())
+            .map(|n| n.get().saturating_sub(2).max(1))
             .unwrap_or(1)
     } else {
         cores
@@ -44,11 +48,11 @@ pub fn run(
             cert,
             key,
         };
-        tracing::info!(addr = %bind_addr, cores, node_id = node_id.as_deref().unwrap_or("-"), "starting agent (mTLS)");
+        tracing::info!(addr = %bind_addr, cores, node_id = node_id.as_deref().unwrap_or("-"), version = crate::VERSION, "starting agent (mTLS)");
         AgentServer::with_tls(&bind_addr, cores, node_id, &tls)
             .context(format!("failed to start mTLS agent on {bind_addr}"))?
     } else {
-        tracing::info!(addr = %bind_addr, cores, node_id = node_id.as_deref().unwrap_or("-"), "starting agent (plain HTTP)");
+        tracing::info!(addr = %bind_addr, cores, node_id = node_id.as_deref().unwrap_or("-"), version = crate::VERSION, "starting agent (plain HTTP)");
         AgentServer::new(&bind_addr, cores, node_id)
             .context(format!("failed to start agent on {bind_addr}"))?
     };
@@ -65,7 +69,7 @@ pub fn run(
         let available = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
-        let num_io = cores.saturating_sub(2).max(1);
+        let num_io = cores;
         let timer_core = 0usize;
         let io_core_start = 1usize;
         let misc_core = if available > num_io + 1 {

@@ -45,8 +45,18 @@ pub struct HdrMetricsCollector<P: PacketCounterSource = NoopPacketSource> {
     response_signal_configs: Vec<ResponseSignalConfig>,
     /// Per-signal accumulators for the current window.
     response_signal_accumulators: RefCell<HashMap<String, ResponseSignalAccumulator>>,
+    /// Shared CPU affinity counters. Written by ObservedTcpStream, drained
+    /// by snapshot(). None when health sampling is disabled.
+    affinity_counters: Option<std::rc::Rc<netanvil_types::CpuAffinityCounters>>,
+    /// Shared TCP health counters. Written by ObservedTcpStream, drained
+    /// by snapshot(). None when health sampling is disabled.
+    tcp_health_counters: Option<std::rc::Rc<netanvil_types::TcpHealthCounters>>,
     /// Protocol-level packet counter source (UDP loss, TCP_INFO, etc.).
     packet_source: P,
+    /// Requests that completed due to timeout. Tracked separately because
+    /// timeout "latency" (= timeout duration) is not real server response
+    /// time and should not contaminate the latency histogram.
+    timeout_count: Cell<u64>,
 }
 
 impl HdrMetricsCollector {
@@ -114,14 +124,46 @@ impl<P: PacketCounterSource> HdrMetricsCollector<P> {
             md5_mismatches: Cell::new(0),
             response_signal_configs,
             response_signal_accumulators: RefCell::new(HashMap::new()),
+            affinity_counters: None,
+            tcp_health_counters: None,
             packet_source,
+            timeout_count: Cell::new(0),
         }
+    }
+}
+
+impl<P: PacketCounterSource> HdrMetricsCollector<P> {
+    /// Set the shared CPU affinity counters (written by ObservedTcpStream,
+    /// drained by snapshot()). Call once during per-core setup.
+    pub fn set_affinity_counters(&mut self, counters: std::rc::Rc<netanvil_types::CpuAffinityCounters>) {
+        self.affinity_counters = Some(counters);
+    }
+
+    /// Set the shared TCP health counters.
+    pub fn set_tcp_health_counters(&mut self, counters: std::rc::Rc<netanvil_types::TcpHealthCounters>) {
+        self.tcp_health_counters = Some(counters);
     }
 }
 
 impl<P: PacketCounterSource> MetricsCollector for HdrMetricsCollector<P> {
     fn record(&self, result: &ExecutionResult) {
         self.total_requests.set(self.total_requests.get() + 1);
+
+        // Timeouts are tracked separately. A timeout's "latency" is the
+        // timeout duration, not the server's response time — recording it
+        // in the histogram would corrupt p99 with 30-second sentinel values.
+        let is_timeout = matches!(
+            result.error,
+            Some(netanvil_types::ExecutionError::Timeout)
+        );
+        if is_timeout {
+            self.timeout_count.set(self.timeout_count.get() + 1);
+            self.total_errors.set(self.total_errors.get() + 1);
+            self.bytes_sent
+                .set(self.bytes_sent.get() + result.bytes_sent);
+            // Skip histogram, size histogram, and scheduling delay recording.
+            return;
+        }
 
         // Count as error if: transport error, OR HTTP status >= threshold
         let is_error = result.error.is_some()
@@ -261,6 +303,20 @@ impl<P: PacketCounterSource> MetricsCollector for HdrMetricsCollector<P> {
             cloned
         };
 
+        // Drain shared CPU affinity counters (atomically read and reset).
+        let (aff_hits, aff_misses, aff_unknown) = self
+            .affinity_counters
+            .as_ref()
+            .map(|c| c.drain())
+            .unwrap_or((0, 0, 0));
+
+        // Drain shared TCP health counters.
+        let tcp_snap = self
+            .tcp_health_counters
+            .as_ref()
+            .map(|c| c.drain())
+            .unwrap_or_default();
+
         let snapshot = MetricsSnapshot {
             latency_histogram: latency_hist,
             total_requests: self.total_requests.get(),
@@ -281,9 +337,21 @@ impl<P: PacketCounterSource> MetricsCollector for HdrMetricsCollector<P> {
                 acc.clear();
                 cloned
             },
+            cpu_affinity_hits: aff_hits,
+            cpu_affinity_misses: aff_misses,
+            cpu_affinity_unknown: aff_unknown,
+            tcp_rtt_sum_us: tcp_snap.rtt_sum_us,
+            tcp_rtt_count: tcp_snap.rtt_count,
+            tcp_rtt_max_us: tcp_snap.rtt_max_us,
+            tcp_retransmits: tcp_snap.retransmits,
+            tcp_lost: tcp_snap.lost,
             packets_sent: pkt_deltas.sent,
             packets_received: pkt_deltas.received,
             packets_lost: pkt_deltas.lost,
+            timeout_count: self.timeout_count.get(),
+            in_flight_drops: 0,    // stamped by io_worker before sending
+            in_flight_count: 0,    // stamped by io_worker before sending
+            in_flight_capacity: 0, // stamped by io_worker before sending
         };
 
         // Reset for next window (keeps existing allocations)
@@ -298,6 +366,7 @@ impl<P: PacketCounterSource> MetricsCollector for HdrMetricsCollector<P> {
         self.scheduling_delay_max_ns.set(0);
         self.scheduling_delay_count_over_1ms.set(0);
         self.md5_mismatches.set(0);
+        self.timeout_count.set(0);
 
         snapshot
     }

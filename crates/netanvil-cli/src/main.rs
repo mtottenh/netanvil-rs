@@ -5,6 +5,14 @@ mod commands;
 mod output;
 mod parsing;
 
+/// Build version string: "0.1.14 (abc1234)" or "0.1.14 (abc1234-dirty)".
+pub const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("NETANVIL_GIT_HASH"),
+    ")",
+);
+
 #[derive(Parser)]
 #[command(name = "netanvil-cli")]
 #[command(about = "High-performance HTTP load testing")]
@@ -238,6 +246,13 @@ enum Commands {
         /// Default: 1.0 (log all requests). Use lower values at high RPS.
         #[arg(long, default_value = "1.0")]
         event_sample_rate: f64,
+
+        // ── Connection health flags ──
+        /// Fraction of TCP reads to sample for CPU affinity observation (0.0-1.0).
+        /// Uses io_uring linked SQEs to atomically read SO_INCOMING_CPU after recv.
+        /// Requires kernel >= 6.7. Default: 0.0 (disabled).
+        #[arg(long, default_value = "0.0")]
+        health_sample_rate: f64,
     },
 
     /// Run as a remotely controllable agent node
@@ -485,6 +500,12 @@ enum Commands {
         /// Output format: "text" (human-readable to stderr) or "json" (machine-readable to stdout)
         #[arg(long, default_value = "text")]
         output: String,
+
+        /// Fraction of TCP reads to sample for CPU affinity observation (0.0-1.0).
+        /// Uses io_uring linked SQEs to atomically read SO_INCOMING_CPU after recv.
+        /// Requires kernel >= 6.7 on agents. Default: 0.0 (disabled).
+        #[arg(long, default_value = "0.0")]
+        health_sample_rate: f64,
     },
 
     /// Run as a persistent leader daemon with HTTP API and test queue
@@ -544,18 +565,15 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let default_level = if cli.debug {
-        tracing::Level::DEBUG
-    } else {
-        tracing::Level::INFO
+    let env_filter = match tracing_subscriber::EnvFilter::try_from_default_env() {
+        Ok(filter) => filter,
+        Err(_) => {
+            let level = if cli.debug { "debug" } else { "info" };
+            tracing_subscriber::EnvFilter::new(level)
+        }
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(default_level.into()),
-        )
-        .init();
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     match cli.command {
         Commands::Test {
@@ -606,6 +624,7 @@ fn main() -> Result<()> {
             ramp_max_errors,
             event_log_dir,
             event_sample_rate,
+            health_sample_rate,
         } => commands::test::run(
             url,
             plugin,
@@ -653,6 +672,7 @@ fn main() -> Result<()> {
             ramp_max_errors,
             event_log_dir,
             event_sample_rate,
+            health_sample_rate,
         )?,
 
         Commands::Agent {
@@ -714,6 +734,7 @@ fn main() -> Result<()> {
             ramp_max_errors,
             metrics_port,
             output,
+            health_sample_rate,
         } => commands::leader::run(
             workers,
             url,
@@ -759,6 +780,7 @@ fn main() -> Result<()> {
             ramp_max_errors,
             metrics_port,
             output,
+            health_sample_rate,
         )?,
 
         Commands::LeaderServer {

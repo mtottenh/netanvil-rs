@@ -33,10 +33,26 @@ pub struct AggregateMetrics {
     response_signals: HashMap<String, ResponseSignalAccumulator>,
     // Signal aggregation configs (set once, used in to_summary)
     signal_configs: Vec<netanvil_types::config::ResponseSignalConfig>,
+    // CPU affinity tracking (composable: sum)
+    cpu_affinity_hits: u64,
+    cpu_affinity_misses: u64,
+    cpu_affinity_unknown: u64,
+    // TCP health tracking (composable: sum/max)
+    tcp_rtt_sum_us: u64,
+    tcp_rtt_count: u64,
+    tcp_rtt_max_us: u64,
+    tcp_retransmits: u64,
+    tcp_lost: u64,
     // Protocol-level packet tracking (composable: sum)
     packets_sent: u64,
     packets_received: u64,
     packets_lost: u64,
+    // Timeout tracking (composable: sum)
+    timeout_count: u64,
+    // In-flight tracking (composable: sum for drops, sum for count, max for capacity)
+    in_flight_drops: u64,
+    in_flight_count: u64,
+    in_flight_capacity: u64,
 }
 
 impl AggregateMetrics {
@@ -60,9 +76,21 @@ impl AggregateMetrics {
             md5_mismatches: 0,
             response_signals: HashMap::new(),
             signal_configs: Vec::new(),
+            cpu_affinity_hits: 0,
+            cpu_affinity_misses: 0,
+            cpu_affinity_unknown: 0,
+            tcp_rtt_sum_us: 0,
+            tcp_rtt_count: 0,
+            tcp_rtt_max_us: 0,
+            tcp_retransmits: 0,
+            tcp_lost: 0,
             packets_sent: 0,
             packets_received: 0,
             packets_lost: 0,
+            timeout_count: 0,
+            in_flight_drops: 0,
+            in_flight_count: 0,
+            in_flight_capacity: 0,
         }
     }
 
@@ -131,10 +159,30 @@ impl AggregateMetrics {
             entry.last = acc.last;
         }
 
+        // Merge CPU affinity counters
+        self.cpu_affinity_hits += snapshot.cpu_affinity_hits;
+        self.cpu_affinity_misses += snapshot.cpu_affinity_misses;
+        self.cpu_affinity_unknown += snapshot.cpu_affinity_unknown;
+
+        // Merge TCP health counters
+        self.tcp_rtt_sum_us += snapshot.tcp_rtt_sum_us;
+        self.tcp_rtt_count += snapshot.tcp_rtt_count;
+        self.tcp_rtt_max_us = self.tcp_rtt_max_us.max(snapshot.tcp_rtt_max_us);
+        self.tcp_retransmits += snapshot.tcp_retransmits;
+        self.tcp_lost += snapshot.tcp_lost;
+
         // Merge protocol-level packet counters
         self.packets_sent += snapshot.packets_sent;
         self.packets_received += snapshot.packets_received;
         self.packets_lost += snapshot.packets_lost;
+
+        // Merge timeout counter
+        self.timeout_count += snapshot.timeout_count;
+
+        // Merge in-flight tracking
+        self.in_flight_drops += snapshot.in_flight_drops;
+        self.in_flight_count += snapshot.in_flight_count; // sum across cores
+        self.in_flight_capacity += snapshot.in_flight_capacity; // sum across cores
     }
 
     /// Reset for the next aggregation window.
@@ -154,9 +202,21 @@ impl AggregateMetrics {
         self.header_value_counts.clear();
         self.md5_mismatches = 0;
         self.response_signals.clear();
+        self.cpu_affinity_hits = 0;
+        self.cpu_affinity_misses = 0;
+        self.cpu_affinity_unknown = 0;
+        self.tcp_rtt_sum_us = 0;
+        self.tcp_rtt_count = 0;
+        self.tcp_rtt_max_us = 0;
+        self.tcp_retransmits = 0;
+        self.tcp_lost = 0;
         self.packets_sent = 0;
         self.packets_received = 0;
         self.packets_lost = 0;
+        self.timeout_count = 0;
+        self.in_flight_drops = 0;
+        self.in_flight_count = 0;
+        self.in_flight_capacity = 0;
     }
 
     /// Protocol-level packet counters: (sent, received, lost).
@@ -191,6 +251,8 @@ impl AggregateMetrics {
             throughput_send_bps: self.bytes_sent as f64 / secs,
             throughput_recv_bps: self.bytes_received as f64 / secs,
             external_signals: self.compute_response_signals(),
+            timeout_count: self.timeout_count,
+            in_flight_drops: self.in_flight_drops,
         }
     }
 
@@ -266,6 +328,64 @@ impl AggregateMetrics {
     pub fn response_signals(&self) -> &HashMap<String, ResponseSignalAccumulator> {
         &self.response_signals
     }
+
+    pub fn cpu_affinity_hits(&self) -> u64 {
+        self.cpu_affinity_hits
+    }
+
+    pub fn cpu_affinity_misses(&self) -> u64 {
+        self.cpu_affinity_misses
+    }
+
+    pub fn cpu_affinity_unknown(&self) -> u64 {
+        self.cpu_affinity_unknown
+    }
+
+    pub fn cpu_affinity_ratio(&self) -> f64 {
+        let total = self.cpu_affinity_hits + self.cpu_affinity_misses;
+        if total > 0 {
+            self.cpu_affinity_hits as f64 / total as f64
+        } else {
+            0.0
+        }
+    }
+
+    pub fn tcp_rtt_mean_us(&self) -> f64 {
+        if self.tcp_rtt_count > 0 {
+            self.tcp_rtt_sum_us as f64 / self.tcp_rtt_count as f64
+        } else {
+            0.0
+        }
+    }
+
+    pub fn tcp_rtt_max_us(&self) -> u64 {
+        self.tcp_rtt_max_us
+    }
+
+    pub fn tcp_retransmit_ratio(&self) -> f64 {
+        let total = self.tcp_rtt_count; // one observation per sampled read
+        if total > 0 {
+            self.tcp_retransmits as f64 / total as f64
+        } else {
+            0.0
+        }
+    }
+
+    pub fn timeout_count(&self) -> u64 {
+        self.timeout_count
+    }
+
+    pub fn in_flight_drops(&self) -> u64 {
+        self.in_flight_drops
+    }
+
+    pub fn in_flight_count(&self) -> u64 {
+        self.in_flight_count
+    }
+
+    pub fn in_flight_capacity(&self) -> u64 {
+        self.in_flight_capacity
+    }
 }
 
 #[cfg(test)]
@@ -295,6 +415,14 @@ mod tests {
                 .unwrap(),
             md5_mismatches: 0,
             response_signals: std::collections::HashMap::new(),
+            cpu_affinity_hits: 0,
+            cpu_affinity_misses: 0,
+            cpu_affinity_unknown: 0,
+            tcp_rtt_sum_us: 0,
+            tcp_rtt_count: 0,
+            tcp_rtt_max_us: 0,
+            tcp_retransmits: 0,
+            tcp_lost: 0,
             packets_sent: 0,
             packets_received: 0,
             packets_lost: 0,

@@ -75,7 +75,7 @@ fn always_new_policy_creates_many_connections() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(10))
     })
     .unwrap();
@@ -111,7 +111,7 @@ fn keepalive_policy_reuses_connections() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(10))
     })
     .unwrap();
@@ -149,7 +149,7 @@ fn mixed_policy_produces_both_new_and_reused_connections() {
         ..Default::default()
     };
 
-    let result = run_test(config, || {
+    let result = run_test(config, |_| {
         HttpExecutor::with_timeout(Duration::from_secs(10))
     })
     .unwrap();

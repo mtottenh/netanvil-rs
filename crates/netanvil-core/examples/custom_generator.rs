@@ -146,7 +146,7 @@ fn main() {
     let result = TestBuilder::new(
         config,
         // Executor factory: one HTTP client per core
-        || HttpExecutor::with_timeout(Duration::from_secs(30)),
+        |_| HttpExecutor::with_timeout(Duration::from_secs(30)),
     )
     .generator_factory(move |core_id| {
         Box::new(ApiWorkloadGenerator::new(target_url.clone(), core_id))

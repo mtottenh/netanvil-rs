@@ -468,6 +468,7 @@ impl TestQueue {
                     ctrl_info_rx,
                 )) => {
                     tracing::info!(test_id = %id, "starting queued test");
+                    tracing::debug!(test_id = %id, config = ?test_config, "applying test config");
 
                     let result = self.run_test(
                         &test_config,

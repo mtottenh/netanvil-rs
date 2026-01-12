@@ -33,8 +33,8 @@ pub use distributed::{MetricsFetcher, NodeCommander, NodeDiscovery, RemoteMetric
 pub use dns_spec::{DnsQueryType, DnsRequestSpec};
 pub use error::{NetAnvilError, Result};
 pub use metrics::{
-    MetricsSnapshot, MetricsSummary, PacketCounterDeltas, RateDecision, SaturationAssessment,
-    SaturationInfo,
+    CpuAffinityCounters, HealthCounters, MetricsSnapshot, MetricsSummary, PacketCounterDeltas,
+    RateDecision, SaturationAssessment, SaturationInfo, TcpHealthCounters, TcpHealthSnapshot,
 };
 pub use node::{NodeId, NodeInfo, NodeState};
 pub use redis_spec::RedisRequestSpec;

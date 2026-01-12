@@ -201,6 +201,7 @@ fn response_callbacks_receive_statuses() {
             executor,
             metrics,
             Rc::new(NoopEventRecorder) as Rc<dyn EventRecorder>,
+            Rc::new(netanvil_core::in_flight::InFlightLimit::new(0)),
         )
         .await;
     });
@@ -255,6 +256,7 @@ fn no_response_generator_has_zero_overhead() {
             executor,
             metrics,
             Rc::new(NoopEventRecorder) as Rc<dyn EventRecorder>,
+            Rc::new(netanvil_core::in_flight::InFlightLimit::new(0)),
         )
         .await;
 

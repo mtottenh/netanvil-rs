@@ -150,6 +150,7 @@ fn io_worker_fires_requests_from_channel() {
             Rc::new(executor),
             Rc::new(collector),
             Rc::new(NoopEventRecorder) as Rc<dyn EventRecorder>,
+            Rc::new(netanvil_core::in_flight::InFlightLimit::new(0)),
         )
         .await;
     });
@@ -200,6 +201,7 @@ fn io_worker_stops_on_stop_message() {
             Rc::new(executor),
             Rc::new(collector),
             Rc::new(NoopEventRecorder) as Rc<dyn EventRecorder>,
+            Rc::new(netanvil_core::in_flight::InFlightLimit::new(0)),
         )
         .await;
     });
@@ -245,6 +247,7 @@ fn io_worker_exits_on_channel_disconnect() {
             Rc::new(executor),
             Rc::new(collector),
             Rc::new(NoopEventRecorder) as Rc<dyn EventRecorder>,
+            Rc::new(netanvil_core::in_flight::InFlightLimit::new(0)),
         )
         .await;
     });
@@ -305,6 +308,7 @@ fn io_worker_handles_target_update() {
             Rc::new(executor),
             Rc::new(collector),
             Rc::new(NoopEventRecorder) as Rc<dyn EventRecorder>,
+            Rc::new(netanvil_core::in_flight::InFlightLimit::new(0)),
         )
         .await;
     });
@@ -394,6 +398,7 @@ fn io_worker_handles_header_update() {
             Rc::new(executor),
             Rc::new(collector),
             Rc::new(NoopEventRecorder) as Rc<dyn EventRecorder>,
+            Rc::new(netanvil_core::in_flight::InFlightLimit::new(0)),
         )
         .await;
     });
@@ -472,6 +477,7 @@ fn io_worker_sends_periodic_metrics_snapshots() {
             Rc::new(executor),
             Rc::new(collector),
             Rc::new(NoopEventRecorder) as Rc<dyn EventRecorder>,
+            Rc::new(netanvil_core::in_flight::InFlightLimit::new(0)),
         )
         .await;
     });

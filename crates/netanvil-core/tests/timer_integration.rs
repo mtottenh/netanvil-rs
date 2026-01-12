@@ -128,6 +128,7 @@ fn spawn_full_architecture(
                         Rc::new(executor),
                         Rc::new(collector),
                         Rc::new(NoopEventRecorder) as Rc<dyn EventRecorder>,
+                        Rc::new(netanvil_core::in_flight::InFlightLimit::new(0)),
                     )
                     .await;
                 });
@@ -417,6 +418,7 @@ fn timer_plus_workers_coordinated_omission_tracking() {
             exec_rc.clone(),
             Rc::new(collector),
             Rc::new(NoopEventRecorder) as Rc<dyn EventRecorder>,
+            Rc::new(netanvil_core::in_flight::InFlightLimit::new(0)),
         )
         .await;
 

@@ -111,6 +111,8 @@ pub struct ProgressUpdate {
     pub packets_sent: u64,
     pub packets_received: u64,
     pub packets_lost: u64,
+    /// Total timeout completions (cumulative across all cores).
+    pub total_timeouts: u64,
 }
 
 /// Standard Prometheus latency bucket boundaries in nanoseconds.
@@ -191,6 +193,8 @@ pub struct Coordinator {
     target_bytes: Option<u64>,
     /// Sliding window for smoothing reported RPS (not fed to rate controller).
     sliding_window: SlidingWindow,
+    /// Previous tick's saturation assessment (for logging transitions).
+    last_assessment: SaturationAssessment,
 }
 
 impl Coordinator {
@@ -225,6 +229,7 @@ impl Coordinator {
             warmup_complete: false,
             target_bytes: None,
             sliding_window: SlidingWindow::new(Duration::from_secs(2)),
+            last_assessment: SaturationAssessment::Healthy,
         }
     }
 
@@ -294,6 +299,14 @@ impl Coordinator {
         let initial_rps = self.rate_controller.current_rate();
         self.distribute_rate(initial_rps);
 
+        tracing::info!(
+            initial_rps,
+            duration_secs = self.test_duration.as_secs(),
+            control_interval_ms = self.control_interval.as_millis() as u64,
+            num_workers = self.io_workers.len(),
+            "test started"
+        );
+
         // Signal that the coordinator is ready to process commands.
         // Ignore send error: the receiver may have timed out and dropped.
         if let Some(tx) = ready_tx {
@@ -308,6 +321,15 @@ impl Coordinator {
                 break;
             }
         }
+
+        let elapsed = self.start_time.elapsed();
+        tracing::info!(
+            elapsed_secs = format!("{:.1}", elapsed.as_secs_f64()),
+            total_requests = self.total_aggregate.total_requests(),
+            total_errors = self.total_aggregate.total_errors(),
+            final_rps = format!("{:.1}", self.rate_controller.current_rate()),
+            "test completed"
+        );
 
         self.stop_workers();
         self.collect_final_metrics()
@@ -419,11 +441,13 @@ impl Coordinator {
         );
         let smoothed_rps = self.sliding_window.request_rate();
 
-        tracing::debug!(
+        tracing::info!(
             tick_requests = summary.total_requests,
             total_requests = self.total_aggregate.total_requests(),
             smoothed_rps,
             target_rps = decision.target_rps,
+            error_rate = format!("{:.4}", summary.error_rate),
+            p99_ms = format!("{:.2}", summary.latency_p99_ns as f64 / 1_000_000.0),
             "coordinator tick"
         );
 
@@ -454,6 +478,7 @@ impl Coordinator {
                 packets_sent: pkts.0,
                 packets_received: pkts.1,
                 packets_lost: pkts.2,
+                total_timeouts: self.total_aggregate.timeout_count(),
             };
             callback(&update);
         }
@@ -609,17 +634,27 @@ impl Coordinator {
             (true, true) => SaturationAssessment::BothSaturated,
         };
 
-        if assessment != SaturationAssessment::Healthy {
+        if assessment != self.last_assessment {
             let latency_p99_ms = summary.latency_p99_ns as f64 / 1_000_000.0;
-            tracing::warn!(
-                ?assessment,
-                backpressure_ratio,
-                scheduling_delay_mean_ms,
-                rate_achievement,
-                error_rate = summary.error_rate,
-                latency_p99_ms,
-                "saturation detected"
-            );
+            if assessment == SaturationAssessment::Healthy {
+                tracing::info!(
+                    previous = ?self.last_assessment,
+                    rate_achievement,
+                    "saturation recovered"
+                );
+            } else {
+                tracing::warn!(
+                    ?assessment,
+                    previous = ?self.last_assessment,
+                    backpressure_ratio,
+                    scheduling_delay_mean_ms,
+                    rate_achievement,
+                    error_rate = summary.error_rate,
+                    latency_p99_ms,
+                    "saturation detected"
+                );
+            }
+            self.last_assessment = assessment;
         }
 
         SaturationInfo {
@@ -629,7 +664,14 @@ impl Coordinator {
             scheduling_delay_max_ms,
             delayed_request_ratio,
             rate_achievement,
+            cpu_affinity_ratio: self.tick_aggregate.cpu_affinity_ratio(),
+            tcp_rtt_mean_ms: self.tick_aggregate.tcp_rtt_mean_us() / 1000.0,
+            tcp_rtt_max_ms: self.tick_aggregate.tcp_rtt_max_us() as f64 / 1000.0,
+            tcp_retransmit_ratio: self.tick_aggregate.tcp_retransmit_ratio(),
             assessment,
+            in_flight_drops: self.tick_aggregate.in_flight_drops(),
+            in_flight_count: self.tick_aggregate.in_flight_count(),
+            in_flight_capacity: self.tick_aggregate.in_flight_capacity(),
         }
     }
 
@@ -738,6 +780,10 @@ impl Coordinator {
             } else {
                 0.0
             },
+            cpu_affinity_ratio: self.total_aggregate.cpu_affinity_ratio(),
+            tcp_rtt_mean_ms: self.total_aggregate.tcp_rtt_mean_us() / 1000.0,
+            tcp_rtt_max_ms: self.total_aggregate.tcp_rtt_max_us() as f64 / 1000.0,
+            tcp_retransmit_ratio: self.total_aggregate.tcp_retransmit_ratio(),
             rate_achievement: 1.0, // not meaningful for final result
             assessment: if total_dropped > 0
                 || self.total_aggregate.scheduling_delay_count_over_1ms() as f64
@@ -748,6 +794,9 @@ impl Coordinator {
             } else {
                 SaturationAssessment::Healthy
             },
+            in_flight_drops: 0,
+            in_flight_count: 0,
+            in_flight_capacity: 0,
         };
 
         let bytes_sent = self.total_aggregate.bytes_sent();

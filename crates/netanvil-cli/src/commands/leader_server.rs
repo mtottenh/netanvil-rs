@@ -35,6 +35,7 @@ pub fn run(
         max_results,
         metrics_port = metrics_port.map(|p| p.to_string()).unwrap_or_else(|| "none".into()),
         mtls = tls_config.is_some(),
+        version = crate::VERSION,
         "starting leader daemon"
     );
 

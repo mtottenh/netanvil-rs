@@ -1817,16 +1817,20 @@ fn ramp_moderate_backoff_on_medium_violation() {
     for _ in 0..3 {
         ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
     }
+
+    // p99 = 50ms → ratio = 50/30 ≈ 1.67 → moderate backoff (×0.75).
+    // First tick: held by persistence (streak=1 < 2, severity < 3.0).
+    ctrl.update(&make_ramp_summary(100, 50.0, 0.0));
     let rate_before = ctrl.current_rate();
 
-    // p99 = 50ms → ratio = 50/30 ≈ 1.67 → moderate backoff (×0.75) on first tick.
-    // Known-good floor limits the single-tick drop to ~80% of peak.
+    // Second tick: persistence confirmed (streak=2 ≥ 2) → moderate backoff.
+    // Known-good floor limits the drop to ~80% of peak.
     ctrl.update(&make_ramp_summary(100, 50.0, 0.0));
     let rate_after = ctrl.current_rate();
 
     assert!(
         rate_after < rate_before * 0.88,
-        "moderate violation should drop by >12%: {rate_before:.1} → {rate_after:.1}"
+        "moderate violation should drop by >12% after persistence: {rate_before:.1} → {rate_after:.1}"
     );
 }
 
@@ -1855,6 +1859,8 @@ fn ramp_hard_backoff_on_severe_violation() {
 #[test]
 fn ramp_graduated_backoff_proportional_to_severity() {
     // Verify that more severe violations cause equal or larger rate drops.
+    // Two violation ticks are needed because latency persistence=2 holds
+    // the first tick (unless severity > 3.0 which bypasses persistence).
     let drop_for = |p99_ms: f64| -> f64 {
         let mut ctrl = RampRateController::new(make_ramp_config());
         warmup_ramp(&mut ctrl, 10.0);
@@ -1862,13 +1868,14 @@ fn ramp_graduated_backoff_proportional_to_severity() {
             ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
         }
         let before = ctrl.current_rate();
-        ctrl.update(&make_ramp_summary(100, p99_ms, 0.0));
+        ctrl.update(&make_ramp_summary(100, p99_ms, 0.0)); // tick 1 (held or bypassed)
+        ctrl.update(&make_ramp_summary(100, p99_ms, 0.0)); // tick 2 (confirmed)
         (before - ctrl.current_rate()) / before
     };
 
     let drop_gentle = drop_for(40.0); // ratio ~1.33 → gentle (×0.90)
     let drop_moderate = drop_for(50.0); // ratio ~1.67 → moderate (×0.75)
-    let drop_hard = drop_for(100.0); // ratio ~3.33 → hard (×0.50)
+    let drop_hard = drop_for(100.0); // ratio ~3.33 → hard (×0.50, bypasses persistence)
 
     assert!(
         drop_gentle > 0.05,
@@ -2462,5 +2469,160 @@ fn ramp_controller_state_populated_during_ramping() {
     assert!(
         names.contains(&"netanvil_ramp_latency_ratio"),
         "should expose latency_ratio gauge: {names:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Behavior diff tests (unified constraint system)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ramp_dual_trigger_timeout_and_error_takes_minimum() {
+    // Behavior diff #3: when timeout AND error rate both trigger simultaneously,
+    // the most conservative (min desired rate) wins. Old code: timeout early-return
+    // prevented error rate from being evaluated.
+    let mut ctrl = RampRateController::new(make_ramp_config()); // max_error_rate = 5%
+    warmup_ramp(&mut ctrl, 10.0);
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let rate_before = ctrl.current_rate();
+
+    // Timeout soft backoff (×0.90) AND error hard backoff (×0.50).
+    // soft_threshold = (5/100 × 0.5).max(0.01) = 0.025
+    // timeout_fraction = 5/100 = 0.05 → soft backoff
+    // error_rate = 10% → error_pct = 10 > 7.5 → hard backoff
+    // Min(rate×0.90, rate×0.50) = rate×0.50
+    let mut s = make_ramp_summary(100, 10.0, 0.10); // 10% errors
+    s.timeout_count = 5; // 5% timeouts
+    ctrl.update(&s);
+    let rate_after = ctrl.current_rate();
+
+    // Error hard backoff (×0.50) is more conservative than timeout soft (×0.90).
+    // Both are Catastrophic and OperatingPoint respectively — error rate respects
+    // floor but timeout would bypass it. Since error is binding (lower desired rate),
+    // floor applies. Floor = 80% of peak.
+    let floor = rate_before * 0.80;
+    assert!(
+        rate_after <= floor * 1.02,
+        "dual-trigger should take min rate (error hard backoff, floored): \
+         {rate_before:.1} → {rate_after:.1} (expected ≤{floor:.1})"
+    );
+    assert!(
+        rate_after < rate_before * 0.85,
+        "dual-trigger should cause significant drop: {rate_before:.1} → {rate_after:.1}"
+    );
+}
+
+#[test]
+fn ramp_single_severe_spike_held_then_backoff() {
+    // Behavior diff #5: a single latency spike with severity in [1.3, 3.0)
+    // is held for 1 tick (persistence=2), then backs off on the second tick.
+    // Severity > 3.0 bypasses persistence and backs off immediately.
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0); // target = 30ms
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+
+    // p99 = 45ms → ratio = 1.5 → moderate backoff territory.
+    // Tick 1: severity 1.5, streak=1 < persistence=2 → Hold.
+    let rate_before_spike = ctrl.current_rate();
+    ctrl.update(&make_ramp_summary(100, 45.0, 0.0));
+    let rate_after_tick1 = ctrl.current_rate();
+
+    assert!(
+        (rate_after_tick1 - rate_before_spike).abs() / rate_before_spike < 0.02,
+        "first tick of moderate spike should hold: {rate_before_spike:.1} → {rate_after_tick1:.1}"
+    );
+
+    // Tick 2: streak=2 ≥ persistence=2 → moderate backoff applied.
+    ctrl.update(&make_ramp_summary(100, 45.0, 0.0));
+    let rate_after_tick2 = ctrl.current_rate();
+
+    assert!(
+        rate_after_tick2 < rate_before_spike * 0.88,
+        "second tick should apply moderate backoff: {rate_before_spike:.1} → {rate_after_tick2:.1}"
+    );
+
+    // Now test severity > 3.0 bypasses persistence.
+    let mut ctrl2 = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl2, 10.0);
+    for _ in 0..3 {
+        ctrl2.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let rate_before_hard = ctrl2.current_rate();
+
+    // p99 = 100ms → ratio = 3.33 → severity > 3.0 → bypasses persistence.
+    ctrl2.update(&make_ramp_summary(100, 100.0, 0.0));
+    let rate_after_hard = ctrl2.current_rate();
+
+    assert!(
+        rate_after_hard < rate_before_hard * 0.85,
+        "severity > 3.0 should bypass persistence and backoff immediately: \
+         {rate_before_hard:.1} → {rate_after_hard:.1}"
+    );
+}
+
+#[test]
+fn ramp_streak_hysteresis_at_severity_boundary() {
+    // Behavior diff #6: streak resets to 0 only when severity < 0.7
+    // (AllowIncrease band). In the Hold band [0.7, 1.0), streak is maintained.
+    // This prevents rapid flapping at the boundary.
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0); // target = 30ms
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+
+    // Build up a violation streak: 2 ticks above threshold.
+    // p99 = 40ms → ratio = 1.33 → severity ≥ 1.0.
+    ctrl.update(&make_ramp_summary(100, 40.0, 0.0)); // streak=1, held
+    ctrl.update(&make_ramp_summary(100, 40.0, 0.0)); // streak=2, gentle backoff
+
+    // Now oscillate into the Hold band: p99 = 25ms → ratio = 0.83.
+    // Severity in [0.7, 1.0): streak should be MAINTAINED (not reset).
+    ctrl.update(&make_ramp_summary(100, 25.0, 0.0));
+
+    // Go back above threshold with severity ≥ 1.5 (bypasses self_caused
+    // override). p99 = 50ms → ratio = 1.67, streak was maintained ≥ 2.
+    // Should trigger immediate backoff (streak=3 ≥ persistence=2).
+    let rate_before_reviolation = ctrl.current_rate();
+    ctrl.update(&make_ramp_summary(100, 50.0, 0.0));
+    let rate_after_reviolation = ctrl.current_rate();
+
+    assert!(
+        rate_after_reviolation < rate_before_reviolation * 0.95,
+        "re-violation after hold band should backoff immediately (streak maintained): \
+         {rate_before_reviolation:.1} → {rate_after_reviolation:.1}"
+    );
+
+    // Contrast: if severity drops to < 0.7 (reset zone), streak resets,
+    // so the same re-violation is held for 1 tick (streak=1 < persistence=2).
+    let mut ctrl2 = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl2, 10.0);
+    for _ in 0..3 {
+        ctrl2.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+
+    // Build streak.
+    ctrl2.update(&make_ramp_summary(100, 40.0, 0.0)); // streak=1
+    ctrl2.update(&make_ramp_summary(100, 40.0, 0.0)); // streak=2
+
+    // Drop to clean zone: p99 = 10ms → ratio = 0.33 → severity < 0.7 → streak resets.
+    ctrl2.update(&make_ramp_summary(100, 10.0, 0.0)); // streak=0, increase
+    let rate_before_new = ctrl2.current_rate();
+
+    // New violation at severity ≥ 1.5: streak=1 < persistence=2 → held.
+    ctrl2.update(&make_ramp_summary(100, 50.0, 0.0)); // streak=1 < 2 → hold
+    let rate_after_new = ctrl2.current_rate();
+
+    assert!(
+        (rate_after_new - rate_before_new).abs() / rate_before_new < 0.02,
+        "after full reset (severity < 0.7), single violation should hold: \
+         {rate_before_new:.1} → {rate_after_new:.1}"
     );
 }

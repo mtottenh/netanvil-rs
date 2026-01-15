@@ -2278,7 +2278,7 @@ fn ramp_oscillates_around_equilibrium() {
     let mut rates = Vec::new();
     let threshold_rps = 300.0;
 
-    for i in 0..30 {
+    for i in 0..50 {
         // Simulate a system where latency spikes above target when rate > threshold.
         let current = ctrl.current_rate();
         let p99 = if current > threshold_rps { 60.0 } else { 10.0 };

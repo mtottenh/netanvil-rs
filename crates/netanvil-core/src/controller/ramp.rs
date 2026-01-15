@@ -75,6 +75,15 @@ const ADDITIVE_INCREASE_FRACTION: f64 = 0.01;
 /// Severity above which persistence is bypassed (immediate backoff).
 const SEVERITY_BYPASS_PERSISTENCE: f64 = 3.0;
 
+/// Minimum ticks after backoff before recovery can be declared.
+const RECOVERY_MIN_TICKS: u32 = 3;
+
+/// Minimum recovery samples before EMA is trusted over seed.
+const RECOVERY_MIN_SAMPLES: u32 = 3;
+
+/// Severity threshold below which recovery is declared.
+const RECOVERY_SEVERITY_THRESHOLD: f64 = 0.9;
+
 /// Actions a constraint can request, ordered from least to most severe.
 /// `Ord` is derived with variants in ascending severity order so that
 /// `action.min(Hold)` caps severity at Hold.
@@ -164,15 +173,38 @@ struct ConstraintState {
     ticks_since_seen: u32,
     /// Consecutive ticks where the signal is stale/missing (external only).
     missing_streak: u32,
+    /// EMA of observed recovery time in ticks.
+    recovery_ema_ticks: f64,
+    /// Number of recovery observations. EMA not trusted until >= RECOVERY_MIN_SAMPLES.
+    recovery_samples: u32,
+    /// Fallback recovery estimate used until EMA earns trust.
+    initial_seed: f64,
+    /// Ticks since this constraint last triggered backoff (for measuring recovery).
+    /// `None` when not tracking a recovery.
+    ticks_since_backoff: Option<u32>,
 }
 
 impl ConstraintState {
-    fn new(persistence: u32) -> Self {
+    fn new(persistence: u32, initial_seed: f64) -> Self {
         Self {
             violation_streak: 0,
             persistence,
             ticks_since_seen: 0,
             missing_streak: 0,
+            recovery_ema_ticks: initial_seed,
+            recovery_samples: 0,
+            initial_seed,
+            ticks_since_backoff: None,
+        }
+    }
+
+    /// Cooldown estimate: trust EMA only with enough samples, otherwise
+    /// use the larger of EMA and initial seed.
+    fn cooldown_estimate(&self) -> f64 {
+        if self.recovery_samples >= RECOVERY_MIN_SAMPLES {
+            self.recovery_ema_ticks
+        } else {
+            self.recovery_ema_ticks.max(self.initial_seed)
         }
     }
 }
@@ -265,6 +297,16 @@ enum Constraint {
 }
 
 impl Constraint {
+    fn id(&self) -> ConstraintId {
+        match self {
+            Self::Timeout { .. } => ConstraintId::Timeout,
+            Self::InFlightDrop { .. } => ConstraintId::InFlightDrop,
+            Self::Latency { .. } => ConstraintId::Latency,
+            Self::ErrorRate { .. } => ConstraintId::ErrorRate,
+            Self::External { config, .. } => ConstraintId::External(config.signal_name.clone()),
+        }
+    }
+
     fn state(&self) -> &ConstraintState {
         match self {
             Self::Timeout { state, .. }
@@ -273,6 +315,40 @@ impl Constraint {
             | Self::ErrorRate { state, .. }
             | Self::External { state, .. } => state,
         }
+    }
+
+    fn state_mut(&mut self) -> &mut ConstraintState {
+        match self {
+            Self::Timeout { state, .. }
+            | Self::InFlightDrop { state, .. }
+            | Self::Latency { state, .. }
+            | Self::ErrorRate { state, .. }
+            | Self::External { state, .. } => state,
+        }
+    }
+
+    /// Advance recovery tracking for this constraint.
+    /// Call each tick with the constraint's current severity.
+    fn advance_recovery(&mut self, severity: f64) {
+        let state = self.state_mut();
+        if let Some(ref mut ticks) = state.ticks_since_backoff {
+            *ticks += 1;
+            // Recovery declared when enough ticks have passed AND severity
+            // is below the recovery threshold.
+            if *ticks >= RECOVERY_MIN_TICKS && severity < RECOVERY_SEVERITY_THRESHOLD {
+                let recovery_ticks = *ticks as f64;
+                state.recovery_samples += 1;
+                state.recovery_ema_ticks = RECOVERY_EMA_ALPHA * recovery_ticks
+                    + (1.0 - RECOVERY_EMA_ALPHA) * state.recovery_ema_ticks;
+                state.ticks_since_backoff = None;
+            }
+        }
+    }
+
+    /// Start or restart recovery tracking. If already tracking (re-backoff
+    /// before recovery completed), discard the in-progress measurement.
+    fn start_recovery_tracking(&mut self) {
+        self.state_mut().ticks_since_backoff = Some(0);
     }
 
     fn evaluate(&mut self, ctx: &EvalContext) -> Option<ConstraintEvaluation> {
@@ -624,10 +700,8 @@ pub struct RampRateController {
     ceiling: ProgressiveCeiling,
     last_time_ceiling: f64,
 
-    // -- Post-backoff cooldown (global; Phase 4 moves to per-constraint) --
+    // -- Post-backoff cooldown --
     cooldown_remaining: u32,
-    ticks_since_backoff: Option<u32>,
-    recovery_time_ema_ticks: f64,
 
     // -- Congestion avoidance --
     last_failure_rate: f64,
@@ -656,19 +730,19 @@ impl RampRateController {
 
         let mut constraints = vec![
             Constraint::Timeout {
-                state: ConstraintState::new(1), // persistence=1
+                state: ConstraintState::new(1, 20.0), // persistence=1, seed=20 ticks
             },
             Constraint::InFlightDrop {
-                state: ConstraintState::new(1), // persistence=1
+                state: ConstraintState::new(1, 20.0), // persistence=1, seed=20 ticks
             },
             Constraint::Latency {
                 p99_window: VecDeque::with_capacity(smoothing + 1),
                 smoothing_window: smoothing,
                 last_smoothed_p99: 0.0,
-                state: ConstraintState::new(2), // persistence=2
+                state: ConstraintState::new(2, 5.0), // persistence=2, seed=5 ticks
             },
             Constraint::ErrorRate {
-                state: ConstraintState::new(1), // persistence=1
+                state: ConstraintState::new(1, 5.0), // persistence=1, seed=5 ticks
             },
         ];
 
@@ -676,7 +750,7 @@ impl RampRateController {
         for ext in &config.external_constraints {
             constraints.push(Constraint::External {
                 config: ext.clone(),
-                state: ConstraintState::new(ext.persistence),
+                state: ConstraintState::new(ext.persistence, 10.0), // seed=10 ticks
             });
         }
 
@@ -695,8 +769,6 @@ impl RampRateController {
             ceiling,
             last_time_ceiling: 0.0,
             cooldown_remaining: 0,
-            ticks_since_backoff: None,
-            recovery_time_ema_ticks: 0.0,
             last_failure_rate: 0.0,
             backoff_count: 0,
             state: RampState::Warmup,
@@ -833,32 +905,23 @@ impl RampRateController {
             }
         }
 
-        // 4. Advance recovery tracking.
-        if let Some(ref mut ticks) = self.ticks_since_backoff {
-            *ticks += 1;
-        }
-        // Recovery detection: when latency returns to acceptable levels.
+        // 4. Advance per-constraint recovery tracking.
+        // Each constraint with active recovery tracking gets its timer
+        // incremented and checked for recovery (severity < threshold after
+        // minimum ticks).
         let latency_severity = evaluations
             .iter()
             .find(|e| e.id == ConstraintId::Latency)
             .map(|e| e.severity)
             .unwrap_or(0.0);
-        if let Some(ticks) = self.ticks_since_backoff {
-            if latency_severity < 1.0 {
-                let recovery_ticks = ticks as f64;
-                if self.recovery_time_ema_ticks == 0.0 {
-                    self.recovery_time_ema_ticks = recovery_ticks;
-                } else {
-                    self.recovery_time_ema_ticks = RECOVERY_EMA_ALPHA * recovery_ticks
-                        + (1.0 - RECOVERY_EMA_ALPHA) * self.recovery_time_ema_ticks;
-                }
-                tracing::info!(
-                    recovery_ticks = ticks,
-                    ema_ticks = format!("{:.1}", self.recovery_time_ema_ticks),
-                    "ramp: plant recovery detected"
-                );
-                self.ticks_since_backoff = None;
-            }
+        for constraint in &mut self.constraints {
+            let cid = constraint.id();
+            let severity = evaluations
+                .iter()
+                .find(|e| e.id == cid)
+                .map(|e| e.severity)
+                .unwrap_or(0.0);
+            constraint.advance_recovery(severity);
         }
 
         // 5. Decrement cooldown.
@@ -944,7 +1007,8 @@ impl RampRateController {
         // 10. Clamp to bounds.
         new_rps = new_rps.clamp(self.config.min_rps, self.config.max_rps);
 
-        // 11. Backoff tracking: record failure rate, start recovery, engage cooldown.
+        // 11. Backoff tracking: record failure rate, start per-constraint recovery,
+        //     engage unified cooldown.
         let is_backoff = new_rps < self.current_rps * 0.98;
         if is_backoff {
             // Update failure rate EMA.
@@ -956,15 +1020,28 @@ impl RampRateController {
             }
             self.backoff_count += 1;
 
-            // Start recovery timer (if not already tracking one).
-            if self.ticks_since_backoff.is_none() {
-                self.ticks_since_backoff = Some(0);
+            // Start/restart recovery tracking for constraints that triggered backoff.
+            // Collect triggered constraint ids first (can't borrow constraints while iterating evaluations).
+            let triggered_ids: Vec<ConstraintId> = evaluations
+                .iter()
+                .filter(|e| e.action.is_backoff())
+                .map(|e| e.id.clone())
+                .collect();
+
+            let mut max_cooldown_estimate = 0.0_f64;
+            for constraint in &mut self.constraints {
+                let cid = constraint.id();
+                if triggered_ids.contains(&cid) {
+                    constraint.start_recovery_tracking();
+                    max_cooldown_estimate =
+                        max_cooldown_estimate.max(constraint.state().cooldown_estimate());
+                }
             }
 
-            // Engage cooldown: max(minimum, 1.5× observed recovery time).
-            let cooldown_ticks = if self.recovery_time_ema_ticks > 0.0 {
+            // Cooldown = max(COOLDOWN_MIN, 1.5 × max(cooldown_estimate across triggered)).
+            let cooldown_ticks = if max_cooldown_estimate > 0.0 {
                 let estimated =
-                    (self.recovery_time_ema_ticks * COOLDOWN_RECOVERY_MULTIPLIER).ceil() as u32;
+                    (max_cooldown_estimate * COOLDOWN_RECOVERY_MULTIPLIER).ceil() as u32;
                 estimated.max(COOLDOWN_MIN_TICKS)
             } else {
                 COOLDOWN_MIN_TICKS
@@ -975,7 +1052,7 @@ impl RampRateController {
                 failure_rate = format!("{:.0}", self.last_failure_rate),
                 cooldown_ticks,
                 backoff_count = self.backoff_count,
-                recovery_ema_ticks = format!("{:.1}", self.recovery_time_ema_ticks),
+                max_cooldown_estimate = format!("{:.1}", max_cooldown_estimate),
                 "ramp: backoff cooldown engaged"
             );
         }
@@ -1122,7 +1199,11 @@ impl RateController for RampRateController {
             ),
             (
                 "netanvil_ramp_recovery_ema_ticks",
-                self.recovery_time_ema_ticks,
+                self.constraints
+                    .iter()
+                    .find(|c| matches!(c, Constraint::Latency { .. }))
+                    .map(|c| c.state().recovery_ema_ticks)
+                    .unwrap_or(0.0),
             ),
         ]
     }
@@ -1171,7 +1252,11 @@ impl RateController for RampRateController {
                 "max_recent_rate": self.max_recent_rate,
                 "last_failure_rate": self.last_failure_rate,
                 "backoff_count": self.backoff_count,
-                "recovery_ema_ticks": self.recovery_time_ema_ticks,
+                "recovery_ema_ticks": self.constraints
+                    .iter()
+                    .find(|c| matches!(c, Constraint::Latency { .. }))
+                    .map(|c| c.state().recovery_ema_ticks)
+                    .unwrap_or(0.0),
                 "in_cooldown": self.cooldown_remaining > 0,
             }),
         }

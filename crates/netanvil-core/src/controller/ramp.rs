@@ -909,11 +909,6 @@ impl RampRateController {
         // Each constraint with active recovery tracking gets its timer
         // incremented and checked for recovery (severity < threshold after
         // minimum ticks).
-        let latency_severity = evaluations
-            .iter()
-            .find(|e| e.id == ConstraintId::Latency)
-            .map(|e| e.severity)
-            .unwrap_or(0.0);
         for constraint in &mut self.constraints {
             let cid = constraint.id();
             let severity = evaluations
@@ -930,14 +925,38 @@ impl RampRateController {
             self.cooldown_remaining -= 1;
         }
 
-        // 6. Compute increase rate (cooldown gates, congestion avoidance).
+        // 6. Permission gate: determine whether increase is allowed and why not.
+        let mut blocked_by: Vec<String> = Vec::new();
+
+        if in_cooldown {
+            blocked_by.push(format!("cooldown({})", self.cooldown_remaining + 1));
+        }
+
+        for eval in &evaluations {
+            if eval.action >= ConstraintAction::Hold && eval.action != ConstraintAction::AllowIncrease {
+                let streak = self
+                    .constraints
+                    .iter()
+                    .find(|c| c.id() == eval.id)
+                    .map(|c| c.state().violation_streak)
+                    .unwrap_or(0);
+                blocked_by.push(format!(
+                    "{}(sev={:.1},s={})",
+                    eval.id.label(),
+                    eval.severity,
+                    streak,
+                ));
+            }
+        }
+
+        let in_congestion_avoidance = !in_cooldown
+            && self.last_failure_rate > 0.0
+            && self.current_rps > self.last_failure_rate * CONGESTION_AVOIDANCE_THRESHOLD;
+
+        // Compute increase rate.
         let increase_rate = if in_cooldown {
             self.current_rps // suppress increases during cooldown
-        } else if self.last_failure_rate > 0.0
-            && self.current_rps > self.last_failure_rate * CONGESTION_AVOIDANCE_THRESHOLD
-        {
-            // Congestion avoidance: approaching known failure rate,
-            // switch from multiplicative to additive increase.
+        } else if in_congestion_avoidance {
             let additive = self.last_failure_rate * ADDITIVE_INCREASE_FRACTION;
             self.current_rps + additive
         } else {
@@ -1064,51 +1083,49 @@ impl RampRateController {
             self.ticks_since_increase = self.ticks_since_increase.saturating_add(1);
         }
 
-        // 13. Log.
-        let latency_action = evaluations
+        // 13. Log unified tick line.
+        // Build compact constraint summary: [lat:1.4/hold(s=2), err:0.3/ok, ...]
+        let constraints_summary: String = evaluations
             .iter()
-            .find(|e| e.id == ConstraintId::Latency)
-            .map(|e| e.action.label())
-            .unwrap_or("n/a");
-        let error_action = evaluations
-            .iter()
-            .find(|e| e.id == ConstraintId::ErrorRate)
-            .map(|e| e.action.label())
-            .unwrap_or("n/a");
-        let latency_streak = self
-            .constraints
-            .iter()
-            .find(|c| matches!(c, Constraint::Latency { .. }))
-            .map(|c| c.state().violation_streak)
-            .unwrap_or(0);
-        let error_streak = self
-            .constraints
-            .iter()
-            .find(|c| matches!(c, Constraint::ErrorRate { .. }))
-            .map(|c| c.state().violation_streak)
-            .unwrap_or(0);
-        let error_pct = summary.error_rate * 100.0;
+            .map(|e| {
+                let streak = self
+                    .constraints
+                    .iter()
+                    .find(|c| c.id() == e.id)
+                    .map(|c| c.state().violation_streak)
+                    .unwrap_or(0);
+                let short_id = match &e.id {
+                    ConstraintId::Timeout => "to",
+                    ConstraintId::InFlightDrop => "ifd",
+                    ConstraintId::Latency => "lat",
+                    ConstraintId::ErrorRate => "err",
+                    ConstraintId::External(name) => name.as_str(),
+                };
+                format!("{}:{:.1}/{}(s={})", short_id, e.severity, e.action.label(), streak)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let blocked_by_str = if blocked_by.is_empty() {
+            "none".to_string()
+        } else {
+            blocked_by.join(", ")
+        };
+
         let raw_p99 = summary.latency_p99_ns as f64 / 1_000_000.0;
 
         tracing::info!(
-            previous_rps = format!("{:.1}", self.current_rps),
-            new_rps = format!("{:.1}", new_rps),
-            raw_p99_ms = format!("{:.2}", raw_p99),
-            smoothed_p99_ms = format!("{:.2}", self.last_smoothed_p99),
-            target_p99_ms = format!("{:.2}", self.target_p99_ms),
-            latency_ratio = format!("{:.2}", latency_severity),
-            latency_action,
-            latency_streak,
-            error_rate_pct = format!("{:.4}", error_pct),
-            error_action,
-            error_streak,
-            self_caused,
-            ticks_since_increase = self.ticks_since_increase,
+            rate = format!("{:.0}→{:.0}", self.current_rps, new_rps),
             binding = binding_label,
+            constraints = constraints_summary,
+            blocked_by = blocked_by_str,
+            smoothed_p99_ms = format!("{:.2}", self.last_smoothed_p99),
+            raw_p99_ms = format!("{:.2}", raw_p99),
+            target_p99_ms = format!("{:.2}", self.target_p99_ms),
+            self_caused,
             ceiling = format!("{:.0}", time_ceiling),
             floor = format!("{:.0}", floor),
             floored,
-            known_good_rps = format!("{:.0}", self.max_recent_rate),
             in_cooldown,
             failure_rate = format!("{:.0}", self.last_failure_rate),
             "ramp AIMD tick"
@@ -1214,6 +1231,22 @@ impl RateController for RampRateController {
             RampState::Ramping => "ramping",
         };
 
+        // Build per-constraint details for the info JSON.
+        let constraint_details: Vec<serde_json::Value> = self
+            .constraints
+            .iter()
+            .map(|c| {
+                let state = c.state();
+                serde_json::json!({
+                    "id": c.id().label(),
+                    "violation_streak": state.violation_streak,
+                    "persistence": state.persistence,
+                    "recovery_ema_ticks": state.recovery_ema_ticks,
+                    "recovery_samples": state.recovery_samples,
+                })
+            })
+            .collect();
+
         let latency_streak = self
             .constraints
             .iter()
@@ -1252,12 +1285,8 @@ impl RateController for RampRateController {
                 "max_recent_rate": self.max_recent_rate,
                 "last_failure_rate": self.last_failure_rate,
                 "backoff_count": self.backoff_count,
-                "recovery_ema_ticks": self.constraints
-                    .iter()
-                    .find(|c| matches!(c, Constraint::Latency { .. }))
-                    .map(|c| c.state().recovery_ema_ticks)
-                    .unwrap_or(0.0),
                 "in_cooldown": self.cooldown_remaining > 0,
+                "constraints": constraint_details,
             }),
         }
     }

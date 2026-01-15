@@ -7,7 +7,10 @@ use netanvil_core::{
     AutotuneParams, AutotuningPidController, CompositePidController, PidGainValues,
     PidRateController, RampConfig, RampRateController, StaticRateController, StepRateController,
 };
-use netanvil_types::{MetricsSummary, PidConstraint, PidGains, RateController, TargetMetric};
+use netanvil_types::{
+    ExternalConstraintConfig, MetricsSummary, MissingSignalBehavior, PidConstraint, PidGains,
+    RateController, SignalDirection, TargetMetric,
+};
 
 // ---------------------------------------------------------------------------
 // StaticRateController behavioral tests
@@ -2624,5 +2627,212 @@ fn ramp_streak_hysteresis_at_severity_boundary() {
         (rate_after_new - rate_before_new).abs() / rate_before_new < 0.02,
         "after full reset (severity < 0.7), single violation should hold: \
          {rate_before_new:.1} → {rate_after_new:.1}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// External constraint tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ramp_external_higher_is_worse_backs_off() {
+    let config = RampConfig {
+        external_constraints: vec![ExternalConstraintConfig {
+            signal_name: "cpu_pct".into(),
+            threshold: 80.0,
+            direction: SignalDirection::HigherIsWorse,
+            on_missing: MissingSignalBehavior::Ignore,
+            stale_after_ticks: 3,
+            persistence: 1,
+        }],
+        ..make_ramp_config()
+    };
+    let mut ctrl = RampRateController::new(config);
+    warmup_ramp(&mut ctrl, 10.0);
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let rate_before = ctrl.current_rate();
+
+    // cpu_pct = 120 → severity = 120/80 = 1.5 → moderate backoff.
+    let mut s = make_ramp_summary(100, 10.0, 0.0);
+    s.external_signals = vec![("cpu_pct".into(), 120.0)];
+    ctrl.update(&s);
+    let rate_after = ctrl.current_rate();
+
+    assert!(
+        rate_after < rate_before * 0.85,
+        "HigherIsWorse signal above threshold should backoff: {rate_before:.1} → {rate_after:.1}"
+    );
+}
+
+#[test]
+fn ramp_external_lower_is_worse_backs_off() {
+    let config = RampConfig {
+        external_constraints: vec![ExternalConstraintConfig {
+            signal_name: "free_fds".into(),
+            threshold: 1000.0,
+            direction: SignalDirection::LowerIsWorse,
+            on_missing: MissingSignalBehavior::Ignore,
+            stale_after_ticks: 3,
+            persistence: 1,
+        }],
+        ..make_ramp_config()
+    };
+    let mut ctrl = RampRateController::new(config);
+    warmup_ramp(&mut ctrl, 10.0);
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let rate_before = ctrl.current_rate();
+
+    // free_fds = 500 → severity = 1000/500 = 2.0 → hard backoff.
+    let mut s = make_ramp_summary(100, 10.0, 0.0);
+    s.external_signals = vec![("free_fds".into(), 500.0)];
+    ctrl.update(&s);
+    let rate_after = ctrl.current_rate();
+
+    assert!(
+        rate_after < rate_before * 0.85,
+        "LowerIsWorse signal below threshold should backoff: {rate_before:.1} → {rate_after:.1}"
+    );
+}
+
+#[test]
+fn ramp_external_below_threshold_allows_increase() {
+    let config = RampConfig {
+        external_constraints: vec![ExternalConstraintConfig {
+            signal_name: "cpu_pct".into(),
+            threshold: 80.0,
+            direction: SignalDirection::HigherIsWorse,
+            on_missing: MissingSignalBehavior::Ignore,
+            stale_after_ticks: 3,
+            persistence: 1,
+        }],
+        ..make_ramp_config()
+    };
+    let mut ctrl = RampRateController::new(config);
+    warmup_ramp(&mut ctrl, 10.0);
+
+    let rate_before = ctrl.current_rate();
+
+    // cpu_pct = 40 → severity = 40/80 = 0.5 → AllowIncrease.
+    let mut s = make_ramp_summary(100, 10.0, 0.0);
+    s.external_signals = vec![("cpu_pct".into(), 40.0)];
+    ctrl.update(&s);
+    let rate_after = ctrl.current_rate();
+
+    assert!(
+        rate_after > rate_before,
+        "signal well below threshold should allow increase: {rate_before:.1} → {rate_after:.1}"
+    );
+}
+
+#[test]
+fn ramp_external_missing_hold_suppresses_increase() {
+    let config = RampConfig {
+        external_constraints: vec![ExternalConstraintConfig {
+            signal_name: "health_score".into(),
+            threshold: 50.0,
+            direction: SignalDirection::HigherIsWorse,
+            on_missing: MissingSignalBehavior::Hold,
+            stale_after_ticks: 1,
+            persistence: 1,
+        }],
+        ..make_ramp_config()
+    };
+    let mut ctrl = RampRateController::new(config);
+    warmup_ramp(&mut ctrl, 10.0);
+
+    // Provide signal on all ramp-up ticks to prevent premature staleness.
+    for _ in 0..3 {
+        let mut s = make_ramp_summary(100, 10.0, 0.0);
+        s.external_signals = vec![("health_score".into(), 10.0)];
+        ctrl.update(&s);
+    }
+
+    // Let staleness confirm: need ticks_since_seen > stale_after_ticks (1),
+    // then missing_streak >= persistence (1). Takes 2 missing ticks.
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0)); // tick 1: not yet stale
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0)); // tick 2: stale, confirmed
+
+    // Now Hold is active. Verify rate doesn't increase further.
+    let rate_before = ctrl.current_rate();
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0)); // tick 3: hold
+    let rate_after = ctrl.current_rate();
+
+    assert!(
+        rate_after <= rate_before * 1.01,
+        "missing signal with Hold should suppress increase: {rate_before:.1} → {rate_after:.1}"
+    );
+}
+
+#[test]
+fn ramp_external_missing_backoff_triggers_hard_backoff() {
+    let config = RampConfig {
+        external_constraints: vec![ExternalConstraintConfig {
+            signal_name: "health".into(),
+            threshold: 50.0,
+            direction: SignalDirection::HigherIsWorse,
+            on_missing: MissingSignalBehavior::Backoff,
+            stale_after_ticks: 1,
+            persistence: 1,
+        }],
+        ..make_ramp_config()
+    };
+    let mut ctrl = RampRateController::new(config);
+    warmup_ramp(&mut ctrl, 10.0);
+
+    // Provide signal on all ramp-up ticks to prevent premature staleness.
+    for _ in 0..5 {
+        let mut s = make_ramp_summary(100, 10.0, 0.0);
+        s.external_signals = vec![("health".into(), 10.0)];
+        ctrl.update(&s);
+    }
+
+    // Let staleness build: tick 1 not yet stale, tick 2 confirms.
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0)); // missing 1
+    let rate_before = ctrl.current_rate();
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0)); // missing 2, confirmed → hard backoff
+    let rate_after = ctrl.current_rate();
+
+    assert!(
+        rate_after < rate_before * 0.85,
+        "missing signal with Backoff should cause drop: {rate_before:.1} → {rate_after:.1}"
+    );
+}
+
+#[test]
+fn ramp_external_missing_ignore_has_no_effect() {
+    let config = RampConfig {
+        external_constraints: vec![ExternalConstraintConfig {
+            signal_name: "optional_metric".into(),
+            threshold: 100.0,
+            direction: SignalDirection::HigherIsWorse,
+            on_missing: MissingSignalBehavior::Ignore,
+            stale_after_ticks: 1,
+            persistence: 1,
+        }],
+        ..make_ramp_config()
+    };
+    let mut ctrl = RampRateController::new(config);
+    warmup_ramp(&mut ctrl, 10.0);
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let rate_before = ctrl.current_rate();
+
+    // Signal never present, on_missing=Ignore → no effect.
+    for _ in 0..5 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let rate_after = ctrl.current_rate();
+
+    assert!(
+        rate_after > rate_before,
+        "Ignore on missing should allow normal increase: {rate_before:.1} → {rate_after:.1}"
     );
 }

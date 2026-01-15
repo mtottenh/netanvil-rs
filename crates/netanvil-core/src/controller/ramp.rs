@@ -22,7 +22,8 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use netanvil_types::{
-    ControllerInfo, ControllerType, MetricsSummary, RateController, RateDecision,
+    ControllerInfo, ControllerType, ExternalConstraintConfig, MetricsSummary, MissingSignalBehavior,
+    RateController, RateDecision, SignalDirection,
 };
 
 use super::ceiling::ProgressiveCeiling;
@@ -124,21 +125,23 @@ enum ConstraintClass {
 }
 
 /// Identifies a constraint type.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum ConstraintId {
     Timeout,
     InFlightDrop,
     Latency,
     ErrorRate,
+    External(String),
 }
 
 impl ConstraintId {
-    fn label(self) -> &'static str {
+    fn label(&self) -> &str {
         match self {
             Self::Timeout => "timeout",
             Self::InFlightDrop => "inflight_drop",
             Self::Latency => "latency",
             Self::ErrorRate => "error_rate",
+            Self::External(name) => name.as_str(),
         }
     }
 }
@@ -157,6 +160,10 @@ struct ConstraintState {
     violation_streak: u32,
     /// Ticks of violation required before backoff is confirmed.
     persistence: u32,
+    /// Ticks since this signal was last seen (external constraints only).
+    ticks_since_seen: u32,
+    /// Consecutive ticks where the signal is stale/missing (external only).
+    missing_streak: u32,
 }
 
 impl ConstraintState {
@@ -164,6 +171,8 @@ impl ConstraintState {
         Self {
             violation_streak: 0,
             persistence,
+            ticks_since_seen: 0,
+            missing_streak: 0,
         }
     }
 }
@@ -234,9 +243,6 @@ struct EvalContext<'a> {
 }
 
 /// A constraint that evaluates metrics and produces an action.
-///
-/// Built-in variants: Timeout, InFlightDrop, Latency, ErrorRate.
-/// External variants are added in Phase 3.
 enum Constraint {
     /// Timeout-based backoff. Catastrophic, persistence=1, direct action.
     Timeout { state: ConstraintState },
@@ -251,6 +257,11 @@ enum Constraint {
     },
     /// Error-rate backoff. OperatingPoint, persistence=1, direct action.
     ErrorRate { state: ConstraintState },
+    /// External signal constraint. OperatingPoint, configurable persistence, graduated_action.
+    External {
+        config: ExternalConstraintConfig,
+        state: ConstraintState,
+    },
 }
 
 impl Constraint {
@@ -259,7 +270,8 @@ impl Constraint {
             Self::Timeout { state, .. }
             | Self::InFlightDrop { state, .. }
             | Self::Latency { state, .. }
-            | Self::ErrorRate { state, .. } => state,
+            | Self::ErrorRate { state, .. }
+            | Self::External { state, .. } => state,
         }
     }
 
@@ -274,6 +286,7 @@ impl Constraint {
                 state,
             } => Self::eval_latency(p99_window, *smoothing_window, last_smoothed_p99, state, ctx),
             Self::ErrorRate { state } => Self::eval_error_rate(state, ctx),
+            Self::External { config, state } => Self::eval_external(config, state, ctx),
         }
     }
 
@@ -464,6 +477,92 @@ impl Constraint {
             action,
         })
     }
+
+    // -- External: OperatingPoint, configurable persistence, graduated_action --
+    //
+    // Direction-aware severity:
+    //   HigherIsWorse: severity = value / threshold
+    //   LowerIsWorse:  severity = threshold / value.max(ε)
+    //
+    // Staleness: if signal not seen for stale_after_ticks, missing_streak
+    // increments. When missing_streak >= persistence, on_missing applies:
+    //   Ignore → AllowIncrease (severity 0)
+    //   Hold   → Hold (severity 0.85)
+    //   Backoff → HardBackoff (severity 3.0, bypasses persistence)
+
+    fn eval_external(
+        config: &ExternalConstraintConfig,
+        state: &mut ConstraintState,
+        ctx: &EvalContext,
+    ) -> Option<ConstraintEvaluation> {
+        // Look up the signal value in MetricsSummary::external_signals.
+        let signal_value = ctx
+            .summary
+            .external_signals
+            .iter()
+            .find(|(name, _)| *name == config.signal_name)
+            .map(|(_, v)| *v);
+
+        let (severity, raw_action) = if let Some(value) = signal_value {
+            // Signal present — reset staleness tracking.
+            state.ticks_since_seen = 0;
+            state.missing_streak = 0;
+
+            // Direction-aware severity.
+            let severity = match config.direction {
+                SignalDirection::HigherIsWorse => {
+                    if config.threshold > 0.0 {
+                        value / config.threshold
+                    } else {
+                        0.0
+                    }
+                }
+                SignalDirection::LowerIsWorse => {
+                    if value > f64::EPSILON {
+                        config.threshold / value
+                    } else {
+                        // Value at/near zero with LowerIsWorse → worst case.
+                        SEVERITY_BYPASS_PERSISTENCE + 1.0
+                    }
+                }
+            };
+
+            (severity, graduated_action(severity))
+        } else {
+            // Signal missing — advance staleness.
+            state.ticks_since_seen += 1;
+            if state.ticks_since_seen > config.stale_after_ticks {
+                state.missing_streak += 1;
+            }
+
+            // Apply on_missing only when missing_streak >= persistence.
+            let missing_confirmed = state.missing_streak >= state.persistence;
+
+            if !missing_confirmed {
+                // Not yet confirmed missing — no constraint.
+                return None;
+            }
+
+            match config.on_missing {
+                MissingSignalBehavior::Ignore => return None,
+                MissingSignalBehavior::Hold => (0.85, ConstraintAction::Hold),
+                MissingSignalBehavior::Backoff => {
+                    (SEVERITY_BYPASS_PERSISTENCE + 1.0, ConstraintAction::HardBackoff)
+                }
+            }
+        };
+
+        update_streak(&mut state.violation_streak, severity);
+        let action =
+            apply_persistence(raw_action, state.violation_streak, state.persistence, severity);
+
+        Some(ConstraintEvaluation {
+            id: ConstraintId::External(config.signal_name.clone()),
+            class: ConstraintClass::OperatingPoint,
+            severity,
+            action,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -555,7 +654,7 @@ impl RampRateController {
             config.test_duration / 2,
         );
 
-        let constraints = vec![
+        let mut constraints = vec![
             Constraint::Timeout {
                 state: ConstraintState::new(1), // persistence=1
             },
@@ -572,6 +671,14 @@ impl RampRateController {
                 state: ConstraintState::new(1), // persistence=1
             },
         ];
+
+        // Add external signal constraints from config.
+        for ext in &config.external_constraints {
+            constraints.push(Constraint::External {
+                config: ext.clone(),
+                state: ConstraintState::new(ext.persistence),
+            });
+        }
 
         Self {
             warmup_start: Instant::now(),

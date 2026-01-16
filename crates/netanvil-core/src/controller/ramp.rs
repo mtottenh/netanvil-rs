@@ -1357,3 +1357,120 @@ impl RateController for RampRateController {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn graduated_action_boundaries() {
+        // AllowIncrease: severity < 0.7
+        assert_eq!(graduated_action(0.0), ConstraintAction::AllowIncrease);
+        assert_eq!(graduated_action(0.5), ConstraintAction::AllowIncrease);
+        assert_eq!(graduated_action(0.69), ConstraintAction::AllowIncrease);
+
+        // Hold: [0.7, 1.0)
+        assert_eq!(graduated_action(0.7), ConstraintAction::Hold);
+        assert_eq!(graduated_action(0.85), ConstraintAction::Hold);
+        assert_eq!(graduated_action(0.99), ConstraintAction::Hold);
+
+        // GentleBackoff: [1.0, 1.5)
+        assert_eq!(graduated_action(1.0), ConstraintAction::GentleBackoff);
+        assert_eq!(graduated_action(1.33), ConstraintAction::GentleBackoff);
+        assert_eq!(graduated_action(1.49), ConstraintAction::GentleBackoff);
+
+        // ModerateBackoff: [1.5, 2.0)
+        assert_eq!(graduated_action(1.5), ConstraintAction::ModerateBackoff);
+        assert_eq!(graduated_action(1.75), ConstraintAction::ModerateBackoff);
+        assert_eq!(graduated_action(1.99), ConstraintAction::ModerateBackoff);
+
+        // HardBackoff: >= 2.0
+        assert_eq!(graduated_action(2.0), ConstraintAction::HardBackoff);
+        assert_eq!(graduated_action(5.0), ConstraintAction::HardBackoff);
+        assert_eq!(graduated_action(100.0), ConstraintAction::HardBackoff);
+    }
+
+    #[test]
+    fn streak_hysteresis_rules() {
+        let mut streak = 0u32;
+
+        // Violation zone: severity >= 1.0 → increment
+        update_streak(&mut streak, 1.0);
+        assert_eq!(streak, 1);
+        update_streak(&mut streak, 1.5);
+        assert_eq!(streak, 2);
+
+        // Hold band: [0.7, 1.0) → maintain
+        update_streak(&mut streak, 0.85);
+        assert_eq!(streak, 2, "hold band should not change streak");
+
+        // Clean zone: < 0.7 → reset
+        update_streak(&mut streak, 0.5);
+        assert_eq!(streak, 0, "clean zone should reset streak");
+    }
+
+    #[test]
+    fn persistence_gating() {
+        // AllowIncrease passes through
+        assert_eq!(
+            apply_persistence(ConstraintAction::AllowIncrease, 0, 2, 0.5),
+            ConstraintAction::AllowIncrease
+        );
+
+        // Hold passes through
+        assert_eq!(
+            apply_persistence(ConstraintAction::Hold, 0, 2, 0.85),
+            ConstraintAction::Hold
+        );
+
+        // Backoff with streak < persistence → Hold
+        assert_eq!(
+            apply_persistence(ConstraintAction::GentleBackoff, 1, 2, 1.2),
+            ConstraintAction::Hold
+        );
+
+        // Backoff with streak >= persistence → passes
+        assert_eq!(
+            apply_persistence(ConstraintAction::GentleBackoff, 2, 2, 1.2),
+            ConstraintAction::GentleBackoff
+        );
+
+        // Backoff with severity > 3.0 bypasses persistence
+        assert_eq!(
+            apply_persistence(ConstraintAction::HardBackoff, 0, 5, 3.5),
+            ConstraintAction::HardBackoff
+        );
+    }
+
+    #[test]
+    fn constraint_action_ordering() {
+        // Verify Ord gives ascending severity
+        assert!(ConstraintAction::AllowIncrease < ConstraintAction::Hold);
+        assert!(ConstraintAction::Hold < ConstraintAction::GentleBackoff);
+        assert!(ConstraintAction::GentleBackoff < ConstraintAction::ModerateBackoff);
+        assert!(ConstraintAction::ModerateBackoff < ConstraintAction::HardBackoff);
+
+        // min caps at the less severe action
+        assert_eq!(
+            ConstraintAction::GentleBackoff.min(ConstraintAction::Hold),
+            ConstraintAction::Hold
+        );
+    }
+
+    #[test]
+    fn constraint_state_cooldown_estimate() {
+        // Fresh state: uses seed
+        let state = ConstraintState::new(1, 20.0);
+        assert_eq!(state.cooldown_estimate(), 20.0);
+
+        // After some recovery samples (< MIN_SAMPLES): max(ema, seed)
+        let mut state = ConstraintState::new(1, 20.0);
+        state.recovery_ema_ticks = 10.0;
+        state.recovery_samples = 2; // < RECOVERY_MIN_SAMPLES (3)
+        assert_eq!(state.cooldown_estimate(), 20.0); // max(10, 20)
+
+        // After enough samples: use EMA directly
+        state.recovery_samples = 3;
+        assert_eq!(state.cooldown_estimate(), 10.0); // trust EMA
+    }
+}

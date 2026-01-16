@@ -2836,3 +2836,147 @@ fn ramp_external_missing_ignore_has_no_effect() {
         "Ignore on missing should allow normal increase: {rate_before:.1} → {rate_after:.1}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Recovery and cooldown tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ramp_cooldown_uses_initial_seed_before_ema_trust() {
+    // Recovery EMA is not trusted until RECOVERY_MIN_SAMPLES (3) observations.
+    // Until then, cooldown uses max(ema, initial_seed). For latency, seed = 5 ticks.
+    // Cooldown = ceil(5.0 × 1.5) = 8 ticks.
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0); // target = 30ms
+
+    for _ in 0..3 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+
+    // Trigger latency hard backoff (severity > 3.0, bypasses persistence).
+    ctrl.update(&make_ramp_summary(100, 100.0, 0.0)); // ratio 3.33
+
+    // After backoff, we're in cooldown. Rate should be held for several ticks.
+    let rate_after_backoff = ctrl.current_rate();
+    let mut held_ticks = 0;
+    for _ in 0..20 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0)); // clean
+        if ctrl.current_rate() <= rate_after_backoff * 1.01 {
+            held_ticks += 1;
+        } else {
+            break;
+        }
+    }
+
+    // With seed=5, cooldown = ceil(5 × 1.5) = 8. But recovery must also happen
+    // first (RECOVERY_MIN_TICKS=3). The actual held period depends on both.
+    // We expect at least COOLDOWN_MIN (2) ticks of hold.
+    assert!(
+        held_ticks >= 2,
+        "should hold for at least COOLDOWN_MIN ticks: held={held_ticks}"
+    );
+}
+
+#[test]
+fn ramp_catastrophic_floor_bypass_vs_operating_point() {
+    // Catastrophic constraints (timeout) bypass the known-good floor.
+    // OperatingPoint constraints (latency) respect it.
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0);
+
+    // Ramp up to establish high known-good rate.
+    for _ in 0..8 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let peak = ctrl.current_rate();
+    let floor = peak * 0.80;
+
+    // Catastrophic (timeout hard): should go below floor.
+    let mut s = make_ramp_summary(100, 10.0, 0.0);
+    s.timeout_count = 50; // 50% timeouts → hard backoff
+    ctrl.update(&s);
+    let rate_after_timeout = ctrl.current_rate();
+
+    assert!(
+        rate_after_timeout < floor,
+        "Catastrophic should bypass floor: rate={rate_after_timeout:.1}, floor={floor:.1}"
+    );
+
+    // Reset controller for OperatingPoint test.
+    let mut ctrl2 = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl2, 10.0);
+    for _ in 0..8 {
+        ctrl2.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+    let peak2 = ctrl2.current_rate();
+    let floor2 = peak2 * 0.80;
+
+    // OperatingPoint (latency hard): should be caught by floor.
+    // Severity > 3.0 → bypasses persistence → immediate HardBackoff.
+    ctrl2.update(&make_ramp_summary(100, 100.0, 0.0)); // ratio 3.33
+    let rate_after_latency = ctrl2.current_rate();
+
+    assert!(
+        rate_after_latency >= floor2 * 0.99,
+        "OperatingPoint should respect floor: rate={rate_after_latency:.1}, floor={floor2:.1}"
+    );
+}
+
+#[test]
+fn ramp_dual_constraint_cooldown_takes_maximum() {
+    // When multiple constraints trigger simultaneously, cooldown should
+    // use the maximum cooldown_estimate across triggered constraints.
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0);
+
+    for _ in 0..5 {
+        ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    }
+
+    // Trigger both latency (seed=5) and error (seed=5) simultaneously.
+    // Both are OperatingPoint. Cooldown = max(ceil(5×1.5), ceil(5×1.5)) = 8.
+    ctrl.update(&make_ramp_summary(100, 100.0, 0.10)); // ratio 3.33 + 10% error
+
+    let rate_after = ctrl.current_rate();
+
+    // Verify cooldown is engaged (rate doesn't increase on next clean tick).
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+    let rate_after_clean = ctrl.current_rate();
+
+    assert!(
+        (rate_after_clean - rate_after).abs() / rate_after < 0.02,
+        "cooldown should suppress increase after dual-trigger: {rate_after:.1} → {rate_after_clean:.1}"
+    );
+}
+
+#[test]
+fn ramp_controller_info_includes_constraint_details() {
+    let mut ctrl = RampRateController::new(make_ramp_config());
+    warmup_ramp(&mut ctrl, 10.0);
+    ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
+
+    let info = ctrl.controller_info();
+    let constraints = info.params["constraints"].as_array();
+    assert!(
+        constraints.is_some(),
+        "controller_info should include constraints array"
+    );
+    let constraints = constraints.unwrap();
+    assert!(
+        constraints.len() >= 4,
+        "should have at least 4 built-in constraints, got {}",
+        constraints.len()
+    );
+
+    // Verify structure of first constraint.
+    let first = &constraints[0];
+    assert!(first.get("id").is_some(), "constraint should have id");
+    assert!(
+        first.get("violation_streak").is_some(),
+        "constraint should have violation_streak"
+    );
+    assert!(
+        first.get("recovery_ema_ticks").is_some(),
+        "constraint should have recovery_ema_ticks"
+    );
+}

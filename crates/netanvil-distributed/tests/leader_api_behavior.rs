@@ -55,8 +55,12 @@ fn start_server() -> (String, Arc<LeaderApiState>) {
 
 fn http_request(addr: &str, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
     let mut stream = TcpStream::connect(addr).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
 
     let body_bytes = body.unwrap_or("");
     let request = format!(

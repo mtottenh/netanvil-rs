@@ -13,8 +13,7 @@ use netanvil_core::{HeaderTransformer, NoopTransformer, SimpleGenerator};
 use netanvil_metrics::HdrMetricsCollector;
 use netanvil_types::{
     EventRecorder, ExecutionResult, HttpRequestSpec, NoopEventRecorder, RequestContext,
-    RequestExecutor, ScheduledRequest,
-    TimingBreakdown,
+    RequestExecutor, ScheduledRequest, TimingBreakdown,
 };
 
 // ---------------------------------------------------------------------------

@@ -50,7 +50,10 @@ pub fn build_prometheus_body(state: &SharedState) -> String {
 
     out.push_str("# HELP netanvil_errors_total Total errors.\n");
     out.push_str("# TYPE netanvil_errors_total counter\n");
-    out.push_str(&format!("netanvil_errors_total{label} {}\n", m.total_errors));
+    out.push_str(&format!(
+        "netanvil_errors_total{label} {}\n",
+        m.total_errors
+    ));
 
     // Throughput counters
     out.push_str("# HELP netanvil_bytes_sent_total Total bytes sent to targets.\n");
@@ -60,9 +63,7 @@ pub fn build_prometheus_body(state: &SharedState) -> String {
         m.bytes_sent
     ));
 
-    out.push_str(
-        "# HELP netanvil_bytes_received_total Total bytes received from targets.\n",
-    );
+    out.push_str("# HELP netanvil_bytes_received_total Total bytes received from targets.\n");
     out.push_str("# TYPE netanvil_bytes_received_total counter\n");
     out.push_str(&format!(
         "netanvil_bytes_received_total{label} {}\n",
@@ -144,7 +145,9 @@ pub fn build_prometheus_body(state: &SharedState) -> String {
         s.scheduling_delay_max_ms / 1000.0
     ));
 
-    out.push_str("# HELP netanvil_rate_achievement Ratio of achieved to target RPS (1.0 = on target).\n");
+    out.push_str(
+        "# HELP netanvil_rate_achievement Ratio of achieved to target RPS (1.0 = on target).\n",
+    );
     out.push_str("# TYPE netanvil_rate_achievement gauge\n");
     out.push_str(&format!(
         "netanvil_rate_achievement{label} {:.4}\n",
@@ -191,7 +194,9 @@ pub fn build_prometheus_body(state: &SharedState) -> String {
             s.tcp_rtt_max_ms / 1000.0
         ));
 
-        out.push_str("# HELP netanvil_tcp_retransmit_ratio TCP retransmit ratio from sampled TCP_INFO.\n");
+        out.push_str(
+            "# HELP netanvil_tcp_retransmit_ratio TCP retransmit ratio from sampled TCP_INFO.\n",
+        );
         out.push_str("# TYPE netanvil_tcp_retransmit_ratio gauge\n");
         out.push_str(&format!(
             "netanvil_tcp_retransmit_ratio{label} {:.6}\n",
@@ -208,18 +213,14 @@ pub fn build_prometheus_body(state: &SharedState) -> String {
             m.packets_sent
         ));
 
-        out.push_str(
-            "# HELP netanvil_packets_received_total Protocol responses received.\n",
-        );
+        out.push_str("# HELP netanvil_packets_received_total Protocol responses received.\n");
         out.push_str("# TYPE netanvil_packets_received_total counter\n");
         out.push_str(&format!(
             "netanvil_packets_received_total{label} {}\n",
             m.packets_received
         ));
 
-        out.push_str(
-            "# HELP netanvil_packets_lost_total Protocol messages declared lost.\n",
-        );
+        out.push_str("# HELP netanvil_packets_lost_total Protocol messages declared lost.\n");
         out.push_str("# TYPE netanvil_packets_lost_total counter\n");
         out.push_str(&format!(
             "netanvil_packets_lost_total{label} {}\n",

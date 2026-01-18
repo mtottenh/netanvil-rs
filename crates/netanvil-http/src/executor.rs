@@ -9,10 +9,8 @@ use netanvil_types::{
 use crate::connector::{Identity, ThrottledConnector, WrapTcp};
 use crate::tls::build_tls_connector;
 
-type HyperClient<W> = hyper_util::client::legacy::Client<
-    ThrottledConnector<W>,
-    http_body_util::Full<bytes::Bytes>,
->;
+type HyperClient<W> =
+    hyper_util::client::legacy::Client<ThrottledConnector<W>, http_body_util::Full<bytes::Bytes>>;
 
 /// The underlying HTTP client — either the standard cyper client or our
 /// custom throttled hyper client. Using an enum avoids `Option` juggling

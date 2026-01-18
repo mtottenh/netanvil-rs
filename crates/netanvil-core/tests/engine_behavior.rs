@@ -177,7 +177,7 @@ fn engine_scales_across_cores() {
             duration: Duration::from_secs(2),
             rate: RateConfig::Static { rps: 200.0 },
             num_cores,
-                control_interval: Duration::from_secs(1),
+            control_interval: Duration::from_secs(1),
             connections: ConnectionConfig::default(),
             ..Default::default()
         };

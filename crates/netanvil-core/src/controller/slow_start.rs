@@ -107,9 +107,7 @@ mod tests {
         fn update(&mut self, _summary: &MetricsSummary) -> RateDecision {
             let target = self.max_rps;
             self.current_rps = target;
-            RateDecision {
-                target_rps: target,
-            }
+            RateDecision { target_rps: target }
         }
 
         fn current_rate(&self) -> f64 {

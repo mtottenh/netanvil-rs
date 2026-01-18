@@ -179,8 +179,7 @@ impl TcpHealthCounters {
         }
         self.retransmits
             .set(self.retransmits.get() + info.tcpi_total_retrans as u64);
-        self.lost
-            .set(self.lost.get() + info.tcpi_lost as u64);
+        self.lost.set(self.lost.get() + info.tcpi_lost as u64);
     }
 
     /// Read and reset all counters.
@@ -311,7 +310,17 @@ pub struct SaturationInfo {
 }
 
 /// Classification of where the bottleneck is.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    utoipa::ToSchema,
+)]
 pub enum SaturationAssessment {
     /// All signals healthy — generating at target rate, no backpressure.
     #[default]

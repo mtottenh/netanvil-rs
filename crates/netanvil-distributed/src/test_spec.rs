@@ -308,14 +308,19 @@ impl TestSpec {
             RateSpecConfig::Static { rps } => format!("Static {rps:.0} RPS"),
             RateSpecConfig::Step { steps } => format!("Step ({} phases)", steps.len()),
             RateSpecConfig::Ramp {
-                warmup_rps, max_rps, ..
+                warmup_rps,
+                max_rps,
+                ..
             } => format!("Ramp {warmup_rps:.0}→{max_rps:.0} RPS"),
             RateSpecConfig::Pid { initial_rps, .. } => format!("PID from {initial_rps:.0} RPS"),
             RateSpecConfig::CompositePid {
                 initial_rps,
                 constraints,
                 ..
-            } => format!("CompositePID {initial_rps:.0} RPS, {} constraints", constraints.len()),
+            } => format!(
+                "CompositePID {initial_rps:.0} RPS, {} constraints",
+                constraints.len()
+            ),
         };
         let n_targets = self.targets.len();
         format!("{rate_desc}, {}, {n_targets} target(s)", self.duration)
@@ -344,9 +349,7 @@ fn convert_rate(spec: RateSpecConfig) -> Result<RateConfig, SpecError> {
             external_constraints,
         } => {
             let wd = parse_duration(&warmup_duration).map_err(|e| {
-                SpecError(format!(
-                    "invalid warmup_duration '{warmup_duration}': {e}"
-                ))
+                SpecError(format!("invalid warmup_duration '{warmup_duration}': {e}"))
             })?;
             Ok(RateConfig::Ramp {
                 warmup_rps,
@@ -394,7 +397,9 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
     }
 
     if let Some(ms) = s.strip_suffix("ms") {
-        let n: u64 = ms.parse().map_err(|_| format!("invalid milliseconds: {ms}"))?;
+        let n: u64 = ms
+            .parse()
+            .map_err(|_| format!("invalid milliseconds: {ms}"))?;
         return Ok(Duration::from_millis(n));
     }
     if let Some(h) = s.strip_suffix('h') {
@@ -406,7 +411,9 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
         return Ok(Duration::from_secs_f64(n * 60.0));
     }
     if let Some(secs) = s.strip_suffix('s') {
-        let n: f64 = secs.parse().map_err(|_| format!("invalid seconds: {secs}"))?;
+        let n: f64 = secs
+            .parse()
+            .map_err(|_| format!("invalid seconds: {secs}"))?;
         return Ok(Duration::from_secs_f64(n));
     }
     // Bare number = seconds.

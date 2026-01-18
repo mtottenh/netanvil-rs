@@ -23,10 +23,7 @@
 /// should already be pinned to `housekeeping_core` so that any children
 /// it spawns afterwards inherit the restricted affinity.
 #[cfg(target_os = "linux")]
-pub fn shield_hot_cores(
-    hot_cores: &[usize],
-    housekeeping_core: usize,
-) -> ShieldResult {
+pub fn shield_hot_cores(hot_cores: &[usize], housekeeping_core: usize) -> ShieldResult {
     use std::collections::HashSet;
     use std::fs;
 
@@ -66,11 +63,7 @@ pub fn shield_hot_cores(
         };
 
         for task_entry in tasks.flatten() {
-            let tid: libc::pid_t = match task_entry
-                .file_name()
-                .to_string_lossy()
-                .parse()
-            {
+            let tid: libc::pid_t = match task_entry.file_name().to_string_lossy().parse() {
                 Ok(t) => t,
                 Err(_) => continue,
             };
@@ -91,11 +84,7 @@ pub fn shield_hot_cores(
             // Read current affinity — skip if it doesn't overlap hot cores.
             let mut current: libc::cpu_set_t = unsafe { std::mem::zeroed() };
             let ret = unsafe {
-                libc::sched_getaffinity(
-                    tid,
-                    std::mem::size_of::<libc::cpu_set_t>(),
-                    &mut current,
-                )
+                libc::sched_getaffinity(tid, std::mem::size_of::<libc::cpu_set_t>(), &mut current)
             };
             if ret != 0 {
                 continue; // EPERM or thread exited
@@ -130,10 +119,7 @@ pub fn shield_hot_cores(
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn shield_hot_cores(
-    _hot_cores: &[usize],
-    _housekeeping_core: usize,
-) -> ShieldResult {
+pub fn shield_hot_cores(_hot_cores: &[usize], _housekeeping_core: usize) -> ShieldResult {
     ShieldResult::default()
 }
 
@@ -180,15 +166,20 @@ pub fn reset_affinity() -> usize {
         return 0;
     }
 
-    let ret = unsafe {
-        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpuset)
-    };
+    let ret =
+        unsafe { libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpuset) };
     if ret != 0 {
-        tracing::warn!("sched_setaffinity reset failed: {}", std::io::Error::last_os_error());
+        tracing::warn!(
+            "sched_setaffinity reset failed: {}",
+            std::io::Error::last_os_error()
+        );
         return 0;
     }
 
-    tracing::info!(online_cpus = count, "reset process CPU affinity to all online CPUs");
+    tracing::info!(
+        online_cpus = count,
+        "reset process CPU affinity to all online CPUs"
+    );
     count
 }
 

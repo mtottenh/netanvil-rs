@@ -1,7 +1,8 @@
 use std::time::{Duration, Instant};
 
-use netanvil_types::{ControllerInfo, ControllerType, MetricsSummary, RateController, RateDecision};
-
+use netanvil_types::{
+    ControllerInfo, ControllerType, MetricsSummary, RateController, RateDecision,
+};
 
 /// Rate controller that changes rates at predefined time offsets.
 ///
@@ -136,7 +137,8 @@ impl RateController for StepRateController {
     ) -> Result<serde_json::Value, String> {
         match action {
             "jump_to_step" => {
-                let index = params.get("step_index")
+                let index = params
+                    .get("step_index")
                     .and_then(|v| v.as_u64())
                     .ok_or("missing 'step_index' field")? as usize;
                 let rps = self.jump_to_step(index)?;
@@ -147,7 +149,9 @@ impl RateController for StepRateController {
                 }))
             }
             "set_step_rps" => {
-                let rps = params.get("rps").and_then(|v| v.as_f64())
+                let rps = params
+                    .get("rps")
+                    .and_then(|v| v.as_f64())
                     .ok_or("missing 'rps' field")?;
                 self.set_rate(rps);
                 Ok(serde_json::json!({
@@ -156,7 +160,9 @@ impl RateController for StepRateController {
                 }))
             }
             "set_max_rps" => {
-                let max = params.get("max_rps").and_then(|v| v.as_f64())
+                let max = params
+                    .get("max_rps")
+                    .and_then(|v| v.as_f64())
                     .ok_or("missing 'max_rps' field")?;
                 self.set_max_rps(max);
                 Ok(serde_json::json!({
@@ -165,7 +171,8 @@ impl RateController for StepRateController {
                 }))
             }
             _ => Err(format!(
-                "action '{}' is not valid for controller type 'step'", action
+                "action '{}' is not valid for controller type 'step'",
+                action
             )),
         }
     }

@@ -114,12 +114,7 @@ impl TestQueue {
         self.enqueue_inner(config, None, summary)
     }
 
-    fn enqueue_inner(
-        &self,
-        config: TestConfig,
-        spec: Option<TestSpec>,
-        summary: String,
-    ) -> TestId {
+    fn enqueue_inner(&self, config: TestConfig, spec: Option<TestSpec>, summary: String) -> TestId {
         let id = TestId::generate();
         let now = SystemTime::now();
 
@@ -344,11 +339,11 @@ impl TestQueue {
         TestConfig,
         String, // config_summary
         Arc<Mutex<Option<DistributedProgressUpdate>>>,
-        flume::Receiver<()>,      // cancel
-        flume::Receiver<f64>,     // rate override (deprecated)
-        flume::Receiver<(String, f64)>, // signal push
-        flume::Receiver<HoldCommand>,   // hold/release
-        flume::Receiver<ControllerUpdateCommand>, // controller update
+        flume::Receiver<()>,                            // cancel
+        flume::Receiver<f64>,                           // rate override (deprecated)
+        flume::Receiver<(String, f64)>,                 // signal push
+        flume::Receiver<HoldCommand>,                   // hold/release
+        flume::Receiver<ControllerUpdateCommand>,       // controller update
         flume::Receiver<flume::Sender<ControllerView>>, // controller info
     )> {
         let mut inner = self.inner.lock().unwrap();
@@ -404,12 +399,7 @@ impl TestQueue {
     }
 
     /// Mark a test as completed with results. Called by the scheduler thread.
-    fn mark_completed(
-        &self,
-        id: &TestId,
-        result: &DistributedTestResult,
-        status: TestStatus,
-    ) {
+    fn mark_completed(&self, id: &TestId, result: &DistributedTestResult, status: TestStatus) {
         let mut inner = self.inner.lock().unwrap();
         let now = SystemTime::now();
 
@@ -470,17 +460,19 @@ impl TestQueue {
                     tracing::info!(test_id = %id, "starting queued test");
                     tracing::debug!(test_id = %id, config = ?test_config, "applying test config");
 
-                    let result = self.run_test(
-                        &test_config,
-                        &config,
-                        progress,
-                        cancel_rx,
-                        rate_rx,
-                        signal_rx,
-                        hold_rx,
-                        ctrl_update_rx,
-                        ctrl_info_rx,
-                    ).await;
+                    let result = self
+                        .run_test(
+                            &test_config,
+                            &config,
+                            progress,
+                            cancel_rx,
+                            rate_rx,
+                            signal_rx,
+                            hold_rx,
+                            ctrl_update_rx,
+                            ctrl_info_rx,
+                        )
+                        .await;
 
                     match result {
                         Ok(r) => {

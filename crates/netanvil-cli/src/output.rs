@@ -63,8 +63,7 @@ pub fn print_stored_results(result: &StoredTestResult, format: OutputFormat) {
             eprintln!("────────────────────────────────");
         }
         OutputFormat::Json => {
-            let json =
-                serde_json::to_string_pretty(result).expect("serialize StoredTestResult");
+            let json = serde_json::to_string_pretty(result).expect("serialize StoredTestResult");
             println!("{json}");
         }
     }

@@ -111,15 +111,33 @@ impl ArrowEventRecorder {
         let optional = OptionalBuilders {
             intended_us: schema.include_co.then(|| UInt64Builder::with_capacity(bs)),
             scheduling_delay_us: schema.include_co.then(|| UInt64Builder::with_capacity(bs)),
-            dns_us: schema.include_timing.then(|| UInt64Builder::with_capacity(bs)),
-            tcp_us: schema.include_timing.then(|| UInt64Builder::with_capacity(bs)),
-            tls_us: schema.include_timing.then(|| UInt64Builder::with_capacity(bs)),
-            ttfb_us: schema.include_timing.then(|| UInt64Builder::with_capacity(bs)),
-            transfer_us: schema.include_timing.then(|| UInt64Builder::with_capacity(bs)),
-            total_us: schema.include_timing.then(|| UInt64Builder::with_capacity(bs)),
-            bytes_sent: schema.include_bytes.then(|| UInt64Builder::with_capacity(bs)),
-            response_size: schema.include_bytes.then(|| UInt64Builder::with_capacity(bs)),
-            is_error: schema.include_errors.then(|| BooleanBuilder::with_capacity(bs)),
+            dns_us: schema
+                .include_timing
+                .then(|| UInt64Builder::with_capacity(bs)),
+            tcp_us: schema
+                .include_timing
+                .then(|| UInt64Builder::with_capacity(bs)),
+            tls_us: schema
+                .include_timing
+                .then(|| UInt64Builder::with_capacity(bs)),
+            ttfb_us: schema
+                .include_timing
+                .then(|| UInt64Builder::with_capacity(bs)),
+            transfer_us: schema
+                .include_timing
+                .then(|| UInt64Builder::with_capacity(bs)),
+            total_us: schema
+                .include_timing
+                .then(|| UInt64Builder::with_capacity(bs)),
+            bytes_sent: schema
+                .include_bytes
+                .then(|| UInt64Builder::with_capacity(bs)),
+            response_size: schema
+                .include_bytes
+                .then(|| UInt64Builder::with_capacity(bs)),
+            is_error: schema
+                .include_errors
+                .then(|| BooleanBuilder::with_capacity(bs)),
             error_kind: schema
                 .include_errors
                 .then(|| StringBuilder::with_capacity(bs, 8 * bs)),
@@ -146,7 +164,9 @@ impl ArrowEventRecorder {
         let constant_builders = constant_values
             .iter()
             .map(|v| match v {
-                ConstantValue::Str(_) => ConstantBuilder::Str(StringBuilder::with_capacity(bs, 32 * bs)),
+                ConstantValue::Str(_) => {
+                    ConstantBuilder::Str(StringBuilder::with_capacity(bs, 32 * bs))
+                }
                 ConstantValue::U64(_) => ConstantBuilder::U64(UInt64Builder::with_capacity(bs)),
             })
             .collect();
@@ -281,7 +301,8 @@ impl EventRecorder for ArrowEventRecorder {
         {
             let mut c = self.common.borrow_mut();
             c.request_id.append_value(result.request_id);
-            c.core_id.append_value((result.request_id / 1_000_000_000) as u16);
+            c.core_id
+                .append_value((result.request_id / 1_000_000_000) as u16);
             c.timestamp_us.append_value(timestamp_us);
             c.status.append_value(result.status.unwrap_or(0));
             c.protocol.append_value(&self.protocol);

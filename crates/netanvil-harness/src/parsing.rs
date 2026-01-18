@@ -164,7 +164,10 @@ pub fn parse_count_distribution(s: &str) -> Result<CountDistribution> {
             Ok(CountDistribution::Weighted(entries))
         }
         "exponential" | "exp" => {
-            let mean: f64 = params.trim().parse().context("exponential:mean requires a number")?;
+            let mean: f64 = params
+                .trim()
+                .parse()
+                .context("exponential:mean requires a number")?;
             Ok(CountDistribution::Exponential { mean })
         }
         "lognormal" | "log-normal" => {
@@ -209,7 +212,10 @@ pub fn parse_u16_distribution(s: &str) -> Result<ValueDistribution<u16>> {
         .context("size distribution: bare integer, 'fixed:N', 'uniform:min,max', 'normal:mean,stddev', or 'weighted:val@pct,...'")?;
     match kind.to_lowercase().as_str() {
         "fixed" => {
-            let n: u16 = params.trim().parse().context("fixed:N requires an integer")?;
+            let n: u16 = params
+                .trim()
+                .parse()
+                .context("fixed:N requires an integer")?;
             Ok(ValueDistribution::Fixed(n))
         }
         "uniform" => {
@@ -222,7 +228,9 @@ pub fn parse_u16_distribution(s: &str) -> Result<ValueDistribution<u16>> {
             Ok(ValueDistribution::Uniform { min, max })
         }
         "normal" => {
-            let (mean_s, stddev_s) = params.split_once(',').context("normal requires mean,stddev")?;
+            let (mean_s, stddev_s) = params
+                .split_once(',')
+                .context("normal requires mean,stddev")?;
             let mean: f64 = mean_s.trim().parse().context("invalid mean")?;
             let stddev: f64 = stddev_s.trim().parse().context("invalid stddev")?;
             Ok(ValueDistribution::Normal { mean, stddev })
@@ -232,17 +240,24 @@ pub fn parse_u16_distribution(s: &str) -> Result<ValueDistribution<u16>> {
             Ok(ValueDistribution::Weighted(entries))
         }
         "exponential" | "exp" => {
-            let mean: f64 = params.trim().parse().context("exponential:mean requires a number")?;
+            let mean: f64 = params
+                .trim()
+                .parse()
+                .context("exponential:mean requires a number")?;
             Ok(ValueDistribution::Exponential { mean })
         }
         "lognormal" | "log-normal" => {
-            let (mu_s, sigma_s) = params.split_once(',').context("lognormal requires mu,sigma")?;
+            let (mu_s, sigma_s) = params
+                .split_once(',')
+                .context("lognormal requires mu,sigma")?;
             let mu: f64 = mu_s.trim().parse().context("invalid mu")?;
             let sigma: f64 = sigma_s.trim().parse().context("invalid sigma")?;
             Ok(ValueDistribution::LogNormal { mu, sigma })
         }
         "pareto" => {
-            let (scale_s, shape_s) = params.split_once(',').context("pareto requires scale,shape")?;
+            let (scale_s, shape_s) = params
+                .split_once(',')
+                .context("pareto requires scale,shape")?;
             let scale: f64 = scale_s.trim().parse().context("invalid scale")?;
             let shape: f64 = shape_s.trim().parse().context("invalid shape")?;
             Ok(ValueDistribution::Pareto { scale, shape })
@@ -269,7 +284,10 @@ pub fn parse_u32_distribution(s: &str) -> Result<ValueDistribution<u32>> {
         .context("size distribution: bare integer, 'fixed:N', 'uniform:min,max', 'normal:mean,stddev', or 'weighted:val@pct,...'")?;
     match kind.to_lowercase().as_str() {
         "fixed" => {
-            let n: u32 = params.trim().parse().context("fixed:N requires an integer")?;
+            let n: u32 = params
+                .trim()
+                .parse()
+                .context("fixed:N requires an integer")?;
             Ok(ValueDistribution::Fixed(n))
         }
         "uniform" => {
@@ -282,7 +300,9 @@ pub fn parse_u32_distribution(s: &str) -> Result<ValueDistribution<u32>> {
             Ok(ValueDistribution::Uniform { min, max })
         }
         "normal" => {
-            let (mean_s, stddev_s) = params.split_once(',').context("normal requires mean,stddev")?;
+            let (mean_s, stddev_s) = params
+                .split_once(',')
+                .context("normal requires mean,stddev")?;
             let mean: f64 = mean_s.trim().parse().context("invalid mean")?;
             let stddev: f64 = stddev_s.trim().parse().context("invalid stddev")?;
             Ok(ValueDistribution::Normal { mean, stddev })
@@ -292,17 +312,24 @@ pub fn parse_u32_distribution(s: &str) -> Result<ValueDistribution<u32>> {
             Ok(ValueDistribution::Weighted(entries))
         }
         "exponential" | "exp" => {
-            let mean: f64 = params.trim().parse().context("exponential:mean requires a number")?;
+            let mean: f64 = params
+                .trim()
+                .parse()
+                .context("exponential:mean requires a number")?;
             Ok(ValueDistribution::Exponential { mean })
         }
         "lognormal" | "log-normal" => {
-            let (mu_s, sigma_s) = params.split_once(',').context("lognormal requires mu,sigma")?;
+            let (mu_s, sigma_s) = params
+                .split_once(',')
+                .context("lognormal requires mu,sigma")?;
             let mu: f64 = mu_s.trim().parse().context("invalid mu")?;
             let sigma: f64 = sigma_s.trim().parse().context("invalid sigma")?;
             Ok(ValueDistribution::LogNormal { mu, sigma })
         }
         "pareto" => {
-            let (scale_s, shape_s) = params.split_once(',').context("pareto requires scale,shape")?;
+            let (scale_s, shape_s) = params
+                .split_once(',')
+                .context("pareto requires scale,shape")?;
             let scale: f64 = scale_s.trim().parse().context("invalid scale")?;
             let shape: f64 = shape_s.trim().parse().context("invalid shape")?;
             Ok(ValueDistribution::Pareto { scale, shape })
@@ -462,7 +489,11 @@ pub fn build_plugin_factory(
                 .map_err(|e| anyhow::anyhow!("hybrid config error: {e}"))?;
             Ok(Box::new(move |_core_id| {
                 Box::new(netanvil_plugin::HybridGenerator::new(config.clone()))
-                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
+                    as Box<
+                        dyn netanvil_types::RequestGenerator<
+                            Spec = netanvil_types::HttpRequestSpec,
+                        >,
+                    >
             }))
         }
         PluginType::Lua => {
@@ -474,7 +505,11 @@ pub fn build_plugin_factory(
                     netanvil_plugin_luajit::LuaJitGenerator::new(&script, &targets)
                         .expect("LuaJIT generator init failed"),
                 )
-                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
+                    as Box<
+                        dyn netanvil_types::RequestGenerator<
+                            Spec = netanvil_types::HttpRequestSpec,
+                        >,
+                    >
             }))
         }
         PluginType::Wasm => {
@@ -488,7 +523,11 @@ pub fn build_plugin_factory(
                     netanvil_plugin::WasmGenerator::new(&engine, &module, &targets)
                         .expect("WASM generator init failed"),
                 )
-                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
+                    as Box<
+                        dyn netanvil_types::RequestGenerator<
+                            Spec = netanvil_types::HttpRequestSpec,
+                        >,
+                    >
             }))
         }
         PluginType::Js => {
@@ -544,7 +583,9 @@ pub fn build_tcp_plugin_factory(
                     )
                     .expect("LuaJIT generator init failed"),
                 )
-                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::TcpRequestSpec>>
+                    as Box<
+                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::TcpRequestSpec>,
+                    >
             }))
         }
         PluginType::Wasm => {
@@ -560,7 +601,9 @@ pub fn build_tcp_plugin_factory(
                     )
                     .expect("WASM generator init failed"),
                 )
-                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::TcpRequestSpec>>
+                    as Box<
+                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::TcpRequestSpec>,
+                    >
             }))
         }
         PluginType::Js => {
@@ -577,7 +620,9 @@ pub fn build_tcp_plugin_factory(
                         .expect("V8 generator init failed"),
                     )
                         as Box<
-                            dyn netanvil_types::RequestGenerator<Spec = netanvil_types::TcpRequestSpec>,
+                            dyn netanvil_types::RequestGenerator<
+                                Spec = netanvil_types::TcpRequestSpec,
+                            >,
                         >
                 }))
             }
@@ -616,7 +661,9 @@ pub fn build_udp_plugin_factory(
                     )
                     .expect("LuaJIT generator init failed"),
                 )
-                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::UdpRequestSpec>>
+                    as Box<
+                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::UdpRequestSpec>,
+                    >
             }))
         }
         PluginType::Wasm => {
@@ -632,7 +679,9 @@ pub fn build_udp_plugin_factory(
                     )
                     .expect("WASM generator init failed"),
                 )
-                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::UdpRequestSpec>>
+                    as Box<
+                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::UdpRequestSpec>,
+                    >
             }))
         }
         PluginType::Js => {
@@ -649,7 +698,9 @@ pub fn build_udp_plugin_factory(
                         .expect("V8 generator init failed"),
                     )
                         as Box<
-                            dyn netanvil_types::RequestGenerator<Spec = netanvil_types::UdpRequestSpec>,
+                            dyn netanvil_types::RequestGenerator<
+                                Spec = netanvil_types::UdpRequestSpec,
+                            >,
                         >
                 }))
             }
@@ -688,7 +739,9 @@ pub fn build_dns_plugin_factory(
                     )
                     .expect("LuaJIT generator init failed"),
                 )
-                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::DnsRequestSpec>>
+                    as Box<
+                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::DnsRequestSpec>,
+                    >
             }))
         }
         PluginType::Wasm => {
@@ -704,7 +757,9 @@ pub fn build_dns_plugin_factory(
                     )
                     .expect("WASM generator init failed"),
                 )
-                    as Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::DnsRequestSpec>>
+                    as Box<
+                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::DnsRequestSpec>,
+                    >
             }))
         }
         PluginType::Js => {
@@ -721,7 +776,9 @@ pub fn build_dns_plugin_factory(
                         .expect("V8 generator init failed"),
                     )
                         as Box<
-                            dyn netanvil_types::RequestGenerator<Spec = netanvil_types::DnsRequestSpec>,
+                            dyn netanvil_types::RequestGenerator<
+                                Spec = netanvil_types::DnsRequestSpec,
+                            >,
                         >
                 }))
             }
@@ -779,7 +836,9 @@ pub fn build_redis_plugin_factory(
                     .expect("WASM generator init failed"),
                 )
                     as Box<
-                        dyn netanvil_types::RequestGenerator<Spec = netanvil_types::RedisRequestSpec>,
+                        dyn netanvil_types::RequestGenerator<
+                            Spec = netanvil_types::RedisRequestSpec,
+                        >,
                     >
             }))
         }
@@ -1320,7 +1379,10 @@ mod tests {
         .unwrap();
         match rate {
             RateConfig::Pid { target, .. } => {
-                assert!(matches!(target.gains, netanvil_types::PidGains::Auto { .. }));
+                assert!(matches!(
+                    target.gains,
+                    netanvil_types::PidGains::Auto { .. }
+                ));
             }
             _ => panic!("expected Pid"),
         }

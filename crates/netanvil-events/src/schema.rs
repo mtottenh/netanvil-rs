@@ -12,8 +12,7 @@ use crate::anchor::TimeAnchor;
 use crate::recorder::ArrowEventRecorder;
 
 /// Factory that creates per-core event recorders.
-pub type EventRecorderFactory =
-    Box<dyn Fn(usize) -> Box<dyn netanvil_types::EventRecorder> + Send>;
+pub type EventRecorderFactory = Box<dyn Fn(usize) -> Box<dyn netanvil_types::EventRecorder> + Send>;
 
 /// Describes a response header to extract as a column.
 #[derive(Debug, Clone)]

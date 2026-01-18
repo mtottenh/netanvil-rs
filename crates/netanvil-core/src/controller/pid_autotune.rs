@@ -106,9 +106,7 @@ impl AutotuningPidController {
                 gains.kd = kd;
                 Ok(())
             }
-            Phase::Exploring(_) => {
-                Err("cannot set gains during exploration".into())
-            }
+            Phase::Exploring(_) => Err("cannot set gains during exploration".into()),
         }
     }
 
@@ -118,9 +116,7 @@ impl AutotuningPidController {
                 state.reset();
                 Ok(())
             }
-            Phase::Exploring(_) => {
-                Err("cannot reset integrator during exploration".into())
-            }
+            Phase::Exploring(_) => Err("cannot reset integrator during exploration".into()),
         }
     }
 
@@ -306,7 +302,9 @@ impl RateController for AutotuningPidController {
                 }))
             }
             "set_target_value" => {
-                let value = params.get("value").and_then(|v| v.as_f64())
+                let value = params
+                    .get("value")
+                    .and_then(|v| v.as_f64())
                     .ok_or("missing 'value' field")?;
                 let old = self.target_value;
                 self.set_target_value(value);
@@ -318,11 +316,17 @@ impl RateController for AutotuningPidController {
                 }))
             }
             "set_gains" => {
-                let kp = params.get("kp").and_then(|v| v.as_f64())
+                let kp = params
+                    .get("kp")
+                    .and_then(|v| v.as_f64())
                     .ok_or("missing 'kp' field")?;
-                let ki = params.get("ki").and_then(|v| v.as_f64())
+                let ki = params
+                    .get("ki")
+                    .and_then(|v| v.as_f64())
                     .ok_or("missing 'ki' field")?;
-                let kd = params.get("kd").and_then(|v| v.as_f64())
+                let kd = params
+                    .get("kd")
+                    .and_then(|v| v.as_f64())
                     .ok_or("missing 'kd' field")?;
                 self.set_gains(kp, ki, kd)?;
                 Ok(serde_json::json!({
@@ -338,7 +342,9 @@ impl RateController for AutotuningPidController {
                 }))
             }
             "set_max_rps" => {
-                let max = params.get("max_rps").and_then(|v| v.as_f64())
+                let max = params
+                    .get("max_rps")
+                    .and_then(|v| v.as_f64())
                     .ok_or("missing 'max_rps' field")?;
                 let old = self.max_rps;
                 self.set_max_rps(max);
@@ -349,7 +355,9 @@ impl RateController for AutotuningPidController {
                 }))
             }
             "set_min_rps" => {
-                let min = params.get("min_rps").and_then(|v| v.as_f64())
+                let min = params
+                    .get("min_rps")
+                    .and_then(|v| v.as_f64())
                     .ok_or("missing 'min_rps' field")?;
                 let old = self.min_rps;
                 self.set_min_rps(min);
@@ -360,7 +368,8 @@ impl RateController for AutotuningPidController {
                 }))
             }
             _ => Err(format!(
-                "action '{}' is not valid for controller type 'pid_autotune'", action
+                "action '{}' is not valid for controller type 'pid_autotune'",
+                action
             )),
         }
     }

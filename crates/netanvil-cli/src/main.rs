@@ -551,7 +551,6 @@ enum Commands {
         /// JSON field name to extract from external metrics
         #[arg(long)]
         external_metrics_field: Option<String>,
-
     },
 }
 
@@ -685,7 +684,17 @@ fn main() -> Result<()> {
             metrics_port,
             trusted_san,
             isolate_cpus,
-        } => commands::agent::run(listen, node_id, cores, tls_ca, tls_cert, tls_key, metrics_port, trusted_san, isolate_cpus)?,
+        } => commands::agent::run(
+            listen,
+            node_id,
+            cores,
+            tls_ca,
+            tls_cert,
+            tls_key,
+            metrics_port,
+            trusted_san,
+            isolate_cpus,
+        )?,
 
         Commands::Leader {
             workers,

@@ -166,8 +166,7 @@ impl AgentServer {
 
                     let rustls_config =
                         axum_server::tls_rustls::RustlsConfig::from_config(tls_config);
-                    let acceptor =
-                        crate::identity::CertExtractingAcceptor::new(rustls_config);
+                    let acceptor = crate::identity::CertExtractingAcceptor::new(rustls_config);
                     tracing::info!("agent listening on {bind_addr} (TLS with cert extraction)");
                     axum_server::bind(bind_addr.parse().expect("parse bind addr"))
                         .acceptor(acceptor)
@@ -250,15 +249,12 @@ fn require_command_tx(
     inner: &Mutex<AgentInner>,
 ) -> Result<flume::Sender<WorkerCommand>, (StatusCode, Json<ApiResponse>)> {
     let guard = inner.lock().unwrap();
-    guard
-        .command_tx
-        .clone()
-        .ok_or_else(|| {
-            (
-                StatusCode::CONFLICT,
-                Json(ApiResponse::error("no test running")),
-            )
-        })
+    guard.command_tx.clone().ok_or_else(|| {
+        (
+            StatusCode::CONFLICT,
+            Json(ApiResponse::error("no test running")),
+        )
+    })
 }
 
 // --- Handlers ---------------------------------------------------------------
@@ -356,9 +352,7 @@ async fn put_hold(
 async fn delete_hold(State(state): State<AgentState>) -> impl IntoResponse {
     let tx = require_command_tx(&state.inner)?;
     let _ = tx.send(WorkerCommand::Hold(HoldCommand::Release));
-    Ok::<_, (StatusCode, Json<ApiResponse>)>(
-        Json(serde_json::json!({"ok": true, "resumed": true})),
-    )
+    Ok::<_, (StatusCode, Json<ApiResponse>)>(Json(serde_json::json!({"ok": true, "resumed": true})))
 }
 
 async fn get_controller(State(state): State<AgentState>) -> impl IntoResponse {
@@ -977,7 +971,8 @@ fn build_http_plugin_factory(
                 Box::new(
                     netanvil_plugin_luajit::LuaJitGenerator::new(&script, &targets)
                         .expect("LuaJIT init failed"),
-                ) as Box<dyn RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
+                )
+                    as Box<dyn RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
             }))
         }
         PluginType::Wasm => {
@@ -988,7 +983,8 @@ fn build_http_plugin_factory(
                 Box::new(
                     netanvil_plugin::WasmGenerator::new(&engine, &module, &targets)
                         .expect("WASM init failed"),
-                ) as Box<dyn RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
+                )
+                    as Box<dyn RequestGenerator<Spec = netanvil_types::HttpRequestSpec>>
             }))
         }
         PluginType::Js => {
@@ -1200,22 +1196,23 @@ fn run_redis_test(
         ));
     }
 
-    let gen_factory: netanvil_core::GenericGeneratorFactory<RedisRequestSpec> =
-        if let Some(factory) =
-            plugin.and_then(|pc| build_redis_plugin_factory(pc, &config.targets))
-        {
-            factory
-        } else {
-            let command = command.to_string();
-            let args = args.to_vec();
-            Box::new(move |_core_id| {
-                Box::new(SimpleRedisGenerator::new(
-                    targets.clone(),
-                    command.clone(),
-                    args.clone(),
-                ))
-            })
-        };
+    let gen_factory: netanvil_core::GenericGeneratorFactory<RedisRequestSpec> = if let Some(
+        factory,
+    ) =
+        plugin.and_then(|pc| build_redis_plugin_factory(pc, &config.targets))
+    {
+        factory
+    } else {
+        let command = command.to_string();
+        let args = args.to_vec();
+        Box::new(move |_core_id| {
+            Box::new(SimpleRedisGenerator::new(
+                targets.clone(),
+                command.clone(),
+                args.clone(),
+            ))
+        })
+    };
 
     let trans_factory: netanvil_core::GenericTransformerFactory<RedisRequestSpec> =
         Box::new(|_| Box::new(RedisNoopTransformer));

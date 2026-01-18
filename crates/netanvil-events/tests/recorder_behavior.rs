@@ -14,9 +14,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::time::{Duration, Instant};
 
-use arrow_array::{
-    Array, BooleanArray, RecordBatch, StringArray, UInt16Array, UInt64Array,
-};
+use arrow_array::{Array, BooleanArray, RecordBatch, StringArray, UInt16Array, UInt64Array};
 use arrow_ipc::reader::StreamReader;
 
 use netanvil_events::{EventSchemaBuilder, TimeAnchor};
@@ -125,19 +123,10 @@ fn records_written_with_correct_values() {
         .batch_size(100) // large enough that nothing auto-flushes
         .build();
 
-    let recorder = schema
-        .into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
+    let recorder = schema.into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
 
     // Record a few requests
-    recorder.record(&make_result(
-        42,
-        Some(200),
-        1500,
-        256,
-        1024,
-        None,
-        None,
-    ));
+    recorder.record(&make_result(42, Some(200), 1500, 256, 1024, None, None));
     recorder.record(&make_result(
         43,
         Some(503),
@@ -148,13 +137,8 @@ fn records_written_with_correct_values() {
         None,
     ));
     recorder.record(&make_result(
-        44,
-        None, // no status (e.g. TCP protocol)
-        800,
-        64,
-        512,
-        None,
-        None,
+        44, None, // no status (e.g. TCP protocol)
+        800, 64, 512, None, None,
     ));
 
     // Explicit flush to write partial batch
@@ -224,8 +208,7 @@ fn batch_flushes_at_batch_size() {
         .batch_size(batch_size)
         .build();
 
-    let recorder = schema
-        .into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
+    let recorder = schema.into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
 
     // Record exactly batch_size records — should auto-flush one batch
     for i in 0..batch_size {
@@ -244,7 +227,12 @@ fn batch_flushes_at_batch_size() {
     let batches = read_arrow_file(&path);
 
     // Should have exactly 2 batches: one of batch_size, one of 3
-    assert_eq!(batches.len(), 2, "expected 2 batches, got {}", batches.len());
+    assert_eq!(
+        batches.len(),
+        2,
+        "expected 2 batches, got {}",
+        batches.len()
+    );
     assert_eq!(batches[0].num_rows(), batch_size);
     assert_eq!(batches[1].num_rows(), 3);
     assert_eq!(total_rows(&batches), batch_size + 3);
@@ -259,8 +247,7 @@ fn explicit_flush_writes_partial_batch() {
         .batch_size(1000) // much larger than what we'll record
         .build();
 
-    let recorder = schema
-        .into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
+    let recorder = schema.into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
 
     recorder.record(&make_simple_result(1, 200));
     recorder.record(&make_simple_result(2, 200));
@@ -290,8 +277,7 @@ fn flush_on_empty_buffer_is_noop() {
 
     let schema = EventSchemaBuilder::new("http").batch_size(100).build();
 
-    let recorder = schema
-        .into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
+    let recorder = schema.into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
 
     // Flush with nothing recorded — should not panic or write empty batch
     recorder.flush();
@@ -321,8 +307,7 @@ fn drop_finalizes_file_with_remaining_records() {
         .batch_size(1000) // never auto-flushes
         .build();
 
-    let recorder = schema
-        .into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
+    let recorder = schema.into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
 
     for i in 0..5 {
         recorder.record(&make_simple_result(i, 200));
@@ -347,8 +332,7 @@ fn sampling_reduces_output_rows() {
         .batch_size(10000)
         .build();
 
-    let recorder = schema
-        .into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
+    let recorder = schema.into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
 
     let n = 10_000;
     for i in 0..n {
@@ -378,8 +362,7 @@ fn sample_rate_zero_writes_nothing() {
         .batch_size(100)
         .build();
 
-    let recorder = schema
-        .into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
+    let recorder = schema.into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
 
     for i in 0..100 {
         recorder.record(&make_simple_result(i, 200));
@@ -401,8 +384,7 @@ fn sample_rate_one_writes_all() {
         .batch_size(1000)
         .build();
 
-    let recorder = schema
-        .into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
+    let recorder = schema.into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
 
     for i in 0..50 {
         recorder.record(&make_simple_result(i, 200));
@@ -422,8 +404,7 @@ fn minimal_schema_excludes_optional_columns() {
     // No with_timing(), with_bytes(), with_errors(), with_coordinated_omission()
     let schema = EventSchemaBuilder::new("udp").batch_size(100).build();
 
-    let recorder = schema
-        .into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
+    let recorder = schema.into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
 
     recorder.record(&make_simple_result(1, 0));
     drop(recorder);
@@ -460,8 +441,7 @@ fn response_header_extraction() {
         .batch_size(100)
         .build();
 
-    let recorder = schema
-        .into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
+    let recorder = schema.into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
 
     // Request with both headers
     recorder.record(&make_result(
@@ -519,8 +499,7 @@ fn constant_columns() {
         .batch_size(100)
         .build();
 
-    let recorder = schema
-        .into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
+    let recorder = schema.into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
 
     recorder.record(&make_simple_result(1, 200));
     recorder.record(&make_simple_result(2, 200));
@@ -549,8 +528,7 @@ fn error_classification_respects_threshold() {
         .batch_size(100)
         .build();
 
-    let recorder = schema
-        .into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
+    let recorder = schema.into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
 
     // 200 — not an error
     recorder.record(&make_simple_result(1, 200));
@@ -559,7 +537,15 @@ fn error_classification_respects_threshold() {
     // 500 — at threshold, IS an error
     recorder.record(&make_simple_result(3, 500));
     // Transport error (timeout) — always an error regardless of status
-    recorder.record(&make_result(4, Some(200), 1000, 0, 0, Some(ExecutionError::Timeout), None));
+    recorder.record(&make_result(
+        4,
+        Some(200),
+        1000,
+        0,
+        0,
+        Some(ExecutionError::Timeout),
+        None,
+    ));
 
     drop(recorder);
 
@@ -569,9 +555,15 @@ fn error_classification_respects_threshold() {
 
     let errors = col_bool(batch, "is_error");
     assert!(!errors.value(0), "200 should not be error");
-    assert!(!errors.value(1), "404 should not be error with threshold 500");
+    assert!(
+        !errors.value(1),
+        "404 should not be error with threshold 500"
+    );
     assert!(errors.value(2), "500 should be error");
-    assert!(errors.value(3), "timeout should be error regardless of status");
+    assert!(
+        errors.value(3),
+        "timeout should be error regardless of status"
+    );
 
     let kinds = col_str(batch, "error_kind");
     assert_eq!(kinds.value(0), "");
@@ -591,8 +583,7 @@ fn multiple_batches_preserve_schema() {
         .batch_size(batch_size)
         .build();
 
-    let recorder = schema
-        .into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
+    let recorder = schema.into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
 
     // Write 3 full batches + 2 leftover
     for i in 0..(batch_size * 3 + 2) {
@@ -676,8 +667,7 @@ fn timestamps_are_epoch_microseconds() {
         .batch_size(100)
         .build();
 
-    let recorder = schema
-        .into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
+    let recorder = schema.into_factory(dir.path().to_str().unwrap().to_string(), anchor)(0);
 
     recorder.record(&make_simple_result(1, 200));
     drop(recorder);
@@ -704,5 +694,9 @@ fn timestamps_are_epoch_microseconds() {
 
     // scheduling_delay_us should be 0 since intended == actual in our test fixture
     let delay = col_u64(batch, "scheduling_delay_us");
-    assert_eq!(delay.value(0), 0, "delay should be 0 when intended == actual");
+    assert_eq!(
+        delay.value(0),
+        0,
+        "delay should be 0 when intended == actual"
+    );
 }

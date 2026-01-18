@@ -194,7 +194,8 @@ fn bench_throughput(c: &mut Criterion) {
     });
 
     // Generate + on_response (with headers)
-    let resp_hdr_script = include_str!("../../netanvil-plugin/examples/scripts/response_handler.js");
+    let resp_hdr_script =
+        include_str!("../../netanvil-plugin/examples/scripts/response_handler.js");
     let mut gen_resp_hdr: V8Generator<HttpRequestSpec> =
         V8Generator::new(resp_hdr_script, &targets()).unwrap();
 

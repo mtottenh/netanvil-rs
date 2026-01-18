@@ -19,17 +19,15 @@ pub mod traits;
 pub mod udp_spec;
 
 pub use command::{ScheduledRequest, TimerCommand, WorkerCommand};
-pub use controller::{
-    ControllerInfo, ControllerType, ControllerView, HoldCommand, HoldState,
-};
 pub use config::{
     ConnectionConfig, ConnectionPolicy, EventLogOutput, ExternalConstraintConfig, HttpVersion,
     MissingSignalBehavior, PidConstraint, PidGains, PidTarget, PluginConfig, PluginType,
     ProtocolConfig, RateConfig, ResponseSignalConfig, SchedulerConfig, SignalAggregation,
     SignalDirection, TargetMetric, TestConfig, TlsConfig,
 };
-pub use distribution::{CountDistribution, ValueDistribution, WeightedValue};
+pub use controller::{ControllerInfo, ControllerType, ControllerView, HoldCommand, HoldState};
 pub use distributed::{MetricsFetcher, NodeCommander, NodeDiscovery, RemoteMetrics};
+pub use distribution::{CountDistribution, ValueDistribution, WeightedValue};
 pub use dns_spec::{DnsQueryType, DnsRequestSpec};
 pub use error::{NetAnvilError, Result};
 pub use metrics::{

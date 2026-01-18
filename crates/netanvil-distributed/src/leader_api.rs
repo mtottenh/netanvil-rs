@@ -108,9 +108,7 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"ok": true}))
 }
 
-async fn prometheus_metrics(
-    State(state): State<Arc<LeaderApiState>>,
-) -> impl IntoResponse {
+async fn prometheus_metrics(State(state): State<Arc<LeaderApiState>>) -> impl IntoResponse {
     leader_server::handle_prometheus(State(state.leader_metrics.clone())).await
 }
 
@@ -455,9 +453,7 @@ async fn cancel_test(
     }
 }
 
-async fn list_agents(
-    State(state): State<Arc<LeaderApiState>>,
-) -> Json<serde_json::Value> {
+async fn list_agents(State(state): State<Arc<LeaderApiState>>) -> Json<serde_json::Value> {
     let agents = state.agents.lock().unwrap().clone();
     let now = format_timestamp(std::time::SystemTime::now());
     let enriched: Vec<serde_json::Value> = agents

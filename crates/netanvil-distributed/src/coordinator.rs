@@ -19,9 +19,8 @@ use netanvil_types::{
 };
 
 /// Async signal source: called each tick to get external signals.
-pub type AsyncSignalSource = Box<
-    dyn FnMut() -> Pin<Box<dyn Future<Output = Vec<(String, f64)>> + Send>> + Send,
->;
+pub type AsyncSignalSource =
+    Box<dyn FnMut() -> Pin<Box<dyn Future<Output = Vec<(String, f64)>> + Send>> + Send>;
 
 /// Command for controller parameter updates in the distributed coordinator.
 pub struct ControllerUpdateCommand {
@@ -315,7 +314,10 @@ where
         // Inject externally pushed signals (from leader API PUT /signal).
         if let Some(ref rx) = self.signal_push_rx {
             while let Ok((name, value)) = rx.try_recv() {
-                if let Some(existing) = summary.external_signals.iter_mut().find(|(k, _)| *k == name)
+                if let Some(existing) = summary
+                    .external_signals
+                    .iter_mut()
+                    .find(|(k, _)| *k == name)
                 {
                     existing.1 = value;
                 } else {
@@ -337,10 +339,7 @@ where
                 new_rps = decision.target_rps,
                 active_nodes = nodes.len(),
                 error_rate = format!("{:.4}", summary.error_rate),
-                latency_p99_ms = format!(
-                    "{:.1}",
-                    summary.latency_p99_ns as f64 / 1_000_000.0
-                ),
+                latency_p99_ms = format!("{:.1}", summary.latency_p99_ns as f64 / 1_000_000.0),
                 "leader rate adjustment"
             );
         }

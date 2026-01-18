@@ -642,9 +642,7 @@ where
                     };
 
                     let executor = executor_factory(health_counters.clone());
-                    let packet_source = executor
-                        .packet_counter_source()
-                        .unwrap_or_default();
+                    let packet_source = executor.packet_counter_source().unwrap_or_default();
                     let mut collector = HdrMetricsCollector::with_packet_source(
                         config.error_status_threshold,
                         config.tracked_response_headers.clone(),
@@ -657,16 +655,14 @@ where
                         collector.set_tcp_health_counters(hc.tcp_health.clone());
                     }
 
-                    let event_recorder: Rc<dyn EventRecorder> =
-                        match event_recorder_factory {
-                            Some(factory) => Rc::from(factory(core_id)),
-                            None => Rc::new(NoopEventRecorder),
-                        };
+                    let event_recorder: Rc<dyn EventRecorder> = match event_recorder_factory {
+                        Some(factory) => Rc::from(factory(core_id)),
+                        None => Rc::new(NoopEventRecorder),
+                    };
 
                     let in_flight_cap = config.connections.max_in_flight_per_core;
-                    let in_flight_limit = Rc::new(
-                        crate::in_flight::InFlightLimit::new(in_flight_cap),
-                    );
+                    let in_flight_limit =
+                        Rc::new(crate::in_flight::InFlightLimit::new(in_flight_cap));
 
                     io_worker_loop(
                         crate::io_worker::IoWorkerConfig {

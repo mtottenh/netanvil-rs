@@ -634,7 +634,8 @@ mod tests {
             }
         "#;
         let targets = vec!["http://localhost:8080".to_string()];
-        let mut gen = V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
+        let mut gen =
+            V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
         let ctx = netanvil_types::RequestContext {
             request_id: 42,
             core_id: 1,

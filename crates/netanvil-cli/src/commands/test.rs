@@ -259,8 +259,9 @@ pub fn run(
                         )
                     })
                 };
-            let trans_factory: netanvil_core::GenericTransformerFactory<netanvil_tcp::TcpRequestSpec> =
-                Box::new(|_| Box::new(netanvil_tcp::TcpNoopTransformer));
+            let trans_factory: netanvil_core::GenericTransformerFactory<
+                netanvil_tcp::TcpRequestSpec,
+            > = Box::new(|_| Box::new(netanvil_tcp::TcpNoopTransformer));
 
             let mut builder = GenericTestBuilder::new(
                 config,
@@ -319,8 +320,9 @@ pub fn run(
                         ))
                     })
                 };
-            let trans_factory: netanvil_core::GenericTransformerFactory<netanvil_udp::UdpRequestSpec> =
-                Box::new(|_| Box::new(netanvil_udp::UdpNoopTransformer));
+            let trans_factory: netanvil_core::GenericTransformerFactory<
+                netanvil_udp::UdpRequestSpec,
+            > = Box::new(|_| Box::new(netanvil_udp::UdpNoopTransformer));
 
             let mut builder = GenericTestBuilder::new(
                 config,
@@ -376,8 +378,9 @@ pub fn run(
                         ))
                     })
                 };
-            let trans_factory: netanvil_core::GenericTransformerFactory<netanvil_dns::DnsRequestSpec> =
-                Box::new(|_| Box::new(netanvil_dns::DnsNoopTransformer));
+            let trans_factory: netanvil_core::GenericTransformerFactory<
+                netanvil_dns::DnsRequestSpec,
+            > = Box::new(|_| Box::new(netanvil_dns::DnsNoopTransformer));
 
             let mut builder = GenericTestBuilder::new(
                 config,
@@ -462,50 +465,64 @@ pub fn run(
                 config.health_sample_rate = health_sample_rate;
 
                 let tls_client = config.tls_client.clone();
-                let make_executor = move |health: Option<netanvil_types::HealthCounters>| -> HttpExecutor<Observe> {
-                    let health = health.expect(
-                        "engine must provide HealthCounters when health_sample_rate > 0"
-                    );
-                    let observe_config = ObserveConfig {
-                        sample_rate: health_sample_rate,
-                        worker_cpu: 0,
-                        counters: health.affinity,
-                        tcp_health: health.tcp_health,
+                let make_executor =
+                    move |health: Option<netanvil_types::HealthCounters>| -> HttpExecutor<Observe> {
+                        let health = health.expect(
+                            "engine must provide HealthCounters when health_sample_rate > 0",
+                        );
+                        let observe_config = ObserveConfig {
+                            sample_rate: health_sample_rate,
+                            worker_cpu: 0,
+                            counters: health.affinity,
+                            tcp_health: health.tcp_health,
+                        };
+                        let wrapper = Observe(SendObserveConfig::new(observe_config));
+                        HttpExecutor::with_connection_config_wrapped(
+                            tls_client.as_ref(),
+                            bandwidth_bps,
+                            request_timeout,
+                            false,
+                            None,
+                            http_version,
+                            wrapper,
+                        )
+                        .expect("executor configuration error")
                     };
-                    let wrapper = Observe(SendObserveConfig::new(observe_config));
-                    HttpExecutor::with_connection_config_wrapped(
-                        tls_client.as_ref(),
-                        bandwidth_bps,
-                        request_timeout,
-                        false,
-                        None,
-                        http_version,
-                        wrapper,
-                    )
-                    .expect("executor configuration error")
-                };
 
-                run_http_test(config, make_executor, plugin_factory, event_recorder_factory, api_port)?
+                run_http_test(
+                    config,
+                    make_executor,
+                    plugin_factory,
+                    event_recorder_factory,
+                    api_port,
+                )?
             } else {
                 let tls_client = config.tls_client.clone();
-                let make_executor = move |_health: Option<netanvil_types::HealthCounters>| -> HttpExecutor {
-                    match &tls_client {
-                        Some(tls_config) => HttpExecutor::with_tls_and_version(
-                            tls_config,
-                            bandwidth_bps,
-                            request_timeout,
-                            http_version,
-                        )
-                        .expect("TLS configuration error"),
-                        None => HttpExecutor::with_http_version(
-                            http_version,
-                            bandwidth_bps,
-                            request_timeout,
-                        ),
-                    }
-                };
+                let make_executor =
+                    move |_health: Option<netanvil_types::HealthCounters>| -> HttpExecutor {
+                        match &tls_client {
+                            Some(tls_config) => HttpExecutor::with_tls_and_version(
+                                tls_config,
+                                bandwidth_bps,
+                                request_timeout,
+                                http_version,
+                            )
+                            .expect("TLS configuration error"),
+                            None => HttpExecutor::with_http_version(
+                                http_version,
+                                bandwidth_bps,
+                                request_timeout,
+                            ),
+                        }
+                    };
 
-                run_http_test(config, make_executor, plugin_factory, event_recorder_factory, api_port)?
+                run_http_test(
+                    config,
+                    make_executor,
+                    plugin_factory,
+                    event_recorder_factory,
+                    api_port,
+                )?
             }
         }
     };
@@ -525,8 +542,18 @@ pub fn run(
 fn run_http_test<E, F>(
     config: TestConfig,
     make_executor: F,
-    plugin_factory: Option<Box<dyn Fn(usize) -> Box<dyn netanvil_types::RequestGenerator<Spec = netanvil_types::HttpRequestSpec>> + Send>>,
-    event_recorder_factory: Option<Box<dyn Fn(usize) -> Box<dyn netanvil_types::EventRecorder> + Send>>,
+    plugin_factory: Option<
+        Box<
+            dyn Fn(
+                    usize,
+                ) -> Box<
+                    dyn netanvil_types::RequestGenerator<Spec = netanvil_types::HttpRequestSpec>,
+                > + Send,
+        >,
+    >,
+    event_recorder_factory: Option<
+        Box<dyn Fn(usize) -> Box<dyn netanvil_types::EventRecorder> + Send>,
+    >,
     api_port: Option<u16>,
 ) -> Result<netanvil_core::TestResult>
 where

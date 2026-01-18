@@ -37,7 +37,8 @@ fn lua_http_basic_get() {
     "#;
 
     let targets = vec!["http://example.com".into()];
-    let mut gen = LuaJitGenerator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
+    let mut gen =
+        LuaJitGenerator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(42, 3));
     assert_eq!(spec.method, http::Method::GET);
@@ -62,7 +63,8 @@ fn lua_http_post_with_body() {
     "#;
 
     let targets = vec!["http://api.example.com".into()];
-    let mut gen = LuaJitGenerator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
+    let mut gen =
+        LuaJitGenerator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(99, 0));
     assert_eq!(spec.method, http::Method::POST);
@@ -85,7 +87,8 @@ fn lua_http_uses_init_targets() {
     "#;
 
     let targets = vec!["http://myhost:8080".into()];
-    let mut gen = LuaJitGenerator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
+    let mut gen =
+        LuaJitGenerator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
 
     let spec = gen.generate(&mock_ctx(1, 0));
     assert_eq!(spec.url, "http://myhost:8080/test");

@@ -122,8 +122,7 @@ impl LossTracker {
                     ((1u64 << bits_in_word) - 1) << start_bit
                 };
                 let set = (self.ring[word_idx] & mask).count_ones() as u64;
-                let expected =
-                    (bits_in_word as u64).min(self.total_sent.saturating_sub(seq));
+                let expected = (bits_in_word as u64).min(self.total_sent.saturating_sub(seq));
                 self.total_lost += expected.saturating_sub(set);
                 self.ring[word_idx] &= !mask;
             }

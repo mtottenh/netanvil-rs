@@ -36,11 +36,7 @@ impl HttpSignalPoller {
     pub fn into_source(
         self,
     ) -> impl FnMut() -> Pin<Box<dyn Future<Output = Vec<(String, f64)>> + Send>> + Send {
-        let Self {
-            client,
-            url,
-            field,
-        } = self;
+        let Self { client, url, field } = self;
         move || {
             let client = client.clone();
             let url = url.clone();

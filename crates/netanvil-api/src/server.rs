@@ -181,7 +181,10 @@ async fn put_rate(
     body: Result<Json<UpdateRateRequest>, JsonRejection>,
 ) -> impl IntoResponse {
     let body = json_or_error(body)?;
-    tracing::warn!(rps = body.rps, "PUT /rate is deprecated, use PUT /hold instead");
+    tracing::warn!(
+        rps = body.rps,
+        "PUT /rate is deprecated, use PUT /hold instead"
+    );
     let _ = state
         .command_tx
         .send(WorkerCommand::Hold(HoldCommand::Hold(body.rps)));

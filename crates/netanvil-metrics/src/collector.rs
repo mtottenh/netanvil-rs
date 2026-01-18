@@ -135,12 +135,18 @@ impl<P: PacketCounterSource> HdrMetricsCollector<P> {
 impl<P: PacketCounterSource> HdrMetricsCollector<P> {
     /// Set the shared CPU affinity counters (written by ObservedTcpStream,
     /// drained by snapshot()). Call once during per-core setup.
-    pub fn set_affinity_counters(&mut self, counters: std::rc::Rc<netanvil_types::CpuAffinityCounters>) {
+    pub fn set_affinity_counters(
+        &mut self,
+        counters: std::rc::Rc<netanvil_types::CpuAffinityCounters>,
+    ) {
         self.affinity_counters = Some(counters);
     }
 
     /// Set the shared TCP health counters.
-    pub fn set_tcp_health_counters(&mut self, counters: std::rc::Rc<netanvil_types::TcpHealthCounters>) {
+    pub fn set_tcp_health_counters(
+        &mut self,
+        counters: std::rc::Rc<netanvil_types::TcpHealthCounters>,
+    ) {
         self.tcp_health_counters = Some(counters);
     }
 }
@@ -152,10 +158,7 @@ impl<P: PacketCounterSource> MetricsCollector for HdrMetricsCollector<P> {
         // Timeouts are tracked separately. A timeout's "latency" is the
         // timeout duration, not the server's response time — recording it
         // in the histogram would corrupt p99 with 30-second sentinel values.
-        let is_timeout = matches!(
-            result.error,
-            Some(netanvil_types::ExecutionError::Timeout)
-        );
+        let is_timeout = matches!(result.error, Some(netanvil_types::ExecutionError::Timeout));
         if is_timeout {
             self.timeout_count.set(self.timeout_count.get() + 1);
             self.total_errors.set(self.total_errors.get() + 1);

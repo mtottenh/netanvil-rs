@@ -68,14 +68,13 @@ impl<T: SampleOutput> Sampler<T> {
             },
 
             ValueDistribution::Normal { mean, stddev } => {
-                let d = Normal::new(*mean, *stddev)
-                    .unwrap_or_else(|_| Normal::new(1.0, 0.0).unwrap());
+                let d =
+                    Normal::new(*mean, *stddev).unwrap_or_else(|_| Normal::new(1.0, 0.0).unwrap());
                 SamplerKind::Normal(d)
             }
 
             ValueDistribution::Exponential { mean } => {
-                let d = Exp::new(1.0 / *mean)
-                    .unwrap_or_else(|_| Exp::new(1.0).unwrap());
+                let d = Exp::new(1.0 / *mean).unwrap_or_else(|_| Exp::new(1.0).unwrap());
                 SamplerKind::Exponential(d)
             }
 
@@ -86,14 +85,13 @@ impl<T: SampleOutput> Sampler<T> {
             }
 
             ValueDistribution::Pareto { scale, shape } => {
-                let d = Pareto::new(*scale, *shape)
-                    .unwrap_or_else(|_| Pareto::new(1.0, 1.0).unwrap());
+                let d =
+                    Pareto::new(*scale, *shape).unwrap_or_else(|_| Pareto::new(1.0, 1.0).unwrap());
                 SamplerKind::Pareto(d)
             }
 
             ValueDistribution::Zipf { n, exponent } => {
-                let d = Zipf::new(*n, *exponent)
-                    .unwrap_or_else(|_| Zipf::new(1, 1.0).unwrap());
+                let d = Zipf::new(*n, *exponent).unwrap_or_else(|_| Zipf::new(1, 1.0).unwrap());
                 SamplerKind::Zipf(d)
             }
 
@@ -125,7 +123,10 @@ impl<T: SampleOutput> Sampler<T> {
 
 /// Pre-compute cumulative weights at construction time.
 fn build_weighted<T: SampleOutput>(entries: &[WeightedValue<T>]) -> SamplerKind<T> {
-    debug_assert!(!entries.is_empty(), "weighted distribution must have entries");
+    debug_assert!(
+        !entries.is_empty(),
+        "weighted distribution must have entries"
+    );
 
     let mut cumulative_weights = Vec::with_capacity(entries.len());
     let mut total = 0.0;

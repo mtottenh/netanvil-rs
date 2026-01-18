@@ -61,6 +61,9 @@ mod tests {
         let anchor = TimeAnchor::now();
 
         let epoch = anchor.to_epoch_us(before);
-        assert!(epoch < anchor.epoch_us, "past instant should be before anchor epoch");
+        assert!(
+            epoch < anchor.epoch_us,
+            "past instant should be before anchor epoch"
+        );
     }
 }

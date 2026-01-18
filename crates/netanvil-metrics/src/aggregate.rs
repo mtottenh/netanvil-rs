@@ -95,7 +95,10 @@ impl AggregateMetrics {
     }
 
     /// Set response signal aggregation configs (called once at setup).
-    pub fn set_signal_configs(&mut self, configs: Vec<netanvil_types::config::ResponseSignalConfig>) {
+    pub fn set_signal_configs(
+        &mut self,
+        configs: Vec<netanvil_types::config::ResponseSignalConfig>,
+    ) {
         self.signal_configs = configs;
     }
 }

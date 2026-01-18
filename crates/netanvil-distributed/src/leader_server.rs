@@ -71,9 +71,7 @@ impl LeaderServer {
 
 /// Prometheus scrape handler using the shared metrics state.
 /// Also used by `leader_api` for the `/metrics/prometheus` route.
-pub async fn handle_prometheus(
-    State(state): State<LeaderMetricsState>,
-) -> impl IntoResponse {
+pub async fn handle_prometheus(State(state): State<LeaderMetricsState>) -> impl IntoResponse {
     let body = match state.snapshot() {
         Some(p) => format_prometheus(&p),
         None => "# No metrics available yet\n".to_string(),
@@ -123,7 +121,9 @@ fn format_prometheus(p: &DistributedProgressUpdate) -> String {
     // -- Counters --
     out.push_str("# HELP netanvil_requests_total Total requests sent across all agents.\n");
     out.push_str("# TYPE netanvil_requests_total counter\n");
-    out.push_str(&format!("netanvil_requests_total{label} {total_requests}\n"));
+    out.push_str(&format!(
+        "netanvil_requests_total{label} {total_requests}\n"
+    ));
 
     out.push_str("# HELP netanvil_errors_total Total errors across all agents.\n");
     out.push_str("# TYPE netanvil_errors_total counter\n");
@@ -151,26 +151,38 @@ fn format_prometheus(p: &DistributedProgressUpdate) -> String {
 
     out.push_str("# HELP netanvil_active_nodes Number of active agent nodes.\n");
     out.push_str("# TYPE netanvil_active_nodes gauge\n");
-    out.push_str(&format!("netanvil_active_nodes{label} {}\n", p.active_nodes));
+    out.push_str(&format!(
+        "netanvil_active_nodes{label} {}\n",
+        p.active_nodes
+    ));
 
     // -- Latency gauges (max across nodes, conservative) --
     out.push_str(
         "# HELP netanvil_latency_p50_seconds 50th percentile latency (max across agents).\n",
     );
     out.push_str("# TYPE netanvil_latency_p50_seconds gauge\n");
-    out.push_str(&format!("netanvil_latency_p50_seconds{label} {:.6}\n", p50 / 1000.0));
+    out.push_str(&format!(
+        "netanvil_latency_p50_seconds{label} {:.6}\n",
+        p50 / 1000.0
+    ));
 
     out.push_str(
         "# HELP netanvil_latency_p90_seconds 90th percentile latency (max across agents).\n",
     );
     out.push_str("# TYPE netanvil_latency_p90_seconds gauge\n");
-    out.push_str(&format!("netanvil_latency_p90_seconds{label} {:.6}\n", p90 / 1000.0));
+    out.push_str(&format!(
+        "netanvil_latency_p90_seconds{label} {:.6}\n",
+        p90 / 1000.0
+    ));
 
     out.push_str(
         "# HELP netanvil_latency_p99_seconds 99th percentile latency (max across agents).\n",
     );
     out.push_str("# TYPE netanvil_latency_p99_seconds gauge\n");
-    out.push_str(&format!("netanvil_latency_p99_seconds{label} {:.6}\n", p99 / 1000.0));
+    out.push_str(&format!(
+        "netanvil_latency_p99_seconds{label} {:.6}\n",
+        p99 / 1000.0
+    ));
 
     // -- Per-node breakdown --
     out.push_str("# HELP netanvil_node_requests_total Total requests per agent node.\n");

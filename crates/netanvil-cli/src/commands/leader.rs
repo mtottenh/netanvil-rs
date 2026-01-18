@@ -4,9 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use netanvil_distributed::{
-    LeaderMetricsState, LeaderServer, QueueConfig, ResultStore, TestQueue,
-};
+use netanvil_distributed::{LeaderMetricsState, LeaderServer, QueueConfig, ResultStore, TestQueue};
 use netanvil_types::{ConnectionConfig, SchedulerConfig, TestConfig};
 
 use crate::parsing::*;
@@ -228,8 +226,7 @@ pub fn run(
 
     // Temporary result store (one-shot mode doesn't persist to disk).
     let tmp_dir = tempfile::tempdir().context("failed to create temp dir for results")?;
-    let store =
-        ResultStore::open(tmp_dir.path(), 1).context("failed to open temp result store")?;
+    let store = ResultStore::open(tmp_dir.path(), 1).context("failed to open temp result store")?;
 
     let queue = TestQueue::new(store);
     let test_id = queue.enqueue_config(config, summary);

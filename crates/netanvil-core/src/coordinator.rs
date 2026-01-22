@@ -197,6 +197,18 @@ pub struct Coordinator {
     last_assessment: SaturationAssessment,
 }
 
+/// Upsert signals into a target vec: existing keys are overwritten, new keys are appended.
+/// This encodes the signal priority: sources merged later override earlier ones.
+fn upsert_signals(target: &mut Vec<(String, f64)>, source: Vec<(String, f64)>) {
+    for (name, value) in source {
+        if let Some(existing) = target.iter_mut().find(|(k, _)| k == &name) {
+            existing.1 = value;
+        } else {
+            target.push((name, value));
+        }
+    }
+}
+
 impl Coordinator {
     pub fn new(
         rate_controller: Box<dyn RateController>,
@@ -390,30 +402,10 @@ impl Coordinator {
         // Response signals are already in summary.external_signals from to_summary().
         // Polled signals are added next; pushed signals override any with the same key.
         if let Some(ref mut source) = self.external_signal_source {
-            for (name, value) in source() {
-                if let Some(existing) = summary
-                    .external_signals
-                    .iter_mut()
-                    .find(|(k, _)| k == &name)
-                {
-                    existing.1 = value;
-                } else {
-                    summary.external_signals.push((name, value));
-                }
-            }
+            upsert_signals(&mut summary.external_signals, source());
         }
         if let Some(ref mut source) = self.pushed_signal_source {
-            for (name, value) in source() {
-                if let Some(existing) = summary
-                    .external_signals
-                    .iter_mut()
-                    .find(|(k, _)| k == &name)
-                {
-                    existing.1 = value;
-                } else {
-                    summary.external_signals.push((name, value));
-                }
-            }
+            upsert_signals(&mut summary.external_signals, source());
         }
         if !summary.external_signals.is_empty() {
             tracing::info!(signals = ?summary.external_signals, "external signals for rate controller");
@@ -424,9 +416,7 @@ impl Coordinator {
                 // Skip controller.update() — controller state is frozen.
                 RateDecision { target_rps: rps }
             }
-            netanvil_types::HoldState::Released => {
-                self.rate_controller.update(&summary)
-            }
+            netanvil_types::HoldState::Released => self.rate_controller.update(&summary),
         };
 
         // Push this tick's counters into the sliding window for
@@ -495,19 +485,12 @@ impl Coordinator {
         let timer_cmd = match cmd {
             WorkerCommand::UpdateRate(rps) => {
                 // Deprecated: translate to hold semantics.
-                tracing::warn!(
-                    rps,
-                    "UpdateRate is deprecated, use Hold instead"
-                );
+                tracing::warn!(rps, "UpdateRate is deprecated, use Hold instead");
                 self.hold_state = netanvil_types::HoldState::Held { rps };
                 Some(TimerCommand::UpdateRate(rps))
             }
-            WorkerCommand::UpdateTargets(targets) => {
-                Some(TimerCommand::UpdateTargets(targets))
-            }
-            WorkerCommand::UpdateMetadata(headers) => {
-                Some(TimerCommand::UpdateMetadata(headers))
-            }
+            WorkerCommand::UpdateTargets(targets) => Some(TimerCommand::UpdateTargets(targets)),
+            WorkerCommand::UpdateMetadata(headers) => Some(TimerCommand::UpdateMetadata(headers)),
             WorkerCommand::Stop => {
                 self.stopped = true;
                 Some(TimerCommand::Stop)

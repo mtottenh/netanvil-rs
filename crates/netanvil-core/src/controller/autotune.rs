@@ -1,35 +1,21 @@
-//! Shared autotuning logic for PID rate controllers.
+//! Autotuning logic for PID rate controllers.
 //!
-//! Provides the exploration state machine, Cohen-Coon gain computation,
-//! gain scheduling, and metric extraction. Used by both
-//! `AutotuningPidController` (single-metric) and `CompositePidController`
-//! (multi-constraint).
+//! Provides the exploration state machine and Cohen-Coon gain computation.
+//! Used by both `AutotuningPidController` (single-metric) and
+//! `CompositePidController` (multi-constraint).
+//!
+//! PID math (gain scheduling, PID state, step computation) lives in
+//! [`super::pid_math`] and is re-exported here for backwards compatibility.
 
 use std::time::Duration;
 
 use netanvil_types::{MetricsSummary, TargetMetric};
 
-// ---------------------------------------------------------------------------
-// Metric extraction (shared by all PID controllers)
-// ---------------------------------------------------------------------------
-
-/// Extract the current value of a target metric from a MetricsSummary.
-pub fn extract_metric(metric: &TargetMetric, summary: &MetricsSummary) -> f64 {
-    match metric {
-        TargetMetric::LatencyP50 => summary.latency_p50_ns as f64 / 1_000_000.0, // ns → ms
-        TargetMetric::LatencyP90 => summary.latency_p90_ns as f64 / 1_000_000.0,
-        TargetMetric::LatencyP99 => summary.latency_p99_ns as f64 / 1_000_000.0,
-        TargetMetric::ErrorRate => summary.error_rate * 100.0, // fraction → percentage
-        TargetMetric::ThroughputSend => summary.throughput_send_bps / 125_000.0, // bytes/s → Mbps
-        TargetMetric::ThroughputRecv => summary.throughput_recv_bps / 125_000.0,
-        TargetMetric::External { name } => summary
-            .external_signals
-            .iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| *v)
-            .unwrap_or(0.0),
-    }
-}
+// Re-export PID math so existing `use super::autotune::*` imports keep working.
+pub use super::pid_math::{
+    extract_metric, gain_schedule, pid_compute, pid_step_fixed, pid_step_with_scheduling,
+    pid_update_state, GainMultipliers, PidOutput, PidState, PidStepInput,
+};
 
 // ---------------------------------------------------------------------------
 // Exploration state machine
@@ -361,194 +347,4 @@ pub fn compute_cohen_coon_gains(
         kd: base_kd,
         dead_time_ticks,
     }
-}
-
-// ---------------------------------------------------------------------------
-// Gain scheduling
-// ---------------------------------------------------------------------------
-
-/// Gain multipliers for a specific operating region.
-#[derive(Debug, Clone, Copy)]
-pub struct GainMultipliers {
-    pub kp_scale: f64,
-    pub ki_scale: f64,
-    pub kd_scale: f64,
-    pub reset_integral: bool,
-}
-
-/// Determine gain multipliers based on normalized error (error / target).
-///
-/// Regions:
-/// - Ramp-up: far below target (error > 40% of target)
-/// - Approach: closing in (10-40%)
-/// - Tracking: near target (±10%)
-/// - Overshoot: above target (10-30% over)
-/// - Critical: way above target (>30% over)
-pub fn gain_schedule(normalized_error: f64) -> GainMultipliers {
-    match normalized_error {
-        e if e > 0.4 => GainMultipliers {
-            kp_scale: 2.0,
-            ki_scale: 0.5,
-            kd_scale: 1.0,
-            reset_integral: false,
-        },
-        e if e > 0.1 => GainMultipliers {
-            kp_scale: 1.0,
-            ki_scale: 0.8,
-            kd_scale: 1.5,
-            reset_integral: false,
-        },
-        e if e > -0.1 => GainMultipliers {
-            kp_scale: 0.7,
-            ki_scale: 1.0,
-            kd_scale: 1.0,
-            reset_integral: false,
-        },
-        e if e > -0.3 => GainMultipliers {
-            kp_scale: 1.5,
-            ki_scale: 0.3,
-            kd_scale: 2.0,
-            reset_integral: false,
-        },
-        _ => GainMultipliers {
-            kp_scale: 3.0,
-            ki_scale: 0.0,
-            kd_scale: 2.5,
-            reset_integral: true,
-        },
-    }
-}
-
-// ---------------------------------------------------------------------------
-// PID step computation (shared by all controllers)
-// ---------------------------------------------------------------------------
-
-/// PID state for one control loop.
-#[derive(Debug, Clone)]
-pub struct PidState {
-    pub integral: f64,
-    pub last_error: f64,
-    pub ema_value: f64,
-    pub ema_alpha: f64,
-}
-
-impl PidState {
-    pub fn new(smoothing: f64) -> Self {
-        Self {
-            integral: 0.0,
-            last_error: 0.0,
-            ema_value: 0.0,
-            ema_alpha: smoothing.clamp(0.0, 1.0),
-        }
-    }
-
-    /// Apply EMA smoothing to a raw metric value.
-    pub fn smooth(&mut self, raw: f64) -> f64 {
-        if self.ema_value == 0.0 && raw != 0.0 {
-            self.ema_value = raw;
-        } else {
-            self.ema_value = self.ema_alpha * raw + (1.0 - self.ema_alpha) * self.ema_value;
-        }
-        self.ema_value
-    }
-
-    /// Reset integral, derivative, and EMA state.
-    pub fn reset(&mut self) {
-        self.integral = 0.0;
-        self.last_error = 0.0;
-        self.ema_value = 0.0;
-    }
-}
-
-/// Input parameters for a single PID step.
-pub struct PidStepInput {
-    pub current_value: f64,
-    pub target_value: f64,
-    pub current_rps: f64,
-    pub min_rps: f64,
-    pub max_rps: f64,
-    pub kp: f64,
-    pub ki: f64,
-    pub kd: f64,
-}
-
-/// Compute a single PID step with gain scheduling.
-///
-/// Uses conditional integration anti-windup: the integral only accumulates
-/// when the output is not saturated in the error's direction. This prevents
-/// integral windup at the `min_rps`/`max_rps` clamp boundaries.
-///
-/// Returns the new RPS value.
-pub fn pid_step_with_scheduling(input: &PidStepInput, state: &mut PidState) -> f64 {
-    let error = input.target_value - input.current_value;
-    let normalized_error = if input.target_value.abs() > 1e-9 {
-        error / input.target_value
-    } else {
-        error
-    };
-
-    let mult = gain_schedule(normalized_error);
-    let kp = input.kp * mult.kp_scale;
-    let ki = input.ki * mult.ki_scale;
-    let kd = input.kd * mult.kd_scale;
-
-    if mult.reset_integral {
-        state.integral = 0.0;
-    }
-
-    let derivative = error - state.last_error;
-    state.last_error = error;
-
-    // Compute PID output with current integral (before accumulation)
-    let output = kp * error + ki * state.integral + kd * derivative;
-    let adj_raw = output * 0.05;
-    let adjustment = adj_raw.clamp(-0.20, 0.20);
-    let unclamped_rps = input.current_rps * (1.0 + adjustment);
-    let clamped_rps = unclamped_rps.clamp(input.min_rps, input.max_rps);
-
-    // Conditional integration anti-windup: suppress integral accumulation
-    // when EITHER clamp is saturated in the error's direction.
-    // Clamp 1: ±20% proportional adjustment limit
-    let adj_saturated = (adj_raw > 0.20 && error > 0.0) || (adj_raw < -0.20 && error < 0.0);
-    // Clamp 2: absolute min/max RPS bounds
-    let rps_saturated = (unclamped_rps > input.max_rps && error > 0.0)
-        || (unclamped_rps < input.min_rps && error < 0.0);
-    if !adj_saturated && !rps_saturated {
-        state.integral += error;
-        state.integral = state.integral.clamp(-1000.0, 1000.0);
-    }
-
-    clamped_rps
-}
-
-/// Compute a single PID step with fixed gains (no scheduling).
-///
-/// Uses conditional integration anti-windup: the integral only accumulates
-/// when the output is not saturated in the error's direction.
-///
-/// Returns the new RPS value.
-pub fn pid_step_fixed(input: &PidStepInput, state: &mut PidState) -> f64 {
-    let error = input.target_value - input.current_value;
-
-    let derivative = error - state.last_error;
-    state.last_error = error;
-
-    // Compute PID output with current integral (before accumulation)
-    let output = input.kp * error + input.ki * state.integral + input.kd * derivative;
-    let adj_raw = output * 0.05;
-    let adjustment = adj_raw.clamp(-0.20, 0.20);
-    let unclamped_rps = input.current_rps * (1.0 + adjustment);
-    let clamped_rps = unclamped_rps.clamp(input.min_rps, input.max_rps);
-
-    // Conditional integration anti-windup: suppress integral accumulation
-    // when EITHER clamp is saturated in the error's direction.
-    let adj_saturated = (adj_raw > 0.20 && error > 0.0) || (adj_raw < -0.20 && error < 0.0);
-    let rps_saturated = (unclamped_rps > input.max_rps && error > 0.0)
-        || (unclamped_rps < input.min_rps && error < 0.0);
-    if !adj_saturated && !rps_saturated {
-        state.integral += error;
-        state.integral = state.integral.clamp(-1000.0, 1000.0);
-    }
-
-    clamped_rps
 }

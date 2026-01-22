@@ -29,8 +29,7 @@ pub type GenericGeneratorFactory<S> =
     Box<dyn Fn(usize) -> Box<dyn netanvil_types::RequestGenerator<Spec = S>> + Send>;
 
 /// A factory closure that creates an [`netanvil_types::EventRecorder`] per core.
-pub type EventRecorderFactory =
-    Box<dyn Fn(usize) -> Box<dyn netanvil_types::EventRecorder> + Send>;
+pub type EventRecorderFactory = Box<dyn Fn(usize) -> Box<dyn netanvil_types::EventRecorder> + Send>;
 
 /// A factory closure that creates a [`netanvil_types::RequestTransformer`] per core (generic).
 pub type GenericTransformerFactory<S> =
@@ -42,10 +41,11 @@ pub type GeneratorFactory = GenericGeneratorFactory<netanvil_types::HttpRequestS
 /// HTTP-specific transformer factory (backward compatible alias).
 pub type TransformerFactory = GenericTransformerFactory<netanvil_types::HttpRequestSpec>;
 
-pub use controller::builder::build_rate_controller;
+pub use controller::builder::{build_arbiter, build_rate_controller};
 pub use controller::{
-    AutotuneParams, AutotuningPidController, CompositePidController, PidGainValues,
-    PidRateController, PidStepInput, RampConfig, RampRateController, SlowStart,
+    Arbiter, ArbiterConfig, AutotuneParams, AutotuningPidController, CompositePidController,
+    CongestionAvoidanceConfig, IncreasePolicyConfig, PidGainValues, PidRateController,
+    PidStepInput, RampConfig, RampRateController, RateChangeLimits, SlowStart,
     StaticRateController, StepRateController,
 };
 pub use coordinator::Coordinator;
@@ -56,9 +56,9 @@ pub use engine::{
 pub use generator::SimpleGenerator;
 pub use handle::IoWorkerHandle;
 pub use io_worker::{io_worker_loop, IoWorkerConfig};
+pub use lifecycle::{LifecycleCounter, SampleOutput, Sampler};
 pub use report::{ProgressLine, Report};
 pub use result::TestResult;
 pub use scheduler::{ConstantRateScheduler, PoissonScheduler};
 pub use timer_thread::TimerThreadHandle;
-pub use lifecycle::{LifecycleCounter, SampleOutput, Sampler};
 pub use transformer::{ConnectionPolicyTransformer, HeaderTransformer, NoopTransformer};

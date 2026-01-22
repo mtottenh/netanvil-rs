@@ -16,7 +16,7 @@ use netanvil_types::{
 
 use super::autotune::{
     self, ComputedGains, ExplorationManager, ExplorationPhase, MetricExploration, PidState,
-    CONSERVATIVE_GAINS,
+    PidStepInput, CONSERVATIVE_GAINS,
 };
 
 /// Per-constraint state within the composite controller.
@@ -151,11 +151,7 @@ impl CompositePidController {
         }
     }
 
-    pub fn set_constraint_limit(
-        &mut self,
-        index: usize,
-        limit: f64,
-    ) -> Result<f64, String> {
+    pub fn set_constraint_limit(&mut self, index: usize, limit: f64) -> Result<f64, String> {
         match &mut self.phase {
             Phase::Active { constraints } => {
                 if index >= constraints.len() {
@@ -169,9 +165,7 @@ impl CompositePidController {
                 constraints[index].limit = limit;
                 Ok(old)
             }
-            Phase::Exploring { .. } => {
-                Err("cannot modify constraints during exploration".into())
-            }
+            Phase::Exploring { .. } => Err("cannot modify constraints during exploration".into()),
         }
     }
 
@@ -196,9 +190,7 @@ impl CompositePidController {
                 constraints[index].kd = kd;
                 Ok(())
             }
-            Phase::Exploring { .. } => {
-                Err("cannot modify constraints during exploration".into())
-            }
+            Phase::Exploring { .. } => Err("cannot modify constraints during exploration".into()),
         }
     }
 
@@ -212,9 +204,13 @@ impl CompositePidController {
     fn find_constraint_index_by_metric(&self, metric_name: &str) -> Option<usize> {
         let constraints = match &self.phase {
             Phase::Active { constraints } => constraints,
-            Phase::Exploring { manual_constraints, .. } => manual_constraints,
+            Phase::Exploring {
+                manual_constraints, ..
+            } => manual_constraints,
         };
-        constraints.iter().position(|c| format!("{:?}", c.metric) == metric_name)
+        constraints
+            .iter()
+            .position(|c| format!("{:?}", c.metric) == metric_name)
     }
 
     /// Run the composite PID logic: compute each constraint's desired rate,
@@ -230,101 +226,57 @@ impl CompositePidController {
             return current_rps;
         }
 
-        // Phase 1: Compute each constraint's desired rate (read-only).
-        // Also track whether the ±20% adjustment clamp fired per constraint
-        // for anti-windup in Phase 3.
-        let mut desired_rates: Vec<f64> = Vec::with_capacity(constraints.len());
-        let mut raw_values: Vec<f64> = Vec::with_capacity(constraints.len());
-        let mut adj_saturated_flags: Vec<bool> = Vec::with_capacity(constraints.len());
+        // Phase 1: Compute each constraint's desired rate via pid_compute (read-only
+        // except for EMA smoothing). Collects PidOutputs for Phase 3 state updates.
+        let mut outputs: Vec<autotune::PidOutput> = Vec::with_capacity(constraints.len());
 
         for c in constraints.iter_mut() {
             let raw = autotune::extract_metric(&c.metric, summary);
-            let smoothed = c.pid.smooth(raw);
-            raw_values.push(smoothed);
+            c.pid.smooth(raw);
 
-            // Compute what rate this constraint wants (without mutating state yet)
-            let error = c.limit - smoothed;
-            let normalized_error = if c.limit.abs() > 1e-9 {
-                error / c.limit
-            } else {
-                error
-            };
-
-            // Compute PID output with tentative state
-            let tentative_integral = (c.pid.integral + error).clamp(-1000.0, 1000.0);
-            let derivative = error - c.pid.last_error;
-
-            let (kp, ki, kd) = if c.use_scheduling {
-                let mult = autotune::gain_schedule(normalized_error);
-                (
-                    c.kp * mult.kp_scale,
-                    c.ki * mult.ki_scale,
-                    c.kd * mult.kd_scale,
-                )
-            } else {
-                (c.kp, c.ki, c.kd)
-            };
-
-            let output = kp * error + ki * tentative_integral + kd * derivative;
-            let adj_raw = output * 0.05;
-            let adjustment = adj_raw.clamp(-0.20, 0.20);
-            let adj_saturated =
-                (adj_raw > 0.20 && error > 0.0) || (adj_raw < -0.20 && error < 0.0);
-            adj_saturated_flags.push(adj_saturated);
-            let rate = (current_rps * (1.0 + adjustment)).clamp(min_rps, max_rps);
-            desired_rates.push(rate);
+            let output = autotune::pid_compute(
+                &PidStepInput {
+                    current_value: c.pid.ema_value,
+                    target_value: c.limit,
+                    current_rps,
+                    min_rps,
+                    max_rps,
+                    kp: c.kp,
+                    ki: c.ki,
+                    kd: c.kd,
+                },
+                &c.pid,
+                c.use_scheduling,
+            );
+            outputs.push(output);
         }
 
-        // Phase 2: Select minimum rate (most constrained wins)
-        let selected_rate = desired_rates
-            .iter()
-            .cloned()
-            .fold(f64::INFINITY, f64::min)
-            .clamp(min_rps, max_rps);
-
-        // Find the binding constraint index
-        let binding_idx = desired_rates
+        // Phase 2: Select minimum rate (most constrained wins).
+        let binding_idx = outputs
             .iter()
             .enumerate()
-            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|(_, a), (_, b)| {
+                a.new_rps
+                    .partial_cmp(&b.new_rps)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(i, _)| i)
             .unwrap_or(0);
+
+        let selected_rate = outputs[binding_idx].new_rps.clamp(min_rps, max_rps);
 
         // Phase 3: Update PID state — binding constraint gets full update,
         // non-binding constraints decay their integral to prevent windup.
         for (i, c) in constraints.iter_mut().enumerate() {
-            let error = c.limit - raw_values[i];
-
             if i == binding_idx {
-                // Full PID state update for the binding constraint.
-                // Suppress integral accumulation when the ±20% adjustment
-                // clamp fired in the error's direction (anti-windup).
-                let suppress = adj_saturated_flags[i];
-                if c.use_scheduling {
-                    let normalized = if c.limit.abs() > 1e-9 {
-                        error / c.limit
-                    } else {
-                        error
-                    };
-                    let mult = autotune::gain_schedule(normalized);
-                    if mult.reset_integral {
-                        c.pid.integral = 0.0;
-                    } else if !suppress {
-                        c.pid.integral += error;
-                        c.pid.integral = c.pid.integral.clamp(-1000.0, 1000.0);
-                    }
-                } else if !suppress {
-                    c.pid.integral += error;
-                    c.pid.integral = c.pid.integral.clamp(-1000.0, 1000.0);
-                }
+                autotune::pid_update_state(&mut c.pid, &outputs[i]);
             } else {
-                // Non-binding: decay integral to prevent windup
+                // Non-binding: decay integral + small tracking to stay responsive.
+                c.pid.last_error = outputs[i].error;
                 c.pid.integral *= 0.95;
-                c.pid.integral += error * 0.1; // small tracking to stay responsive
+                c.pid.integral += outputs[i].error * 0.1;
                 c.pid.integral = c.pid.integral.clamp(-1000.0, 1000.0);
             }
-
-            c.pid.last_error = error;
         }
 
         selected_rate
@@ -562,15 +514,18 @@ impl RateController for CompositePidController {
     ) -> Result<serde_json::Value, String> {
         match action {
             "set_constraint_limit" => {
-                let index = if let Some(idx) = params.get("constraint_index").and_then(|v| v.as_u64()) {
-                    idx as usize
-                } else if let Some(metric) = params.get("metric").and_then(|v| v.as_str()) {
-                    self.find_constraint_index_by_metric(metric)
-                        .ok_or_else(|| format!("no constraint with metric '{}'", metric))?
-                } else {
-                    return Err("missing 'constraint_index' or 'metric' field".into());
-                };
-                let limit = params.get("limit").and_then(|v| v.as_f64())
+                let index =
+                    if let Some(idx) = params.get("constraint_index").and_then(|v| v.as_u64()) {
+                        idx as usize
+                    } else if let Some(metric) = params.get("metric").and_then(|v| v.as_str()) {
+                        self.find_constraint_index_by_metric(metric)
+                            .ok_or_else(|| format!("no constraint with metric '{}'", metric))?
+                    } else {
+                        return Err("missing 'constraint_index' or 'metric' field".into());
+                    };
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_f64())
                     .ok_or("missing 'limit' field")?;
                 let old = self.set_constraint_limit(index, limit)?;
                 Ok(serde_json::json!({
@@ -581,14 +536,22 @@ impl RateController for CompositePidController {
                 }))
             }
             "set_constraint_gains" => {
-                let index = params.get("constraint_index")
+                let index = params
+                    .get("constraint_index")
                     .and_then(|v| v.as_u64())
-                    .ok_or("missing 'constraint_index' field")? as usize;
-                let kp = params.get("kp").and_then(|v| v.as_f64())
+                    .ok_or("missing 'constraint_index' field")?
+                    as usize;
+                let kp = params
+                    .get("kp")
+                    .and_then(|v| v.as_f64())
                     .ok_or("missing 'kp' field")?;
-                let ki = params.get("ki").and_then(|v| v.as_f64())
+                let ki = params
+                    .get("ki")
+                    .and_then(|v| v.as_f64())
                     .ok_or("missing 'ki' field")?;
-                let kd = params.get("kd").and_then(|v| v.as_f64())
+                let kd = params
+                    .get("kd")
+                    .and_then(|v| v.as_f64())
                     .ok_or("missing 'kd' field")?;
                 self.set_constraint_gains(index, kp, ki, kd)?;
                 Ok(serde_json::json!({
@@ -598,7 +561,9 @@ impl RateController for CompositePidController {
                 }))
             }
             "set_max_rps" => {
-                let max = params.get("max_rps").and_then(|v| v.as_f64())
+                let max = params
+                    .get("max_rps")
+                    .and_then(|v| v.as_f64())
                     .ok_or("missing 'max_rps' field")?;
                 let old = self.max_rps;
                 self.set_max_rps(max);
@@ -609,7 +574,9 @@ impl RateController for CompositePidController {
                 }))
             }
             "set_min_rps" => {
-                let min = params.get("min_rps").and_then(|v| v.as_f64())
+                let min = params
+                    .get("min_rps")
+                    .and_then(|v| v.as_f64())
                     .ok_or("missing 'min_rps' field")?;
                 let old = self.min_rps;
                 self.set_min_rps(min);
@@ -620,7 +587,8 @@ impl RateController for CompositePidController {
                 }))
             }
             _ => Err(format!(
-                "action '{}' is not valid for controller type 'composite_pid'", action
+                "action '{}' is not valid for controller type 'composite_pid'",
+                action
             )),
         }
     }

@@ -22,11 +22,15 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use netanvil_types::{
-    ControllerInfo, ControllerType, ExternalConstraintConfig, MetricsSummary, MissingSignalBehavior,
-    RateController, RateDecision, SignalDirection,
+    ControllerInfo, ControllerType, ExternalConstraintConfig, MetricsSummary,
+    MissingSignalBehavior, RateController, RateDecision, SignalDirection,
 };
 
 use super::ceiling::ProgressiveCeiling;
+use super::constraints::{
+    apply_persistence, graduated_action, update_streak, ConstraintAction, ConstraintClass,
+    ConstraintEvaluation, ConstraintId, ConstraintState, SEVERITY_BYPASS_PERSISTENCE,
+};
 
 // ---------------------------------------------------------------------------
 // AIMD parameters — all interpretable and independently tunable.
@@ -69,199 +73,6 @@ const CONGESTION_AVOIDANCE_THRESHOLD: f64 = 0.85;
 const ADDITIVE_INCREASE_FRACTION: f64 = 0.01;
 
 // ---------------------------------------------------------------------------
-// Unified constraint system
-// ---------------------------------------------------------------------------
-
-/// Severity above which persistence is bypassed (immediate backoff).
-const SEVERITY_BYPASS_PERSISTENCE: f64 = 3.0;
-
-/// Minimum ticks after backoff before recovery can be declared.
-const RECOVERY_MIN_TICKS: u32 = 3;
-
-/// Minimum recovery samples before EMA is trusted over seed.
-const RECOVERY_MIN_SAMPLES: u32 = 3;
-
-/// Severity threshold below which recovery is declared.
-const RECOVERY_SEVERITY_THRESHOLD: f64 = 0.9;
-
-/// Actions a constraint can request, ordered from least to most severe.
-/// `Ord` is derived with variants in ascending severity order so that
-/// `action.min(Hold)` caps severity at Hold.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum ConstraintAction {
-    AllowIncrease,
-    Hold,
-    GentleBackoff,
-    ModerateBackoff,
-    HardBackoff,
-}
-
-impl ConstraintAction {
-    fn backoff_factor(self) -> f64 {
-        match self {
-            Self::GentleBackoff => BACKOFF_GENTLE,
-            Self::ModerateBackoff => BACKOFF_MODERATE,
-            Self::HardBackoff => BACKOFF_HARD,
-            _ => 1.0,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::AllowIncrease => "increase",
-            Self::Hold => "hold",
-            Self::GentleBackoff => "backoff_gentle",
-            Self::ModerateBackoff => "backoff_moderate",
-            Self::HardBackoff => "backoff_hard",
-        }
-    }
-
-    fn is_backoff(self) -> bool {
-        matches!(
-            self,
-            Self::GentleBackoff | Self::ModerateBackoff | Self::HardBackoff
-        )
-    }
-}
-
-/// Whether a constraint bypasses or respects the known-good floor on backoff.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum ConstraintClass {
-    /// Floor applies on backoff (latency, error rate, external).
-    OperatingPoint,
-    /// Floor is BYPASSED on backoff (timeout, in-flight drops).
-    Catastrophic,
-}
-
-/// Identifies a constraint type.
-#[derive(Debug, Clone, PartialEq)]
-enum ConstraintId {
-    Timeout,
-    InFlightDrop,
-    Latency,
-    ErrorRate,
-    External(String),
-}
-
-impl ConstraintId {
-    fn label(&self) -> &str {
-        match self {
-            Self::Timeout => "timeout",
-            Self::InFlightDrop => "inflight_drop",
-            Self::Latency => "latency",
-            Self::ErrorRate => "error_rate",
-            Self::External(name) => name.as_str(),
-        }
-    }
-}
-
-/// Result of evaluating a single constraint.
-struct ConstraintEvaluation {
-    id: ConstraintId,
-    class: ConstraintClass,
-    severity: f64,
-    action: ConstraintAction,
-}
-
-/// Per-constraint state tracking.
-struct ConstraintState {
-    /// Consecutive ticks where severity >= 1.0.
-    violation_streak: u32,
-    /// Ticks of violation required before backoff is confirmed.
-    persistence: u32,
-    /// Ticks since this signal was last seen (external constraints only).
-    ticks_since_seen: u32,
-    /// Consecutive ticks where the signal is stale/missing (external only).
-    missing_streak: u32,
-    /// EMA of observed recovery time in ticks.
-    recovery_ema_ticks: f64,
-    /// Number of recovery observations. EMA not trusted until >= RECOVERY_MIN_SAMPLES.
-    recovery_samples: u32,
-    /// Fallback recovery estimate used until EMA earns trust.
-    initial_seed: f64,
-    /// Ticks since this constraint last triggered backoff (for measuring recovery).
-    /// `None` when not tracking a recovery.
-    ticks_since_backoff: Option<u32>,
-}
-
-impl ConstraintState {
-    fn new(persistence: u32, initial_seed: f64) -> Self {
-        Self {
-            violation_streak: 0,
-            persistence,
-            ticks_since_seen: 0,
-            missing_streak: 0,
-            recovery_ema_ticks: initial_seed,
-            recovery_samples: 0,
-            initial_seed,
-            ticks_since_backoff: None,
-        }
-    }
-
-    /// Cooldown estimate: trust EMA only with enough samples, otherwise
-    /// use the larger of EMA and initial seed.
-    fn cooldown_estimate(&self) -> f64 {
-        if self.recovery_samples >= RECOVERY_MIN_SAMPLES {
-            self.recovery_ema_ticks
-        } else {
-            self.recovery_ema_ticks.max(self.initial_seed)
-        }
-    }
-}
-
-/// Maps continuous severity to a graduated action.
-/// Used by Latency and External constraints.
-///
-/// Thresholds: `<0.7` AllowIncrease, `[0.7,1.0)` Hold, `[1.0,1.5)` Gentle,
-/// `[1.5,2.0)` Moderate, `≥2.0` Hard.
-fn graduated_action(severity: f64) -> ConstraintAction {
-    if severity < 0.7 {
-        ConstraintAction::AllowIncrease
-    } else if severity < 1.0 {
-        ConstraintAction::Hold
-    } else if severity < 1.5 {
-        ConstraintAction::GentleBackoff
-    } else if severity < 2.0 {
-        ConstraintAction::ModerateBackoff
-    } else {
-        ConstraintAction::HardBackoff
-    }
-}
-
-/// Updates violation streak with hysteresis.
-///
-/// Streak increments on violation (severity >= 1.0), resets only in the
-/// AllowIncrease zone (severity < 0.7), and is maintained in the Hold
-/// band `[0.7, 1.0)`. This prevents rapid flapping at the boundary.
-fn update_streak(streak: &mut u32, severity: f64) {
-    if severity >= 1.0 {
-        *streak += 1;
-    } else if severity < 0.7 {
-        *streak = 0;
-    }
-    // [0.7, 1.0): maintained (no increment, no reset)
-}
-
-/// Persistence gate: backoff actions are downgraded to Hold when the
-/// streak hasn't met the persistence requirement and severity doesn't
-/// bypass it. AllowIncrease and Hold pass through ungated.
-fn apply_persistence(
-    action: ConstraintAction,
-    streak: u32,
-    persistence: u32,
-    severity: f64,
-) -> ConstraintAction {
-    if !action.is_backoff() {
-        return action;
-    }
-    if streak >= persistence || severity > SEVERITY_BYPASS_PERSISTENCE {
-        action
-    } else {
-        ConstraintAction::Hold
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Constraint evaluation
 // ---------------------------------------------------------------------------
 
@@ -269,7 +80,6 @@ fn apply_persistence(
 struct EvalContext<'a> {
     summary: &'a MetricsSummary,
     current_rps: f64,
-    self_caused: bool,
     max_error_rate_pct: f64,
     target_p99_ms: f64,
 }
@@ -327,28 +137,12 @@ impl Constraint {
         }
     }
 
-    /// Advance recovery tracking for this constraint.
-    /// Call each tick with the constraint's current severity.
     fn advance_recovery(&mut self, severity: f64) {
-        let state = self.state_mut();
-        if let Some(ref mut ticks) = state.ticks_since_backoff {
-            *ticks += 1;
-            // Recovery declared when enough ticks have passed AND severity
-            // is below the recovery threshold.
-            if *ticks >= RECOVERY_MIN_TICKS && severity < RECOVERY_SEVERITY_THRESHOLD {
-                let recovery_ticks = *ticks as f64;
-                state.recovery_samples += 1;
-                state.recovery_ema_ticks = RECOVERY_EMA_ALPHA * recovery_ticks
-                    + (1.0 - RECOVERY_EMA_ALPHA) * state.recovery_ema_ticks;
-                state.ticks_since_backoff = None;
-            }
-        }
+        self.state_mut().advance_recovery(severity);
     }
 
-    /// Start or restart recovery tracking. If already tracking (re-backoff
-    /// before recovery completed), discard the in-progress measurement.
     fn start_recovery_tracking(&mut self) {
-        self.state_mut().ticks_since_backoff = Some(0);
+        self.state_mut().start_recovery_tracking();
     }
 
     fn evaluate(&mut self, ctx: &EvalContext) -> Option<ConstraintEvaluation> {
@@ -380,8 +174,7 @@ impl Constraint {
             return None;
         }
 
-        let timeout_fraction =
-            ctx.summary.timeout_count as f64 / ctx.summary.total_requests as f64;
+        let timeout_fraction = ctx.summary.timeout_count as f64 / ctx.summary.total_requests as f64;
         let hard_threshold = (ctx.max_error_rate_pct / 100.0 * 2.5).max(0.05);
         let soft_threshold = (ctx.max_error_rate_pct / 100.0 * 0.5).max(0.01);
 
@@ -402,8 +195,12 @@ impl Constraint {
         };
 
         update_streak(&mut state.violation_streak, severity);
-        let action =
-            apply_persistence(raw_action, state.violation_streak, state.persistence, severity);
+        let action = apply_persistence(
+            raw_action,
+            state.violation_streak,
+            state.persistence,
+            severity,
+        );
 
         Some(ConstraintEvaluation {
             id: ConstraintId::Timeout,
@@ -442,8 +239,12 @@ impl Constraint {
         };
 
         update_streak(&mut state.violation_streak, severity);
-        let action =
-            apply_persistence(raw_action, state.violation_streak, state.persistence, severity);
+        let action = apply_persistence(
+            raw_action,
+            state.violation_streak,
+            state.persistence,
+            severity,
+        );
 
         Some(ConstraintEvaluation {
             id: ConstraintId::InFlightDrop,
@@ -497,16 +298,12 @@ impl Constraint {
         let raw_action = graduated_action(severity);
 
         update_streak(&mut state.violation_streak, severity);
-        let action =
-            apply_persistence(raw_action, state.violation_streak, state.persistence, severity);
-
-        // self_caused override: caps at Hold for external mild noise.
-        // Applied AFTER persistence gate; only softens, never strengthens.
-        let action = if !ctx.self_caused && severity < 1.5 {
-            action.min(ConstraintAction::Hold)
-        } else {
-            action
-        };
+        let action = apply_persistence(
+            raw_action,
+            state.violation_streak,
+            state.persistence,
+            severity,
+        );
 
         Some(ConstraintEvaluation {
             id: ConstraintId::Latency,
@@ -543,8 +340,12 @@ impl Constraint {
         };
 
         update_streak(&mut state.violation_streak, severity);
-        let action =
-            apply_persistence(raw_action, state.violation_streak, state.persistence, severity);
+        let action = apply_persistence(
+            raw_action,
+            state.violation_streak,
+            state.persistence,
+            severity,
+        );
 
         Some(ConstraintEvaluation {
             id: ConstraintId::ErrorRate,
@@ -622,15 +423,20 @@ impl Constraint {
             match config.on_missing {
                 MissingSignalBehavior::Ignore => return None,
                 MissingSignalBehavior::Hold => (0.85, ConstraintAction::Hold),
-                MissingSignalBehavior::Backoff => {
-                    (SEVERITY_BYPASS_PERSISTENCE + 1.0, ConstraintAction::HardBackoff)
-                }
+                MissingSignalBehavior::Backoff => (
+                    SEVERITY_BYPASS_PERSISTENCE + 1.0,
+                    ConstraintAction::HardBackoff,
+                ),
             }
         };
 
         update_streak(&mut state.violation_streak, severity);
-        let action =
-            apply_persistence(raw_action, state.violation_streak, state.persistence, severity);
+        let action = apply_persistence(
+            raw_action,
+            state.violation_streak,
+            state.persistence,
+            severity,
+        );
 
         Some(ConstraintEvaluation {
             id: ConstraintId::External(config.signal_name.clone()),
@@ -722,11 +528,8 @@ impl RampRateController {
         } else {
             DEFAULT_SMOOTHING_WINDOW
         };
-        let ceiling = ProgressiveCeiling::new(
-            config.warmup_rps,
-            config.max_rps,
-            config.test_duration / 2,
-        );
+        let ceiling =
+            ProgressiveCeiling::new(config.warmup_rps, config.max_rps, config.test_duration / 2);
 
         let mut constraints = vec![
             Constraint::Timeout {
@@ -791,13 +594,21 @@ impl RampRateController {
     pub fn set_max_error_rate(&mut self, rate: f64) {
         let old = self.config.max_error_rate;
         self.config.max_error_rate = rate;
-        tracing::info!(old_max_error_rate = old, new_max_error_rate = rate, "ramp: max error rate updated");
+        tracing::info!(
+            old_max_error_rate = old,
+            new_max_error_rate = rate,
+            "ramp: max error rate updated"
+        );
     }
 
     pub fn set_min_rps(&mut self, min_rps: f64) {
         let old = self.config.min_rps;
         self.config.min_rps = min_rps;
-        tracing::info!(old_min_rps = old, new_min_rps = min_rps, "ramp: min RPS updated");
+        tracing::info!(
+            old_min_rps = old,
+            new_min_rps = min_rps,
+            "ramp: min RPS updated"
+        );
     }
 
     fn transition_to_ramping(&mut self) {
@@ -845,10 +656,7 @@ impl RampRateController {
 
         // 0. Ratio-freeze band-aid: if achieved completions vastly exceed
         // the target rate, the feedback signal is corrupted. Freeze.
-        if self.config.enable_ratio_freeze
-            && self.current_rps > 0.0
-            && self.ramping_ticks > 10
-        {
+        if self.config.enable_ratio_freeze && self.current_rps > 0.0 && self.ramping_ticks > 10 {
             let ratio = summary.request_rate / self.current_rps;
             if ratio > 2.0 {
                 tracing::warn!(
@@ -884,7 +692,6 @@ impl RampRateController {
         let ctx = EvalContext {
             summary,
             current_rps: self.current_rps,
-            self_caused,
             max_error_rate_pct: self.config.max_error_rate,
             target_p99_ms: self.target_p99_ms,
         };
@@ -892,6 +699,17 @@ impl RampRateController {
         for constraint in &mut self.constraints {
             if let Some(eval) = constraint.evaluate(&ctx) {
                 evaluations.push(eval);
+            }
+        }
+
+        // 3b. Self-caused override (ramp-controller policy, not generic).
+        // Caps latency at Hold when the spike is external (not self-caused)
+        // and mild (severity < 1.5). Applied after evaluation; only softens.
+        if !self_caused {
+            for eval in &mut evaluations {
+                if eval.id == ConstraintId::Latency && eval.severity < 1.5 {
+                    eval.action = eval.action.min(ConstraintAction::Hold);
+                }
             }
         }
 
@@ -933,7 +751,9 @@ impl RampRateController {
         }
 
         for eval in &evaluations {
-            if eval.action >= ConstraintAction::Hold && eval.action != ConstraintAction::AllowIncrease {
+            if eval.action >= ConstraintAction::Hold
+                && eval.action != ConstraintAction::AllowIncrease
+            {
                 let streak = self
                     .constraints
                     .iter()
@@ -971,7 +791,10 @@ impl RampRateController {
             let desired = match eval.action {
                 ConstraintAction::AllowIncrease => increase_rate,
                 ConstraintAction::Hold => self.current_rps,
-                action => self.current_rps * action.backoff_factor(),
+                action => {
+                    self.current_rps
+                        * action.backoff_factor(BACKOFF_GENTLE, BACKOFF_MODERATE, BACKOFF_HARD)
+                }
             };
             if desired < min_desired {
                 min_desired = desired;
@@ -1000,11 +823,13 @@ impl RampRateController {
                 let desired = match evaluations[i].action {
                     ConstraintAction::AllowIncrease => increase_rate,
                     ConstraintAction::Hold => self.current_rps,
-                    action => self.current_rps * action.backoff_factor(),
+                    action => {
+                        self.current_rps
+                            * action.backoff_factor(BACKOFF_GENTLE, BACKOFF_MODERATE, BACKOFF_HARD)
+                    }
                 };
                 time_ceiling < desired
-            })
-        {
+            }) {
             "ceiling"
         } else {
             binding_label
@@ -1012,8 +837,7 @@ impl RampRateController {
 
         // 9. Apply known-good floor — bypassed for Catastrophic binding constraints.
         self.update_known_good();
-        let floor =
-            (self.max_recent_rate * KNOWN_GOOD_FLOOR_FRACTION).max(self.config.min_rps);
+        let floor = (self.max_recent_rate * KNOWN_GOOD_FLOOR_FRACTION).max(self.config.min_rps);
         let floored = match binding_class {
             Some(ConstraintClass::Catastrophic) => false,
             _ => {
@@ -1101,7 +925,13 @@ impl RampRateController {
                     ConstraintId::ErrorRate => "err",
                     ConstraintId::External(name) => name.as_str(),
                 };
-                format!("{}:{:.1}/{}(s={})", short_id, e.severity, e.action.label(), streak)
+                format!(
+                    "{}:{:.1}/{}(s={})",
+                    short_id,
+                    e.severity,
+                    e.action.label(),
+                    streak
+                )
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -1150,9 +980,15 @@ impl RateController for RampRateController {
                         tracing::debug!(
                             p99_ms = format!("{:.2}", p99_ms),
                             samples = self.warmup_p99_samples.len(),
-                            elapsed_secs = format!("{:.1}", self.warmup_start.elapsed().as_secs_f64()),
-                            remaining_secs = format!("{:.1}", self.config.warmup_duration
-                                .saturating_sub(self.warmup_start.elapsed()).as_secs_f64()),
+                            elapsed_secs =
+                                format!("{:.1}", self.warmup_start.elapsed().as_secs_f64()),
+                            remaining_secs = format!(
+                                "{:.1}",
+                                self.config
+                                    .warmup_duration
+                                    .saturating_sub(self.warmup_start.elapsed())
+                                    .as_secs_f64()
+                            ),
                             "ramp warmup sample"
                         );
                     }
@@ -1355,122 +1191,5 @@ impl RateController for RampRateController {
                 action
             )),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn graduated_action_boundaries() {
-        // AllowIncrease: severity < 0.7
-        assert_eq!(graduated_action(0.0), ConstraintAction::AllowIncrease);
-        assert_eq!(graduated_action(0.5), ConstraintAction::AllowIncrease);
-        assert_eq!(graduated_action(0.69), ConstraintAction::AllowIncrease);
-
-        // Hold: [0.7, 1.0)
-        assert_eq!(graduated_action(0.7), ConstraintAction::Hold);
-        assert_eq!(graduated_action(0.85), ConstraintAction::Hold);
-        assert_eq!(graduated_action(0.99), ConstraintAction::Hold);
-
-        // GentleBackoff: [1.0, 1.5)
-        assert_eq!(graduated_action(1.0), ConstraintAction::GentleBackoff);
-        assert_eq!(graduated_action(1.33), ConstraintAction::GentleBackoff);
-        assert_eq!(graduated_action(1.49), ConstraintAction::GentleBackoff);
-
-        // ModerateBackoff: [1.5, 2.0)
-        assert_eq!(graduated_action(1.5), ConstraintAction::ModerateBackoff);
-        assert_eq!(graduated_action(1.75), ConstraintAction::ModerateBackoff);
-        assert_eq!(graduated_action(1.99), ConstraintAction::ModerateBackoff);
-
-        // HardBackoff: >= 2.0
-        assert_eq!(graduated_action(2.0), ConstraintAction::HardBackoff);
-        assert_eq!(graduated_action(5.0), ConstraintAction::HardBackoff);
-        assert_eq!(graduated_action(100.0), ConstraintAction::HardBackoff);
-    }
-
-    #[test]
-    fn streak_hysteresis_rules() {
-        let mut streak = 0u32;
-
-        // Violation zone: severity >= 1.0 → increment
-        update_streak(&mut streak, 1.0);
-        assert_eq!(streak, 1);
-        update_streak(&mut streak, 1.5);
-        assert_eq!(streak, 2);
-
-        // Hold band: [0.7, 1.0) → maintain
-        update_streak(&mut streak, 0.85);
-        assert_eq!(streak, 2, "hold band should not change streak");
-
-        // Clean zone: < 0.7 → reset
-        update_streak(&mut streak, 0.5);
-        assert_eq!(streak, 0, "clean zone should reset streak");
-    }
-
-    #[test]
-    fn persistence_gating() {
-        // AllowIncrease passes through
-        assert_eq!(
-            apply_persistence(ConstraintAction::AllowIncrease, 0, 2, 0.5),
-            ConstraintAction::AllowIncrease
-        );
-
-        // Hold passes through
-        assert_eq!(
-            apply_persistence(ConstraintAction::Hold, 0, 2, 0.85),
-            ConstraintAction::Hold
-        );
-
-        // Backoff with streak < persistence → Hold
-        assert_eq!(
-            apply_persistence(ConstraintAction::GentleBackoff, 1, 2, 1.2),
-            ConstraintAction::Hold
-        );
-
-        // Backoff with streak >= persistence → passes
-        assert_eq!(
-            apply_persistence(ConstraintAction::GentleBackoff, 2, 2, 1.2),
-            ConstraintAction::GentleBackoff
-        );
-
-        // Backoff with severity > 3.0 bypasses persistence
-        assert_eq!(
-            apply_persistence(ConstraintAction::HardBackoff, 0, 5, 3.5),
-            ConstraintAction::HardBackoff
-        );
-    }
-
-    #[test]
-    fn constraint_action_ordering() {
-        // Verify Ord gives ascending severity
-        assert!(ConstraintAction::AllowIncrease < ConstraintAction::Hold);
-        assert!(ConstraintAction::Hold < ConstraintAction::GentleBackoff);
-        assert!(ConstraintAction::GentleBackoff < ConstraintAction::ModerateBackoff);
-        assert!(ConstraintAction::ModerateBackoff < ConstraintAction::HardBackoff);
-
-        // min caps at the less severe action
-        assert_eq!(
-            ConstraintAction::GentleBackoff.min(ConstraintAction::Hold),
-            ConstraintAction::Hold
-        );
-    }
-
-    #[test]
-    fn constraint_state_cooldown_estimate() {
-        // Fresh state: uses seed
-        let state = ConstraintState::new(1, 20.0);
-        assert_eq!(state.cooldown_estimate(), 20.0);
-
-        // After some recovery samples (< MIN_SAMPLES): max(ema, seed)
-        let mut state = ConstraintState::new(1, 20.0);
-        state.recovery_ema_ticks = 10.0;
-        state.recovery_samples = 2; // < RECOVERY_MIN_SAMPLES (3)
-        assert_eq!(state.cooldown_estimate(), 20.0); // max(10, 20)
-
-        // After enough samples: use EMA directly
-        state.recovery_samples = 3;
-        assert_eq!(state.cooldown_estimate(), 10.0); // trust EMA
     }
 }

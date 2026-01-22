@@ -1,7 +1,12 @@
 use std::time::{Duration, Instant};
 
-use netanvil_types::{PidGains, RateConfig, RateController};
+use netanvil_types::{PidGains, RateConfig, RateController, TargetMetric};
 
+use super::arbiter::{Arbiter, ArbiterConfig};
+use super::constraint::Constraint;
+use super::pid_constraint::PidConstraint;
+use super::smoothing::Smoother;
+use super::threshold::ThresholdConstraint;
 use super::{
     AutotuneParams, AutotuningPidController, CompositePidController, PidGainValues,
     PidRateController, RampConfig, RampRateController, SlowStart, StaticRateController,
@@ -113,7 +118,8 @@ pub fn build_rate_controller(
             tracing::info!(
                 initial_rps,
                 num_constraints = constraints.len(),
-                min_rps, max_rps,
+                min_rps,
+                max_rps,
                 "rate controller: composite PID (slow-start wrapped)"
             );
             let pid = CompositePidController::new(
@@ -145,7 +151,8 @@ pub fn build_rate_controller(
                 ?warmup_duration,
                 latency_multiplier,
                 max_error_rate,
-                min_rps, max_rps,
+                min_rps,
+                max_rps,
                 num_external_constraints = external_constraints.len(),
                 "rate controller: ramp (AIMD)"
             );
@@ -167,4 +174,164 @@ pub fn build_rate_controller(
         }
     };
     controller
+}
+
+/// Build an `Arbiter` from a [`RateConfig`].
+///
+/// This constructs the unified constraint-arbitrating controller for any
+/// feedback-based rate config. Static and Step configs are not supported
+/// (they have no constraints to arbitrate).
+///
+/// This coexists with `build_rate_controller` during migration. Once
+/// validated, the old builder paths can be replaced.
+pub fn build_arbiter(
+    rate: &RateConfig,
+    _control_interval: Duration,
+    _start_time: Instant,
+    test_duration: Duration,
+) -> Option<Box<dyn RateController>> {
+    match rate {
+        RateConfig::Static { .. } | RateConfig::Step { .. } => None,
+
+        RateConfig::Ramp {
+            warmup_rps,
+            warmup_duration,
+            latency_multiplier,
+            max_error_rate,
+            min_rps,
+            max_rps,
+            external_constraints,
+        } => {
+            tracing::info!(
+                warmup_rps,
+                ?warmup_duration,
+                latency_multiplier,
+                max_error_rate,
+                min_rps,
+                max_rps,
+                num_external_constraints = external_constraints.len(),
+                "rate controller: arbiter (ramp config)"
+            );
+
+            let mut constraints: Vec<Box<dyn Constraint>> = vec![
+                Box::new(ThresholdConstraint::timeout(*max_error_rate)),
+                Box::new(ThresholdConstraint::inflight()),
+                Box::new(ThresholdConstraint::latency(0.0, 3)), // threshold set after warmup
+                Box::new(ThresholdConstraint::error_rate(*max_error_rate)),
+            ];
+
+            for ext in external_constraints {
+                constraints.push(Box::new(ThresholdConstraint::external(ext.clone())));
+            }
+
+            Some(Box::new(Arbiter::new(
+                ArbiterConfig::new(constraints, *warmup_rps, *min_rps, *max_rps, test_duration)
+                    .with_warmup(*warmup_rps, *warmup_duration, *latency_multiplier),
+            )))
+        }
+
+        RateConfig::Pid {
+            initial_rps,
+            target,
+        } => {
+            let (kp, ki, kd) = match &target.gains {
+                PidGains::Manual { kp, ki, kd } => (*kp, *ki, *kd),
+                PidGains::Auto { .. } => {
+                    // Auto-tuning PID via Arbiter not yet supported — fall back to legacy.
+                    return None;
+                }
+            };
+
+            tracing::info!(
+                initial_rps,
+                metric = ?target.metric,
+                target_value = target.value,
+                kp, ki, kd,
+                "rate controller: arbiter (PID config)"
+            );
+
+            let smoother = match &target.metric {
+                TargetMetric::LatencyP50 | TargetMetric::LatencyP90 | TargetMetric::LatencyP99 => {
+                    Smoother::median(3)
+                }
+                _ => Smoother::ema(0.3),
+            };
+
+            let constraints: Vec<Box<dyn Constraint>> = vec![Box::new(PidConstraint::new(
+                format!("{:?}", target.metric),
+                target.metric.clone(),
+                target.value,
+                kp,
+                ki,
+                kd,
+                smoother,
+                false, // manual gains, no scheduling
+            ))];
+
+            Some(Box::new(Arbiter::new(ArbiterConfig::new(
+                constraints,
+                *initial_rps,
+                target.min_rps,
+                target.max_rps,
+                test_duration,
+            ))))
+        }
+
+        RateConfig::CompositePid {
+            initial_rps,
+            constraints: pid_constraints,
+            min_rps,
+            max_rps,
+        } => {
+            // Only support all-manual gains via Arbiter for now.
+            let all_manual = pid_constraints
+                .iter()
+                .all(|c| matches!(c.gains, PidGains::Manual { .. }));
+            if !all_manual {
+                return None;
+            }
+
+            tracing::info!(
+                initial_rps,
+                num_constraints = pid_constraints.len(),
+                min_rps,
+                max_rps,
+                "rate controller: arbiter (composite PID config)"
+            );
+
+            let constraints: Vec<Box<dyn Constraint>> = pid_constraints
+                .iter()
+                .map(|c| {
+                    let (kp, ki, kd) = match &c.gains {
+                        PidGains::Manual { kp, ki, kd } => (*kp, *ki, *kd),
+                        _ => unreachable!(), // checked above
+                    };
+                    let smoother = match &c.metric {
+                        TargetMetric::LatencyP50
+                        | TargetMetric::LatencyP90
+                        | TargetMetric::LatencyP99 => Smoother::median(3),
+                        _ => Smoother::ema(0.3),
+                    };
+                    Box::new(PidConstraint::new(
+                        format!("{:?}", c.metric),
+                        c.metric.clone(),
+                        c.limit,
+                        kp,
+                        ki,
+                        kd,
+                        smoother,
+                        false,
+                    )) as Box<dyn Constraint>
+                })
+                .collect();
+
+            Some(Box::new(Arbiter::new(ArbiterConfig::new(
+                constraints,
+                *initial_rps,
+                *min_rps,
+                *max_rps,
+                test_duration,
+            ))))
+        }
+    }
 }

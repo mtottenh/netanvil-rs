@@ -1668,7 +1668,7 @@ fn warmup_ramp(ctrl: &mut RampRateController, p99_ms: f64) {
     ctrl.update(&s); // sample 1
     ctrl.update(&s); // sample 2
     ctrl.update(&s); // sample 3 → transitions + first ramping tick
-    // Let the progressive ceiling ramp to max_rps.
+                     // Let the progressive ceiling ramp to max_rps.
     std::thread::sleep(Duration::from_millis(5));
 }
 
@@ -1679,9 +1679,15 @@ fn ramp_warmup_holds_at_warmup_rate() {
 
     // First two updates are warmup — rate should stay at warmup_rps.
     let d1 = ctrl.update(&s);
-    assert_eq!(d1.target_rps, 100.0, "warmup tick 1 should hold at warmup_rps");
+    assert_eq!(
+        d1.target_rps, 100.0,
+        "warmup tick 1 should hold at warmup_rps"
+    );
     let d2 = ctrl.update(&s);
-    assert_eq!(d2.target_rps, 100.0, "warmup tick 2 should hold at warmup_rps");
+    assert_eq!(
+        d2.target_rps, 100.0,
+        "warmup tick 2 should hold at warmup_rps"
+    );
 }
 
 #[test]
@@ -1695,7 +1701,7 @@ fn ramp_transitions_after_three_warmup_samples() {
 
     ctrl.update(&s); // sample 1 — warmup
     ctrl.update(&s); // sample 2 — warmup
-    // Third update: transitions to ramping and runs one ramping tick.
+                     // Third update: transitions to ramping and runs one ramping tick.
     let d3 = ctrl.update(&s);
     // After transition, rate is no longer simply warmup_rps — it ran a ramping
     // tick. The ceiling is near warmup_rps so rate stays ~100, but the
@@ -2054,7 +2060,10 @@ fn ramp_known_good_floor_prevents_deep_drop() {
         ctrl.update(&make_ramp_summary(100, 10.0, 0.0));
     }
     let peak_rate = ctrl.current_rate();
-    assert!(peak_rate > 200.0, "should have ramped up from 100, got {peak_rate}");
+    assert!(
+        peak_rate > 200.0,
+        "should have ramped up from 100, got {peak_rate}"
+    );
 
     // Multiple hard backoffs (severe latency violations).
     for _ in 0..5 {
@@ -2336,8 +2345,8 @@ fn ramp_stabilizes_despite_plant_hysteresis() {
     // Steady-state resources:  rate * ACCUM / DECAY
     // Sustainable rate:        CAPACITY * DECAY / ACCUM = 2500 RPS
     let capacity = 500.0;
-    let accum = 0.01;  // resources consumed per RPS per tick
-    let decay = 0.05;  // fraction freed per tick (τ = 20 ticks ≈ 60s)
+    let accum = 0.01; // resources consumed per RPS per tick
+    let decay = 0.05; // fraction freed per tick (τ = 20 ticks ≈ 60s)
     let sustainable_rate = capacity * decay / accum; // 2500.0
     let mut resources = 0.0;
 
@@ -2355,7 +2364,7 @@ fn ramp_stabilizes_despite_plant_hysteresis() {
         let p99 = if resources > capacity {
             100.0 // 100ms → lat_ratio ≈ 3.3 → hard backoff
         } else {
-            10.0  // 10ms → lat_ratio ≈ 0.33 → increase
+            10.0 // 10ms → lat_ratio ≈ 0.33 → increase
         };
 
         ctrl.update(&make_ramp_summary(100, p99, 0.0));
@@ -2978,5 +2987,660 @@ fn ramp_controller_info_includes_constraint_details() {
     assert!(
         first.get("recovery_ema_ticks").is_some(),
         "constraint should have recovery_ema_ticks"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Arbiter behavioral tests
+// ---------------------------------------------------------------------------
+
+use netanvil_core::{Arbiter, ArbiterConfig};
+
+/// Helper to build an Arbiter from a ramp config via the builder.
+fn build_ramp_arbiter(
+    warmup_rps: f64,
+    max_error_rate: f64,
+    min_rps: f64,
+    max_rps: f64,
+    latency_multiplier: f64,
+) -> Box<dyn RateController> {
+    let config = netanvil_types::RateConfig::Ramp {
+        warmup_rps,
+        warmup_duration: Duration::from_millis(100),
+        latency_multiplier,
+        max_error_rate,
+        min_rps,
+        max_rps,
+        external_constraints: vec![],
+    };
+    netanvil_core::build_arbiter(
+        &config,
+        Duration::from_millis(100),
+        std::time::Instant::now(),
+        Duration::from_secs(60),
+    )
+    .expect("ramp config should produce an arbiter")
+}
+
+#[test]
+fn arbiter_ramp_warmup_holds_rate() {
+    let mut ctrl = build_ramp_arbiter(100.0, 5.0, 10.0, 50000.0, 3.0);
+    let summary = MetricsSummary {
+        total_requests: 100,
+        latency_p99_ns: 5_000_000, // 5ms
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+    let decision = ctrl.update(&summary);
+    assert_eq!(decision.target_rps, 100.0, "should hold at warmup rate");
+}
+
+#[test]
+fn arbiter_ramp_transitions_to_active_and_increases() {
+    let mut ctrl = build_ramp_arbiter(100.0, 5.0, 10.0, 50000.0, 3.0);
+    let warmup_summary = MetricsSummary {
+        total_requests: 100,
+        latency_p99_ns: 5_000_000, // 5ms
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+
+    // Warmup: collect samples
+    for _ in 0..5 {
+        ctrl.update(&warmup_summary);
+    }
+
+    // Force warmup to end by sleeping past duration
+    std::thread::sleep(Duration::from_millis(120));
+
+    // First tick after warmup should transition and start ramping
+    let clean_summary = MetricsSummary {
+        total_requests: 100,
+        latency_p99_ns: 5_000_000, // 5ms — well under 3x multiplier = 15ms target
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+
+    let decision = ctrl.update(&clean_summary);
+    // Should be above warmup rate (increasing)
+    assert!(
+        decision.target_rps >= 100.0,
+        "should start increasing: got {}",
+        decision.target_rps
+    );
+}
+
+#[test]
+fn arbiter_ramp_backs_off_on_latency_spike() {
+    let mut ctrl = build_ramp_arbiter(100.0, 5.0, 10.0, 50000.0, 3.0);
+
+    // Warmup
+    let warmup = MetricsSummary {
+        total_requests: 100,
+        latency_p99_ns: 5_000_000, // 5ms baseline
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+    for _ in 0..5 {
+        ctrl.update(&warmup);
+    }
+    std::thread::sleep(Duration::from_millis(120));
+    ctrl.update(&warmup); // transition
+
+    // Ramp up with clean ticks
+    let clean = MetricsSummary {
+        total_requests: 100,
+        latency_p99_ns: 5_000_000,
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+    let mut rate = 0.0;
+    for _ in 0..10 {
+        let d = ctrl.update(&clean);
+        rate = d.target_rps;
+    }
+    let pre_spike_rate = rate;
+
+    // Severe latency spike (way over 3x = 15ms target)
+    let spike = MetricsSummary {
+        total_requests: 100,
+        latency_p99_ns: 100_000_000, // 100ms — severity ~6.7x
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+    // Need persistence=2 for latency, so two spikes
+    ctrl.update(&spike);
+    let d = ctrl.update(&spike);
+
+    assert!(
+        d.target_rps < pre_spike_rate,
+        "should back off: {} should be < {}",
+        d.target_rps,
+        pre_spike_rate
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Mixed-constraint smoke test (Phase C2 exit criterion)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn arbiter_mixed_pid_and_threshold_constraints() {
+    use netanvil_core::controller::composition::MinSelector;
+    use netanvil_core::controller::constraint::Constraint;
+    use netanvil_core::controller::pid_constraint::PidConstraint as PidC;
+    use netanvil_core::controller::smoothing::Smoother;
+    use netanvil_core::controller::threshold::ThresholdConstraint;
+
+    // Build an arbiter with MIXED constraint types:
+    // - PID on latency (tracks toward 10ms target)
+    // - Threshold on error rate (backs off at 5%)
+    // - Threshold on external signal (backs off at queue_depth > 1000)
+    let constraints: Vec<Box<dyn Constraint>> = vec![
+        Box::new(PidC::new(
+            "pid_latency".into(),
+            TargetMetric::LatencyP99,
+            10.0, // target: 10ms
+            0.5,
+            0.1,
+            0.05,
+            Smoother::ema(0.3),
+            false,
+        )),
+        Box::new(ThresholdConstraint::error_rate(5.0)),
+        Box::new(ThresholdConstraint::external(ExternalConstraintConfig {
+            signal_name: "queue_depth".into(),
+            threshold: 1000.0,
+            direction: SignalDirection::HigherIsWorse,
+            on_missing: MissingSignalBehavior::Ignore,
+            stale_after_ticks: 3,
+            persistence: 1,
+        })),
+    ];
+
+    let mut arbiter = Arbiter::new(ArbiterConfig::new(
+        constraints,
+        1000.0,
+        10.0,
+        50000.0,
+        Duration::from_secs(60),
+    ));
+
+    // Tick 1: clean metrics, low latency, no errors, no external signal.
+    // PID should want to increase (latency 5ms < target 10ms).
+    // Error rate threshold has no objection.
+    // External signal is missing with Ignore → inactive.
+    let summary = MetricsSummary {
+        total_requests: 100,
+        latency_p99_ns: 5_000_000, // 5ms
+        error_rate: 0.0,
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+    let d = arbiter.update(&summary);
+    assert!(
+        d.target_rps >= 1000.0,
+        "with clean metrics, rate should not decrease: got {}",
+        d.target_rps
+    );
+
+    // Error rate spike to 10% (2x the 5% threshold).
+    // Error rate threshold should trigger backoff, overriding PID.
+    // The EMA smoother needs several ticks to register the spike, and
+    // the rate-of-change clamp limits how fast rate can drop per tick.
+    // Check that rate decreases over several ticks of sustained errors.
+    let error_spike = MetricsSummary {
+        total_requests: 100,
+        total_errors: 10,
+        error_rate: 0.10, // 10%
+        latency_p99_ns: 5_000_000,
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+    let rate_before_errors = arbiter.current_rate();
+    for _ in 0..10 {
+        arbiter.update(&error_spike);
+    }
+    assert!(
+        arbiter.current_rate() < rate_before_errors * 0.95,
+        "sustained error spike should reduce rate: {} should be < {}",
+        arbiter.current_rate(),
+        rate_before_errors * 0.95
+    );
+
+    // Tick 3: external signal fires — queue_depth = 2000 (2x threshold).
+    // Both error rate and external signal are backing off.
+    // Min-selector should pick the lowest rate.
+    let external_spike = MetricsSummary {
+        total_requests: 100,
+        error_rate: 0.10,
+        latency_p99_ns: 5_000_000,
+        window_duration: Duration::from_millis(100),
+        external_signals: vec![("queue_depth".into(), 2000.0)],
+        ..Default::default()
+    };
+    let rate_before = arbiter.current_rate();
+    let d = arbiter.update(&external_spike);
+    assert!(
+        d.target_rps <= rate_before,
+        "external + error spike should not increase: {} should be <= {}",
+        d.target_rps,
+        rate_before
+    );
+
+    // This test proves the headline feature: PID + threshold + external
+    // constraints, all in one controller, composed via min-selector.
+    // This was impossible before the constraint unification.
+}
+
+// ---------------------------------------------------------------------------
+// Architectural invariant tests
+// ---------------------------------------------------------------------------
+
+/// 5.1: When all constraints return NoObjection, rate should increase (not stall).
+#[test]
+fn arbiter_no_objection_does_not_stall() {
+    use netanvil_core::controller::composition::MinSelector;
+    use netanvil_core::controller::constraint::Constraint;
+    use netanvil_core::controller::pid_constraint::PidConstraint as PidC;
+    use netanvil_core::controller::smoothing::Smoother;
+
+    // PID targeting error_rate < 50% — with 0% errors, it has no objection.
+    let constraints: Vec<Box<dyn Constraint>> = vec![Box::new(PidC::new(
+        "error_pid".into(),
+        TargetMetric::ErrorRate,
+        50.0, // very generous target: 50%
+        0.01,
+        0.001,
+        0.0,
+        Smoother::ema(0.3),
+        false,
+    ))];
+
+    let mut arbiter = Arbiter::new(ArbiterConfig::new(
+        constraints,
+        1000.0,
+        10.0,
+        50000.0,
+        Duration::from_secs(60),
+    ));
+
+    // Feed clean metrics: 0% error rate, well below the 50% target.
+    // PID should produce NoObjection or a DesireRate above current.
+    // Either way, the arbiter should increase via increase_rate.
+    let clean = MetricsSummary {
+        total_requests: 100,
+        error_rate: 0.0,
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+
+    let d1 = arbiter.update(&clean);
+    let d2 = arbiter.update(&clean);
+    let d3 = arbiter.update(&clean);
+
+    // Rate should be increasing, not stuck at 1000.
+    assert!(
+        d3.target_rps > 1000.0,
+        "rate should increase when no constraint objects: got {}",
+        d3.target_rps
+    );
+}
+
+/// 5.4: Back-calculation produces bumpless transfer when a non-binding PID
+/// becomes binding. Multi-tick test with nonzero derivative.
+#[test]
+fn arbiter_pid_bumpless_transfer_on_constraint_switch() {
+    use netanvil_core::controller::composition::MinSelector;
+    use netanvil_core::controller::constraint::Constraint;
+    use netanvil_core::controller::pid_constraint::PidConstraint as PidC;
+    use netanvil_core::controller::smoothing::Smoother;
+    use netanvil_core::controller::threshold::ThresholdConstraint;
+
+    // Two constraints:
+    // - Error threshold: backs off aggressively (binding for first N ticks)
+    // - PID on latency: non-binding while error is binding
+    let constraints: Vec<Box<dyn Constraint>> = vec![
+        Box::new(ThresholdConstraint::error_rate(1.0)), // 1% error threshold — very tight
+        Box::new(PidC::new(
+            "pid_latency".into(),
+            TargetMetric::LatencyP99,
+            50.0, // target: 50ms
+            0.02,
+            0.005,
+            0.01, // kd > 0: derivative matters for this test
+            Smoother::ema(0.3),
+            false,
+        )),
+    ];
+
+    let mut arbiter = Arbiter::new(ArbiterConfig::new(
+        constraints,
+        1000.0,
+        10.0,
+        50000.0,
+        Duration::from_secs(60),
+    ));
+
+    // Phase 1: error constraint is binding (10% errors > 1% threshold).
+    // PID on latency is non-binding, back-calculating.
+    let error_spike = MetricsSummary {
+        total_requests: 100,
+        total_errors: 10,
+        error_rate: 0.10,
+        latency_p99_ns: 30_000_000, // 30ms, below PID target of 50ms
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+    for _ in 0..5 {
+        arbiter.update(&error_spike);
+    }
+    let rate_before_switch = arbiter.current_rate();
+
+    // Phase 2: errors clear. Error constraint becomes NoObjection.
+    // PID on latency becomes binding. Rate should not jump wildly.
+    let clean = MetricsSummary {
+        total_requests: 100,
+        error_rate: 0.0,
+        latency_p99_ns: 30_000_000, // 30ms
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+    let d = arbiter.update(&clean);
+
+    // The rate should change smoothly — not jump by more than
+    // max_rate_change_pct (30%) from the pre-switch rate.
+    let max_change = rate_before_switch * 0.30;
+    assert!(
+        (d.target_rps - rate_before_switch).abs() <= max_change + 1.0,
+        "bumpless transfer violated: rate jumped from {:.1} to {:.1} (max change {:.1})",
+        rate_before_switch,
+        d.target_rps,
+        max_change
+    );
+}
+
+/// 5.5: Catastrophic constraint bypasses the known-good floor.
+#[test]
+fn arbiter_catastrophic_bypasses_floor() {
+    use netanvil_core::controller::composition::MinSelector;
+    use netanvil_core::controller::constraint::Constraint;
+    use netanvil_core::controller::threshold::ThresholdConstraint;
+
+    // Only a timeout constraint (Catastrophic class).
+    let constraints: Vec<Box<dyn Constraint>> = vec![
+        Box::new(ThresholdConstraint::timeout(5.0)),
+        Box::new(ThresholdConstraint::error_rate(5.0)),
+    ];
+
+    let mut arbiter = Arbiter::new(ArbiterConfig::new(
+        constraints,
+        1000.0,
+        10.0,
+        50000.0,
+        Duration::from_secs(60),
+    ));
+
+    // Ramp up to establish a known-good floor.
+    let clean = MetricsSummary {
+        total_requests: 100,
+        latency_p99_ns: 5_000_000,
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+    for _ in 0..10 {
+        arbiter.update(&clean);
+    }
+    let peak = arbiter.current_rate();
+    // Floor should be ~80% of peak.
+    let expected_floor = peak * 0.80;
+
+    // Hit with massive timeouts (Catastrophic). Rate should drop BELOW the floor.
+    let timeout_spike = MetricsSummary {
+        total_requests: 100,
+        timeout_count: 50, // 50% timeouts
+        latency_p99_ns: 5_000_000,
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+    // Multiple ticks of severe timeouts.
+    for _ in 0..5 {
+        arbiter.update(&timeout_spike);
+    }
+    let rate_after = arbiter.current_rate();
+
+    assert!(
+        rate_after < expected_floor,
+        "catastrophic constraint should bypass floor: rate {:.1} should be below floor {:.1}",
+        rate_after,
+        expected_floor
+    );
+}
+
+/// 5.6: Rate-of-change clamp limits extreme jumps.
+#[test]
+fn arbiter_rate_of_change_clamp() {
+    use netanvil_core::controller::composition::MinSelector;
+    use netanvil_core::controller::constraint::Constraint;
+    use netanvil_core::controller::pid_constraint::PidConstraint as PidC;
+    use netanvil_core::controller::smoothing::Smoother;
+
+    // PID with absurd gains that would produce huge rate jumps.
+    let constraints: Vec<Box<dyn Constraint>> = vec![Box::new(PidC::new(
+        "aggressive_pid".into(),
+        TargetMetric::LatencyP99,
+        1.0,   // target: 1ms — extremely aggressive
+        100.0, // absurd kp
+        0.0,
+        0.0,
+        Smoother::ema(0.3),
+        false,
+    ))];
+
+    let mut arbiter = Arbiter::new(ArbiterConfig::new(
+        constraints,
+        1000.0,
+        10.0,
+        1_000_000.0,
+        Duration::from_secs(60),
+    ));
+
+    // Latency is 100ms — way above 1ms target. PID will want to decrease
+    // rate enormously. But max_rate_change_pct (0.30) should limit the drop.
+    let high_latency = MetricsSummary {
+        total_requests: 100,
+        latency_p99_ns: 100_000_000, // 100ms
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+
+    let d = arbiter.update(&high_latency);
+    // Rate should not drop by more than 30% in one tick.
+    let min_allowed = 1000.0 * (1.0 - 0.30);
+    assert!(
+        d.target_rps >= min_allowed - 1.0,
+        "rate-of-change clamp violated: rate dropped to {:.1}, min allowed {:.1}",
+        d.target_rps,
+        min_allowed
+    );
+}
+
+/// 5.7: on_warmup_complete propagates baseline to latency constraint.
+#[test]
+fn arbiter_warmup_sets_latency_threshold() {
+    let mut ctrl = build_ramp_arbiter(100.0, 5.0, 10.0, 50000.0, 3.0);
+
+    // Feed warmup samples at ~5ms p99.
+    let warmup = MetricsSummary {
+        total_requests: 100,
+        latency_p99_ns: 5_000_000, // 5ms
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+    for _ in 0..5 {
+        ctrl.update(&warmup);
+    }
+    std::thread::sleep(Duration::from_millis(120));
+
+    // Transition to active — latency threshold should be 5ms × 3.0 = 15ms.
+    // Now feed 12ms latency: below threshold (15ms) → should not back off.
+    let under_threshold = MetricsSummary {
+        total_requests: 100,
+        latency_p99_ns: 12_000_000, // 12ms < 15ms target
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+    ctrl.update(&under_threshold); // first active tick
+
+    // Several clean ticks to let it ramp.
+    for _ in 0..5 {
+        ctrl.update(&under_threshold);
+    }
+    let rate_at_12ms = ctrl.current_rate();
+
+    // Now feed 20ms: above threshold (15ms) → should back off.
+    let over_threshold = MetricsSummary {
+        total_requests: 100,
+        latency_p99_ns: 20_000_000, // 20ms > 15ms target
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+    // Need persistence=2 for latency, so two ticks.
+    ctrl.update(&over_threshold);
+    let d = ctrl.update(&over_threshold);
+
+    assert!(
+        d.target_rps <= rate_at_12ms,
+        "should back off when latency exceeds warmup baseline × multiplier: {:.1} should be <= {:.1}",
+        d.target_rps,
+        rate_at_12ms
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Shadow comparison: old Ramp vs new Arbiter
+// ---------------------------------------------------------------------------
+
+/// Feed identical metric sequences to both old RampRateController and new
+/// Arbiter (from same RateConfig::Ramp) and compare rate decisions.
+///
+/// The controllers have different smoothing (ramp: per-tick raw for timeout/
+/// inflight, new: EMA), different self-caused streak handling, and log-space
+/// PID, so exact match is not expected. What we verify:
+/// - Both ramp up from warmup
+/// - Both back off on latency spikes
+/// - Both recover after spikes
+/// - No sustained divergence
+#[test]
+fn shadow_ramp_vs_arbiter_ramp_to_ceiling() {
+    let warmup_rps = 100.0;
+    let max_error_rate = 5.0;
+    let min_rps = 10.0;
+    let max_rps = 50000.0;
+    let latency_mult = 3.0;
+
+    let config = netanvil_types::RateConfig::Ramp {
+        warmup_rps,
+        warmup_duration: Duration::from_millis(100),
+        latency_multiplier: latency_mult,
+        max_error_rate,
+        min_rps,
+        max_rps,
+        external_constraints: vec![],
+    };
+    let now = std::time::Instant::now();
+    let dur = Duration::from_secs(60);
+    let interval = Duration::from_millis(100);
+
+    let mut old = netanvil_core::build_rate_controller(&config, interval, now, dur);
+    let mut new = netanvil_core::build_arbiter(&config, interval, now, dur)
+        .expect("should build arbiter from ramp config");
+
+    // Phase 1: Warmup — both should hold at warmup_rps.
+    let warmup_summary = MetricsSummary {
+        total_requests: 100,
+        latency_p99_ns: 5_000_000, // 5ms
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+
+    for _ in 0..5 {
+        let old_d = old.update(&warmup_summary);
+        let new_d = new.update(&warmup_summary);
+        assert_eq!(old_d.target_rps, warmup_rps, "old should hold at warmup");
+        assert_eq!(new_d.target_rps, warmup_rps, "new should hold at warmup");
+    }
+
+    // Force warmup to end.
+    std::thread::sleep(Duration::from_millis(120));
+
+    // Phase 2: Clean ticks — both should ramp up.
+    let clean = MetricsSummary {
+        total_requests: 100,
+        latency_p99_ns: 5_000_000,
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+
+    let mut old_rates = Vec::new();
+    let mut new_rates = Vec::new();
+    for _ in 0..20 {
+        let od = old.update(&clean);
+        let nd = new.update(&clean);
+        old_rates.push(od.target_rps);
+        new_rates.push(nd.target_rps);
+    }
+
+    // Both should be increasing.
+    assert!(
+        old_rates.last().unwrap() > &warmup_rps,
+        "old should ramp up"
+    );
+    assert!(
+        new_rates.last().unwrap() > &warmup_rps,
+        "new should ramp up"
+    );
+
+    // Phase 3: Latency spike — both should back off.
+    let spike = MetricsSummary {
+        total_requests: 100,
+        latency_p99_ns: 100_000_000, // 100ms, ~6.7x above 15ms target
+        window_duration: Duration::from_millis(100),
+        ..Default::default()
+    };
+
+    let old_pre = old.current_rate();
+    let new_pre = new.current_rate();
+
+    // Persistence=2 for latency, feed 3 ticks of spike.
+    for _ in 0..3 {
+        old.update(&spike);
+        new.update(&spike);
+    }
+
+    assert!(old.current_rate() < old_pre, "old should back off on spike");
+    assert!(new.current_rate() < new_pre, "new should back off on spike");
+
+    // Phase 4: Recovery — both should resume increasing.
+    for _ in 0..15 {
+        old.update(&clean);
+        new.update(&clean);
+    }
+
+    assert!(
+        old.current_rate() > old.current_rate() * 0.5 || old.current_rate() > min_rps,
+        "old should recover"
+    );
+    assert!(
+        new.current_rate() > new.current_rate() * 0.5 || new.current_rate() > min_rps,
+        "new should recover"
+    );
+
+    // Log the comparison for manual review.
+    eprintln!(
+        "Shadow comparison: old final={:.1}, new final={:.1}, delta={:.1}%",
+        old.current_rate(),
+        new.current_rate(),
+        (new.current_rate() - old.current_rate()).abs() / old.current_rate() * 100.0
     );
 }

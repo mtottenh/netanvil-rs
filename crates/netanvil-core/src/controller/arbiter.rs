@@ -731,10 +731,7 @@ impl RateController for Arbiter {
 
     fn controller_info(&self) -> ControllerInfo {
         ControllerInfo {
-            // TODO: add ControllerType::Arbiter variant in netanvil-types.
-            // Reporting as Ramp until that lands; downstream dashboards
-            // labeling controllers by type will need updating.
-            controller_type: ControllerType::Ramp,
+            controller_type: ControllerType::Arbiter,
             current_rps: self.current_rps,
             editable_actions: vec!["set_max_rps".into(), "set_min_rps".into()],
             params: serde_json::json!({

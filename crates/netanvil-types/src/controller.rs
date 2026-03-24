@@ -12,6 +12,7 @@ pub enum ControllerType {
     PidAutotune,
     CompositePid,
     Ramp,
+    Arbiter,
 }
 
 /// Structured description of a rate controller's current state.

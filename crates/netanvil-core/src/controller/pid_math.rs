@@ -95,6 +95,7 @@ pub struct PidState {
     pub last_error: f64,
     pub ema_value: f64,
     pub ema_alpha: f64,
+    pub ema_initialized: bool,
 }
 
 impl Default for PidState {
@@ -104,6 +105,7 @@ impl Default for PidState {
             last_error: 0.0,
             ema_value: 0.0,
             ema_alpha: 0.0,
+            ema_initialized: false,
         }
     }
 }
@@ -115,13 +117,15 @@ impl PidState {
             last_error: 0.0,
             ema_value: 0.0,
             ema_alpha: smoothing.clamp(0.0, 1.0),
+            ema_initialized: false,
         }
     }
 
     /// Apply EMA smoothing to a raw metric value.
     pub fn smooth(&mut self, raw: f64) -> f64 {
-        if self.ema_value == 0.0 && raw != 0.0 {
+        if !self.ema_initialized {
             self.ema_value = raw;
+            self.ema_initialized = true;
         } else {
             self.ema_value = self.ema_alpha * raw + (1.0 - self.ema_alpha) * self.ema_value;
         }
@@ -133,6 +137,7 @@ impl PidState {
         self.integral = 0.0;
         self.last_error = 0.0;
         self.ema_value = 0.0;
+        self.ema_initialized = false;
     }
 }
 

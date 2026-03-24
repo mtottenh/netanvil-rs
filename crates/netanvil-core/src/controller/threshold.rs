@@ -181,6 +181,10 @@ pub struct ThresholdConfig {
     /// Self-caused severity cap. When set, constraint returns Hold and freezes
     /// streak when ticks_since_increase <= 2 and severity < this threshold.
     pub self_caused_cap: Option<f64>,
+    /// Whether higher metric values are worse (latency, error rate) or lower
+    /// values are worse (throughput, available capacity). Determines severity
+    /// computation direction.
+    pub direction: SignalDirection,
 }
 
 impl ThresholdConfig {
@@ -199,6 +203,7 @@ impl ThresholdConfig {
             backoff: BackoffSchedule::default(),
             external: None,
             self_caused_cap: None,
+            direction: SignalDirection::HigherIsWorse,
         }
     }
 
@@ -216,6 +221,7 @@ impl ThresholdConfig {
             backoff: BackoffSchedule::default(),
             external: None,
             self_caused_cap: None,
+            direction: SignalDirection::HigherIsWorse,
         }
     }
 
@@ -234,6 +240,7 @@ impl ThresholdConfig {
             backoff: BackoffSchedule::default(),
             external: None,
             self_caused_cap: Some(1.5),
+            direction: SignalDirection::HigherIsWorse,
         }
     }
 
@@ -251,6 +258,7 @@ impl ThresholdConfig {
             backoff: BackoffSchedule::default(),
             external: None,
             self_caused_cap: None,
+            direction: SignalDirection::HigherIsWorse,
         }
     }
 
@@ -275,6 +283,7 @@ impl ThresholdConfig {
             backoff: BackoffSchedule::default(),
             external: Some(config),
             self_caused_cap: None,
+            direction,
         }
     }
 }
@@ -297,6 +306,7 @@ pub struct ThresholdConstraint {
     smoother: Smoother,
     threshold: f64,
     severity_mapping: SeverityMapping,
+    direction: SignalDirection,
     state: ConstraintState,
 
     // Stage 2: control law parameters
@@ -326,6 +336,7 @@ impl ThresholdConstraint {
             smoother: config.smoother,
             threshold: config.threshold,
             severity_mapping: config.severity_mapping,
+            direction: config.direction,
             state: ConstraintState::new(config.persistence, config.recovery_seed),
             backoff: config.backoff,
             external_state,
@@ -388,29 +399,24 @@ impl ThresholdConstraint {
     }
 
     /// Compute severity from a smoothed value and the threshold.
+    ///
+    /// Uses the constraint's `direction` field so both built-in and external
+    /// metrics are handled correctly. Higher-is-worse: `smoothed / threshold`.
+    /// Lower-is-worse: `threshold / smoothed` (e.g., throughput, available capacity).
     fn compute_severity(&self, smoothed: f64) -> f64 {
-        match &self.metric {
-            MetricExtractor::External { direction, .. } => match direction {
-                SignalDirection::HigherIsWorse => {
-                    if self.threshold > 0.0 {
-                        smoothed / self.threshold
-                    } else {
-                        0.0
-                    }
-                }
-                SignalDirection::LowerIsWorse => {
-                    if smoothed > f64::EPSILON {
-                        self.threshold / smoothed
-                    } else {
-                        SEVERITY_BYPASS_PERSISTENCE + 1.0
-                    }
-                }
-            },
-            _ => {
+        match self.direction {
+            SignalDirection::HigherIsWorse => {
                 if self.threshold > 0.0 {
                     smoothed / self.threshold
                 } else {
                     0.0
+                }
+            }
+            SignalDirection::LowerIsWorse => {
+                if smoothed > f64::EPSILON {
+                    self.threshold / smoothed
+                } else {
+                    SEVERITY_BYPASS_PERSISTENCE + 1.0
                 }
             }
         }
@@ -603,6 +609,15 @@ impl Constraint for ThresholdConstraint {
                 | MetricExtractor::LatencyP90Ms
                 | MetricExtractor::LatencyP50Ms
         ) {
+            if baseline.sample_count == 0 || baseline.baseline_p99_ms <= 0.0 {
+                tracing::warn!(
+                    constraint = %self.id,
+                    sample_count = baseline.sample_count,
+                    baseline_p99_ms = format!("{:.2}", baseline.baseline_p99_ms),
+                    "warmup produced no usable baseline — keeping current threshold"
+                );
+                return;
+            }
             let target = baseline.baseline_p99_ms * latency_multiplier;
             self.set_threshold(target);
             tracing::info!(

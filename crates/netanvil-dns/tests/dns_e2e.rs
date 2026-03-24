@@ -23,7 +23,7 @@ fn test_dns_query_a_record() {
 
     let result = GenericTestBuilder::new(
         config,
-        || DnsExecutor::with_timeout(Duration::from_secs(5)),
+        |_| DnsExecutor::with_timeout(Duration::from_secs(5)),
         Box::new(move |_| {
             Box::new(SimpleDnsGenerator::new(
                 servers.clone(),
@@ -68,7 +68,7 @@ fn test_dns_multiple_domains() {
 
     let result = GenericTestBuilder::new(
         config,
-        || DnsExecutor::with_timeout(Duration::from_secs(5)),
+        |_| DnsExecutor::with_timeout(Duration::from_secs(5)),
         Box::new(move |_| {
             Box::new(SimpleDnsGenerator::new(
                 servers.clone(),
@@ -102,7 +102,7 @@ fn test_dns_no_server_timeout() {
 
     let result = GenericTestBuilder::new(
         config,
-        || DnsExecutor::with_timeout(Duration::from_millis(200)),
+        |_| DnsExecutor::with_timeout(Duration::from_millis(200)),
         Box::new(|_| {
             Box::new(SimpleDnsGenerator::new(
                 vec!["127.0.0.1:19999".parse().unwrap()],
@@ -155,7 +155,7 @@ fn test_dns_lua_plugin() {
 
     let result = GenericTestBuilder::new(
         config,
-        || DnsExecutor::with_timeout(Duration::from_secs(5)),
+        |_| DnsExecutor::with_timeout(Duration::from_secs(5)),
         Box::new(move |_| {
             use netanvil_plugin_luajit::LuaJitGenerator;
 

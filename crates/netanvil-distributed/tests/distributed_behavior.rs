@@ -97,10 +97,11 @@ fn distributed_test_with_two_agents() {
     let config = make_test_config(target_addr, 200.0, 8);
 
     // Build distributed coordinator
-    let discovery = StaticDiscovery::new(vec![
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let discovery = rt.block_on(StaticDiscovery::new(vec![
         format!("127.0.0.1:{port1}"),
         format!("127.0.0.1:{port2}"),
-    ]);
+    ]));
     let fetcher = HttpMetricsFetcher::new(Duration::from_secs(5));
     let commander = HttpNodeCommander::new(Duration::from_secs(10));
 
@@ -110,7 +111,7 @@ fn distributed_test_with_two_agents() {
         DistributedCoordinator::new(discovery, fetcher, commander, config, rate_controller);
 
     // Run the test
-    let result = coordinator.run();
+    let result = rt.block_on(coordinator.run());
 
     // Verify results
     let total = result.total_requests;
@@ -165,7 +166,8 @@ fn distributed_stop_terminates_all_agents() {
     // Short test — verify the coordinator stops within the duration
     let config = make_test_config(target_addr, 100.0, 8);
 
-    let discovery = StaticDiscovery::new(vec![format!("127.0.0.1:{port}")]);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let discovery = rt.block_on(StaticDiscovery::new(vec![format!("127.0.0.1:{port}")]));
     let fetcher = HttpMetricsFetcher::new(Duration::from_secs(5));
     let commander = HttpNodeCommander::new(Duration::from_secs(10));
     let rate_controller = Box::new(netanvil_core::StaticRateController::new(100.0));
@@ -174,7 +176,7 @@ fn distributed_stop_terminates_all_agents() {
         DistributedCoordinator::new(discovery, fetcher, commander, config, rate_controller);
 
     let before = std::time::Instant::now();
-    let result = coordinator.run();
+    let result = rt.block_on(coordinator.run());
     let elapsed = before.elapsed();
 
     // Should complete in roughly 3 seconds (not 60)
@@ -223,10 +225,11 @@ fn distributed_dns_test_with_two_agents() {
         ..Default::default()
     };
 
-    let discovery = StaticDiscovery::new(vec![
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let discovery = rt.block_on(StaticDiscovery::new(vec![
         format!("127.0.0.1:{port1}"),
         format!("127.0.0.1:{port2}"),
-    ]);
+    ]));
     let fetcher = HttpMetricsFetcher::new(Duration::from_secs(5));
     let commander = HttpNodeCommander::new(Duration::from_secs(10));
     let rate_controller = Box::new(netanvil_core::StaticRateController::new(200.0));
@@ -234,7 +237,7 @@ fn distributed_dns_test_with_two_agents() {
     let mut coordinator =
         DistributedCoordinator::new(discovery, fetcher, commander, config, rate_controller);
 
-    let result = coordinator.run();
+    let result = rt.block_on(coordinator.run());
 
     eprintln!(
         "Distributed DNS test: {} requests in {:.1}s",

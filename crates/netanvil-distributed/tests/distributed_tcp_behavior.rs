@@ -63,10 +63,11 @@ fn distributed_tcp_test_with_two_agents() {
 
     let config = make_tcp_test_config(tcp_server.addr, 100.0, 8);
 
-    let discovery = StaticDiscovery::new(vec![
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let discovery = rt.block_on(StaticDiscovery::new(vec![
         format!("127.0.0.1:{port1}"),
         format!("127.0.0.1:{port2}"),
-    ]);
+    ]));
     let fetcher = HttpMetricsFetcher::new(Duration::from_secs(5));
     let commander = HttpNodeCommander::new(Duration::from_secs(10));
     let rate_controller = Box::new(netanvil_core::StaticRateController::new(100.0));
@@ -74,7 +75,7 @@ fn distributed_tcp_test_with_two_agents() {
     let mut coordinator =
         DistributedCoordinator::new(discovery, fetcher, commander, config, rate_controller);
 
-    let result = coordinator.run();
+    let result = rt.block_on(coordinator.run());
 
     let total = result.total_requests;
     let duration_secs = result.duration.as_secs_f64();
@@ -138,10 +139,11 @@ fn distributed_udp_test_with_two_agents() {
         ..Default::default()
     };
 
-    let discovery = StaticDiscovery::new(vec![
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let discovery = rt.block_on(StaticDiscovery::new(vec![
         format!("127.0.0.1:{port1}"),
         format!("127.0.0.1:{port2}"),
-    ]);
+    ]));
     let fetcher = HttpMetricsFetcher::new(Duration::from_secs(5));
     let commander = HttpNodeCommander::new(Duration::from_secs(10));
     let rate_controller = Box::new(netanvil_core::StaticRateController::new(80.0));
@@ -149,7 +151,7 @@ fn distributed_udp_test_with_two_agents() {
     let mut coordinator =
         DistributedCoordinator::new(discovery, fetcher, commander, config, rate_controller);
 
-    let result = coordinator.run();
+    let result = rt.block_on(coordinator.run());
 
     let total = result.total_requests;
     eprintln!(
@@ -187,7 +189,8 @@ fn distributed_tcp_test_completes_within_duration() {
 
     let config = make_tcp_test_config(tcp_server.addr, 50.0, 3);
 
-    let discovery = StaticDiscovery::new(vec![format!("127.0.0.1:{port}")]);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let discovery = rt.block_on(StaticDiscovery::new(vec![format!("127.0.0.1:{port}")]));
     let fetcher = HttpMetricsFetcher::new(Duration::from_secs(5));
     let commander = HttpNodeCommander::new(Duration::from_secs(10));
     let rate_controller = Box::new(netanvil_core::StaticRateController::new(50.0));
@@ -196,7 +199,7 @@ fn distributed_tcp_test_completes_within_duration() {
         DistributedCoordinator::new(discovery, fetcher, commander, config, rate_controller);
 
     let before = std::time::Instant::now();
-    let result = coordinator.run();
+    let result = rt.block_on(coordinator.run());
     let elapsed = before.elapsed();
 
     // Should complete in roughly 3 seconds (not much longer)

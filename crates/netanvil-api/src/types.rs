@@ -272,6 +272,7 @@ mod tests {
             packets_sent: 0,
             packets_received: 0,
             packets_lost: 0,
+            total_timeouts: 0,
         });
 
         // Verify metrics are populated.

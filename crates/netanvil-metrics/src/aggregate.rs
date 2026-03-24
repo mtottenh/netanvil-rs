@@ -429,6 +429,10 @@ mod tests {
             packets_sent: 0,
             packets_received: 0,
             packets_lost: 0,
+            timeout_count: 0,
+            in_flight_drops: 0,
+            in_flight_count: 0,
+            in_flight_capacity: 0,
         }
     }
 

@@ -25,7 +25,7 @@ fn test_tcp_echo_raw() {
 
     let result = GenericTestBuilder::new(
         config,
-        || TcpExecutor::with_timeout(Duration::from_secs(5)),
+        |_| TcpExecutor::with_timeout(Duration::from_secs(5)),
         Box::new(move |_| {
             Box::new(SimpleTcpGenerator::new(
                 targets.clone(),
@@ -66,7 +66,7 @@ fn test_tcp_echo_delimiter() {
 
     let result = GenericTestBuilder::new(
         config,
-        || TcpExecutor::with_timeout(Duration::from_secs(5)),
+        |_| TcpExecutor::with_timeout(Duration::from_secs(5)),
         Box::new(move |_| {
             Box::new(SimpleTcpGenerator::new(
                 targets.clone(),
@@ -107,7 +107,7 @@ fn test_tcp_fire_and_forget() {
 
     let result = GenericTestBuilder::new(
         config,
-        || TcpExecutor::with_timeout(Duration::from_secs(5)),
+        |_| TcpExecutor::with_timeout(Duration::from_secs(5)),
         Box::new(move |_| {
             Box::new(SimpleTcpGenerator::new(
                 targets.clone(),
@@ -143,7 +143,7 @@ fn test_tcp_connection_refused() {
 
     let result = GenericTestBuilder::new(
         config,
-        || TcpExecutor::with_timeout(Duration::from_secs(2)),
+        |_| TcpExecutor::with_timeout(Duration::from_secs(2)),
         Box::new(move |_| {
             Box::new(SimpleTcpGenerator::new(
                 targets.clone(),
@@ -182,7 +182,7 @@ fn test_tcp_rr_mode() {
 
     let result = GenericTestBuilder::new(
         config,
-        || TcpExecutor::with_pool(Duration::from_secs(5), 10, ConnectionPolicy::KeepAlive),
+        |_| TcpExecutor::with_pool(Duration::from_secs(5), 10, ConnectionPolicy::KeepAlive),
         Box::new(move |_| {
             Box::new(
                 SimpleTcpGenerator::new(targets.clone(), payload.clone(), TcpFraming::Raw, true)
@@ -231,7 +231,7 @@ fn test_tcp_sink_mode() {
 
     let result = GenericTestBuilder::new(
         config,
-        || TcpExecutor::with_pool(Duration::from_secs(5), 10, ConnectionPolicy::KeepAlive),
+        |_| TcpExecutor::with_pool(Duration::from_secs(5), 10, ConnectionPolicy::KeepAlive),
         Box::new(move |_| {
             Box::new(
                 SimpleTcpGenerator::new(targets.clone(), chunk.clone(), TcpFraming::Raw, false)
@@ -275,7 +275,7 @@ fn test_tcp_source_mode() {
 
     let result = GenericTestBuilder::new(
         config,
-        || TcpExecutor::with_pool(Duration::from_secs(5), 10, ConnectionPolicy::KeepAlive),
+        |_| TcpExecutor::with_pool(Duration::from_secs(5), 10, ConnectionPolicy::KeepAlive),
         Box::new(move |_| {
             Box::new(
                 SimpleTcpGenerator::new(targets.clone(), payload.clone(), TcpFraming::Raw, true)
@@ -327,7 +327,7 @@ fn test_tcp_pool_connection_reuse() {
 
     let result = GenericTestBuilder::new(
         config,
-        || TcpExecutor::with_pool(Duration::from_secs(5), 10, ConnectionPolicy::KeepAlive),
+        |_| TcpExecutor::with_pool(Duration::from_secs(5), 10, ConnectionPolicy::KeepAlive),
         Box::new(move |_| {
             Box::new(
                 SimpleTcpGenerator::new(targets.clone(), payload.clone(), TcpFraming::Raw, true)

@@ -506,6 +506,7 @@ mod tests {
                 max_error_rate: 5.0,
                 min_rps: 10.0,
                 max_rps: 50000.0,
+                external_constraints: vec![],
             },
             headers: vec![],
             num_cores: 0,

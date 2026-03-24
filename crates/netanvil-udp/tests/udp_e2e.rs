@@ -21,7 +21,7 @@ fn test_udp_echo() {
 
     let result = GenericTestBuilder::new(
         config,
-        || UdpExecutor::with_timeout(Duration::from_secs(5)),
+        |_| UdpExecutor::with_timeout(Duration::from_secs(5)),
         Box::new(move |_| {
             Box::new(SimpleUdpGenerator::new(
                 targets.clone(),
@@ -61,7 +61,7 @@ fn test_udp_fire_and_forget() {
 
     let result = GenericTestBuilder::new(
         config,
-        || UdpExecutor::with_timeout(Duration::from_secs(5)),
+        |_| UdpExecutor::with_timeout(Duration::from_secs(5)),
         Box::new(move |_| {
             Box::new(SimpleUdpGenerator::new(
                 targets.clone(),
@@ -100,7 +100,7 @@ fn test_udp_no_server_timeout() {
 
     let result = GenericTestBuilder::new(
         config,
-        || UdpExecutor::with_timeout(Duration::from_millis(200)),
+        |_| UdpExecutor::with_timeout(Duration::from_millis(200)),
         Box::new(move |_| {
             Box::new(SimpleUdpGenerator::new(
                 targets.clone(),

@@ -157,6 +157,10 @@ mod tests {
             latency_p50_ms: 2.5,
             latency_p90_ms: 8.0,
             latency_p99_ms: 25.0,
+            timeout_count: 0,
+            in_flight_drops: 0,
+            in_flight_count: 0,
+            in_flight_capacity: 0,
         };
         let json = serde_json::to_string(&m).unwrap();
         let parsed: RemoteMetrics = serde_json::from_str(&json).unwrap();

@@ -141,7 +141,7 @@ fn with_api_test(
     let progress_state = shared_state.clone();
     let _ = run_test_with_api(
         config,
-        || HttpExecutor::with_timeout(Duration::from_secs(5)),
+        |_| HttpExecutor::with_timeout(Duration::from_secs(5)),
         move |update| {
             progress_state.update_from_progress(update);
         },
@@ -241,7 +241,7 @@ fn post_stop_terminates_test_early() {
     let start = std::time::Instant::now();
     let result = run_test_with_api(
         config,
-        || HttpExecutor::with_timeout(Duration::from_secs(5)),
+        |_| HttpExecutor::with_timeout(Duration::from_secs(5)),
         move |update| {
             progress_state.update_from_progress(update);
         },

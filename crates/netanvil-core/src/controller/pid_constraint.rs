@@ -471,12 +471,11 @@ impl Constraint for PidConstraint {
         ]
     }
 
-    fn apply_update(&mut self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
-        let action = params
-            .get("action")
-            .and_then(|v| v.as_str())
-            .ok_or("expected 'action' field")?;
-
+    fn apply_update(
+        &mut self,
+        action: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         match action {
             "set_target" => {
                 let target = params

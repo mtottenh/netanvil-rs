@@ -560,20 +560,34 @@ impl Constraint for ThresholdConstraint {
         ]
     }
 
-    fn apply_update(&mut self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
-        if let Some(threshold) = params.get("threshold").and_then(|v| v.as_f64()) {
-            let old = self.threshold;
-            self.set_threshold(threshold);
-            Ok(serde_json::json!({
-                "ok": true,
-                "previous_threshold": old,
-                "new_threshold": threshold,
-            }))
-        } else if let Some(rate) = params.get("max_error_rate").and_then(|v| v.as_f64()) {
-            self.set_max_error_rate(rate);
-            Ok(serde_json::json!({"ok": true, "new_max_error_rate": rate}))
-        } else {
-            Err("expected 'threshold' or 'max_error_rate' field".into())
+    fn apply_update(
+        &mut self,
+        action: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        match action {
+            "set_threshold" => {
+                let threshold = params
+                    .get("threshold")
+                    .and_then(|v| v.as_f64())
+                    .ok_or("set_threshold requires 'threshold': f64")?;
+                let old = self.threshold;
+                self.set_threshold(threshold);
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "previous_threshold": old,
+                    "new_threshold": threshold,
+                }))
+            }
+            "set_max_error_rate" => {
+                let rate = params
+                    .get("max_error_rate")
+                    .and_then(|v| v.as_f64())
+                    .ok_or("set_max_error_rate requires 'max_error_rate': f64")?;
+                self.set_max_error_rate(rate);
+                Ok(serde_json::json!({"ok": true, "new_max_error_rate": rate}))
+            }
+            other => Err(format!("unknown action '{other}' for threshold constraint")),
         }
     }
 

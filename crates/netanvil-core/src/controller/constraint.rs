@@ -109,7 +109,14 @@ pub trait Constraint {
     }
 
     /// Apply a runtime parameter update. Returns a JSON result.
-    fn apply_update(&mut self, _params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    ///
+    /// `action` is the constraint-level action string (e.g., "set_threshold",
+    /// "set_gains"). `params` carries the action's parameters as JSON.
+    fn apply_update(
+        &mut self,
+        _action: &str,
+        _params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         Err("no updates supported".into())
     }
 

@@ -780,13 +780,13 @@ impl RateController for Arbiter {
             _ => {
                 // Constraint-level: "constraint.{id}.{action}"
                 if let Some(rest) = action.strip_prefix("constraint.") {
-                    if let Some((id, _constraint_action)) = rest.split_once('.') {
+                    if let Some((id, constraint_action)) = rest.split_once('.') {
                         let c = self
                             .constraints
                             .iter_mut()
                             .find(|c| c.id() == id)
                             .ok_or_else(|| format!("no constraint with id '{id}'"))?;
-                        c.apply_update(params)
+                        c.apply_update(constraint_action, params)
                     } else {
                         Err(format!(
                             "expected 'constraint.{{id}}.{{action}}', got '{action}'"

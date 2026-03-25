@@ -731,7 +731,13 @@ where
 
     // ── Create coordinator ──
     let rate_controller =
-        crate::build_rate_controller(&config.rate, control_interval, start_time, config.duration);
+        crate::build_rate_controller(
+            &config.rate,
+            control_interval,
+            start_time,
+            config.duration,
+            crate::clock::system_clock(),
+        );
 
     let mut coordinator = Coordinator::new(
         rate_controller,

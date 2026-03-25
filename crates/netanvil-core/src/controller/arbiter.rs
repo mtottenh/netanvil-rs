@@ -4,6 +4,7 @@
 //! pluggable `CompositionStrategy`, and applies arbiter-level policies
 //! (ceiling, floor, cooldown, rate-of-change limiting).
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use netanvil_types::{
@@ -11,6 +12,7 @@ use netanvil_types::{
 };
 
 use super::ceiling::ProgressiveCeiling;
+use super::clock::{Clock, SystemClock};
 use super::composition::{CompositionStrategy, ConstraintEval, MinSelector};
 use super::constraint::{Constraint, ConstraintIntent, EvalContext, WarmupBaseline};
 use super::constraints::ConstraintClass;
@@ -77,30 +79,29 @@ struct KnownGoodTracker {
     floor_fraction: f64,
     window: Duration,
     decay_factor: f64,
+    clock: Arc<dyn Clock>,
 }
 
 impl KnownGoodTracker {
-    fn new(floor_fraction: f64, window: Duration, initial_rate: f64) -> Self {
+    fn new(floor_fraction: f64, window: Duration, initial_rate: f64, clock: Arc<dyn Clock>) -> Self {
+        let now = clock.now();
         Self {
             max_recent_rate: initial_rate,
-            max_recent_rate_time: Instant::now(),
+            max_recent_rate_time: now,
             floor_fraction,
             window,
             decay_factor: 0.95,
+            clock,
         }
     }
 
     fn update(&mut self, current_rps: f64) {
         if current_rps > self.max_recent_rate {
-            // New peak: remember it.
             self.max_recent_rate = current_rps;
-            self.max_recent_rate_time = Instant::now();
-        } else if self.max_recent_rate_time.elapsed() > self.window {
-            // Window expired without seeing a higher rate. Decay gently
-            // rather than resetting to `current_rps` (which would create
-            // a ratchet effect under sustained pressure).
+            self.max_recent_rate_time = self.clock.now();
+        } else if self.clock.elapsed_since(self.max_recent_rate_time) > self.window {
             self.max_recent_rate *= self.decay_factor;
-            self.max_recent_rate_time = Instant::now();
+            self.max_recent_rate_time = self.clock.now();
         }
     }
 
@@ -284,6 +285,7 @@ pub struct ArbiterConfig {
     known_good_floor_fraction: f64,
     known_good_window: Duration,
     warmup: Option<(f64, Duration, f64)>,
+    clock: Option<Arc<dyn Clock>>,
 }
 
 impl ArbiterConfig {
@@ -311,6 +313,7 @@ impl ArbiterConfig {
             known_good_floor_fraction: 0.80,
             known_good_window: Duration::from_secs(60),
             warmup: None,
+            clock: None,
         }
     }
 
@@ -350,6 +353,13 @@ impl ArbiterConfig {
         self.warmup = Some((rps, duration, latency_multiplier));
         self
     }
+
+    /// Inject a custom clock for deterministic testing. If not called,
+    /// `Arbiter::new()` uses `SystemClock`.
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = Some(clock);
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -382,15 +392,24 @@ pub struct Arbiter {
     // Diagnostic: log every Nth tick at INFO level (state-change events
     // are always logged). Reduces log volume at high control frequencies.
     log_every_n_ticks: u32,
+
+    // Observability: which constraint was binding on the last tick.
+    last_binding: Option<String>,
+
+    clock: Arc<dyn Clock>,
 }
 
 impl Arbiter {
     pub fn new(config: ArbiterConfig) -> Self {
+        // Lazy default: use SystemClock if no clock was injected via with_clock().
+        let clock: Arc<dyn Clock> =
+            config.clock.unwrap_or_else(|| Arc::new(SystemClock));
+
         let phase = if let Some((rps, dur, mult)) = config.warmup {
             ArbiterPhase::Warmup {
                 warmup_rps: rps,
                 warmup_duration: dur,
-                start: Instant::now(),
+                start: clock.now(),
                 p99_samples: Vec::with_capacity(64),
                 latency_multiplier: mult,
             }
@@ -409,9 +428,19 @@ impl Arbiter {
         // the ceiling is started on transition to Active so that the
         // progressive-ramp clock doesn't tick during warmup.
         let ceiling = if matches!(phase, ArbiterPhase::Active) {
-            ProgressiveCeiling::started(ceiling_start, config.max_rps, config.test_duration / 2)
+            ProgressiveCeiling::started_with_clock(
+                ceiling_start,
+                config.max_rps,
+                config.test_duration / 2,
+                clock.clone(),
+            )
         } else {
-            ProgressiveCeiling::new(ceiling_start, config.max_rps, config.test_duration / 2)
+            ProgressiveCeiling::new_with_clock(
+                ceiling_start,
+                config.max_rps,
+                config.test_duration / 2,
+                clock.clone(),
+            )
         };
 
         Self {
@@ -430,6 +459,7 @@ impl Arbiter {
                 config.known_good_floor_fraction,
                 config.known_good_window,
                 current_rps,
+                clock.clone(),
             ),
             increase: IncreasePolicy::new(config.increase),
             rate_change_limits: config.rate_change_limits,
@@ -437,6 +467,8 @@ impl Arbiter {
             ticks_since_increase: 0,
             ramping_ticks: 0,
             log_every_n_ticks: 10,
+            last_binding: None,
+            clock,
         }
     }
 
@@ -475,7 +507,7 @@ impl Arbiter {
         }
 
         // Check transition
-        if start.elapsed() >= warmup_duration && p99_samples.len() >= 3 {
+        if self.clock.elapsed_since(start) >= warmup_duration && p99_samples.len() >= 3 {
             // Compute baseline (median for outlier resistance)
             p99_samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let n = p99_samples.len();
@@ -504,6 +536,7 @@ impl Arbiter {
                 self.known_good.floor_fraction,
                 self.known_good.window,
                 warmup_rps,
+                self.clock.clone(),
             );
             self.phase = ArbiterPhase::Active;
 
@@ -557,6 +590,10 @@ impl Arbiter {
 
         // 4. Compose via strategy.
         let result = self.strategy.compose(&evals, abstainers, increase_rate);
+
+        self.last_binding = result
+            .binding
+            .map(|i| self.constraints[i].id().to_string());
 
         // Bug 2 fix: classify backoff from the binding constraint's intent,
         // BEFORE arbiter-level clamps mask the signal. A drop caused by the
@@ -694,6 +731,10 @@ impl RateController for Arbiter {
     fn set_max_rps(&mut self, max_rps: f64) {
         self.max_rps = max_rps.max(self.min_rps);
         self.ceiling.set_end_value(self.max_rps);
+    }
+
+    fn last_binding(&self) -> Option<&str> {
+        self.last_binding.as_deref()
     }
 
     fn controller_state(&self) -> Vec<(&'static str, f64)> {

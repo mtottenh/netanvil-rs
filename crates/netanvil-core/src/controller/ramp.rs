@@ -19,7 +19,10 @@
 //! median of the oscillation around equilibrium.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use super::clock::{Clock, SystemClock};
 
 use netanvil_types::{
     ControllerInfo, ControllerType, ExternalConstraintConfig, MetricsSummary,
@@ -512,6 +515,12 @@ pub struct RampRateController {
     // -- Congestion avoidance --
     last_failure_rate: f64,
     backoff_count: u32,
+
+    // -- Observability --
+    /// Which constraint was binding on the last tick (for shadow validation).
+    last_binding: Option<String>,
+
+    clock: Arc<dyn Clock>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -522,50 +531,58 @@ enum RampState {
 
 impl RampRateController {
     pub fn new(config: RampConfig) -> Self {
+        Self::new_with_clock(config, Arc::new(SystemClock))
+    }
+
+    pub fn new_with_clock(config: RampConfig, clock: Arc<dyn Clock>) -> Self {
         let current_rps = config.warmup_rps;
         let smoothing = if config.smoothing_window > 0 {
             config.smoothing_window
         } else {
             DEFAULT_SMOOTHING_WINDOW
         };
-        let ceiling =
-            ProgressiveCeiling::new(config.warmup_rps, config.max_rps, config.test_duration / 2);
+        let ceiling = ProgressiveCeiling::new_with_clock(
+            config.warmup_rps,
+            config.max_rps,
+            config.test_duration / 2,
+            clock.clone(),
+        );
 
         let mut constraints = vec![
             Constraint::Timeout {
-                state: ConstraintState::new(1, 20.0), // persistence=1, seed=20 ticks
+                state: ConstraintState::new(1, 20.0),
             },
             Constraint::InFlightDrop {
-                state: ConstraintState::new(1, 20.0), // persistence=1, seed=20 ticks
+                state: ConstraintState::new(1, 20.0),
             },
             Constraint::Latency {
                 p99_window: VecDeque::with_capacity(smoothing + 1),
                 smoothing_window: smoothing,
                 last_smoothed_p99: 0.0,
-                state: ConstraintState::new(2, 5.0), // persistence=2, seed=5 ticks
+                state: ConstraintState::new(2, 5.0),
             },
             Constraint::ErrorRate {
-                state: ConstraintState::new(1, 5.0), // persistence=1, seed=5 ticks
+                state: ConstraintState::new(1, 5.0),
             },
         ];
 
-        // Add external signal constraints from config.
         for ext in &config.external_constraints {
             constraints.push(Constraint::External {
                 config: ext.clone(),
-                state: ConstraintState::new(ext.persistence, 10.0), // seed=10 ticks
+                state: ConstraintState::new(ext.persistence, 10.0),
             });
         }
 
+        let now = clock.now();
         Self {
-            warmup_start: Instant::now(),
+            warmup_start: now,
             warmup_p99_samples: Vec::with_capacity(64),
             baseline_p99_ms: 0.0,
             target_p99_ms: 0.0,
             current_rps,
             constraints,
             max_recent_rate: current_rps,
-            max_recent_rate_time: Instant::now(),
+            max_recent_rate_time: now,
             last_smoothed_p99: 0.0,
             ticks_since_increase: 0,
             ramping_ticks: 0,
@@ -574,8 +591,10 @@ impl RampRateController {
             cooldown_remaining: 0,
             last_failure_rate: 0.0,
             backoff_count: 0,
+            last_binding: None,
             state: RampState::Warmup,
             config,
+            clock,
         }
     }
 
@@ -634,20 +653,19 @@ impl RampRateController {
         );
 
         self.ceiling.start_now();
-        self.max_recent_rate_time = Instant::now();
+        self.max_recent_rate_time = self.clock.now();
         self.state = RampState::Ramping;
     }
 
     /// Update the known-good rate floor, expiring stale entries.
     fn update_known_good(&mut self) {
-        if self.max_recent_rate_time.elapsed() > KNOWN_GOOD_WINDOW {
-            // Stale — reset to current rate.
+        if self.clock.elapsed_since(self.max_recent_rate_time) > KNOWN_GOOD_WINDOW {
             self.max_recent_rate = self.current_rps;
-            self.max_recent_rate_time = Instant::now();
+            self.max_recent_rate_time = self.clock.now();
         }
         if self.current_rps > self.max_recent_rate {
             self.max_recent_rate = self.current_rps;
-            self.max_recent_rate_time = Instant::now();
+            self.max_recent_rate_time = self.clock.now();
         }
     }
 
@@ -961,6 +979,7 @@ impl RampRateController {
             "ramp AIMD tick"
         );
 
+        self.last_binding = Some(binding_label.to_string());
         self.current_rps = new_rps;
 
         RateDecision {
@@ -977,16 +996,17 @@ impl RateController for RampRateController {
                     let p99_ms = summary.latency_p99_ns as f64 / 1_000_000.0;
                     if p99_ms > 0.0 {
                         self.warmup_p99_samples.push(p99_ms);
+                        let warmup_elapsed = self.clock.elapsed_since(self.warmup_start);
                         tracing::debug!(
                             p99_ms = format!("{:.2}", p99_ms),
                             samples = self.warmup_p99_samples.len(),
                             elapsed_secs =
-                                format!("{:.1}", self.warmup_start.elapsed().as_secs_f64()),
+                                format!("{:.1}", warmup_elapsed.as_secs_f64()),
                             remaining_secs = format!(
                                 "{:.1}",
                                 self.config
                                     .warmup_duration
-                                    .saturating_sub(self.warmup_start.elapsed())
+                                    .saturating_sub(warmup_elapsed)
                                     .as_secs_f64()
                             ),
                             "ramp warmup sample"
@@ -994,7 +1014,7 @@ impl RateController for RampRateController {
                     }
                 }
 
-                if self.warmup_start.elapsed() >= self.config.warmup_duration
+                if self.clock.elapsed_since(self.warmup_start) >= self.config.warmup_duration
                     && self.warmup_p99_samples.len() >= 3
                 {
                     self.transition_to_ramping();
@@ -1020,6 +1040,10 @@ impl RateController for RampRateController {
     fn set_max_rps(&mut self, max_rps: f64) {
         self.config.max_rps = max_rps.max(self.config.min_rps);
         self.ceiling.set_end_value(self.config.max_rps);
+    }
+
+    fn last_binding(&self) -> Option<&str> {
+        self.last_binding.as_deref()
     }
 
     fn controller_state(&self) -> Vec<(&'static str, f64)> {

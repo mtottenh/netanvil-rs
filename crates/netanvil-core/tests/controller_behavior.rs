@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use netanvil_core::clock::system_clock;
 use netanvil_core::{
     controller::autotune::{
         compute_cohen_coon_gains, gain_schedule, ExplorationManager, MetricExploration, PidState,
@@ -3018,6 +3019,7 @@ fn build_ramp_arbiter(
         Duration::from_millis(100),
         std::time::Instant::now(),
         Duration::from_secs(60),
+        system_clock(),
     )
     .expect("ramp config should produce an arbiter")
 }
@@ -3552,8 +3554,8 @@ fn shadow_ramp_vs_arbiter_ramp_to_ceiling() {
     let dur = Duration::from_secs(60);
     let interval = Duration::from_millis(100);
 
-    let mut old = netanvil_core::build_rate_controller(&config, interval, now, dur);
-    let mut new = netanvil_core::build_arbiter(&config, interval, now, dur)
+    let mut old = netanvil_core::build_rate_controller(&config, interval, now, dur, system_clock());
+    let mut new = netanvil_core::build_arbiter(&config, interval, now, dur, system_clock())
         .expect("should build arbiter from ramp config");
 
     // Phase 1: Warmup — both should hold at warmup_rps.

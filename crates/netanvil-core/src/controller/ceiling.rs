@@ -7,7 +7,10 @@
 //! Used by both `SlowStart<C>` (immediate start) and `RampRateController`
 //! (deferred start after warmup completes).
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use super::clock::{Clock, SystemClock};
 
 /// Linear ceiling ramp from `start_value` to `end_value` over `ramp_duration`.
 pub struct ProgressiveCeiling {
@@ -16,35 +19,59 @@ pub struct ProgressiveCeiling {
     ramp_duration: Duration,
     start_time: Option<Instant>,
     last_milestone: u8,
+    clock: Arc<dyn Clock>,
 }
 
 impl ProgressiveCeiling {
     /// Create a new ceiling ramp without starting the clock.
-    /// Call `start_now()` to begin the ramp.
+    /// Call `start_now()` to begin the ramp. Uses system clock.
     pub fn new(start_value: f64, end_value: f64, ramp_duration: Duration) -> Self {
+        Self::new_with_clock(start_value, end_value, ramp_duration, Arc::new(SystemClock))
+    }
+
+    /// Create a new ceiling ramp with a custom clock.
+    pub fn new_with_clock(
+        start_value: f64,
+        end_value: f64,
+        ramp_duration: Duration,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         Self {
             start_value,
             end_value,
             ramp_duration,
             start_time: None,
             last_milestone: 0,
+            clock,
         }
     }
 
-    /// Create and immediately start the ceiling ramp.
+    /// Create and immediately start the ceiling ramp. Uses system clock.
     pub fn started(start_value: f64, end_value: f64, ramp_duration: Duration) -> Self {
+        Self::started_with_clock(start_value, end_value, ramp_duration, Arc::new(SystemClock))
+    }
+
+    /// Create and immediately start the ceiling ramp with a custom clock.
+    pub fn started_with_clock(
+        start_value: f64,
+        end_value: f64,
+        ramp_duration: Duration,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        let start_time = Some(clock.now());
         Self {
             start_value,
             end_value,
             ramp_duration,
-            start_time: Some(Instant::now()),
+            start_time,
             last_milestone: 0,
+            clock,
         }
     }
 
     /// Start the clock. Typically called when a warmup phase ends.
     pub fn start_now(&mut self) {
-        self.start_time = Some(Instant::now());
+        self.start_time = Some(self.clock.now());
     }
 
     /// Current ceiling value.
@@ -64,7 +91,7 @@ impl ProgressiveCeiling {
                 if secs <= 0.0 {
                     1.0
                 } else {
-                    (t.elapsed().as_secs_f64() / secs).min(1.0)
+                    (self.clock.elapsed_since(t).as_secs_f64() / secs).min(1.0)
                 }
             }
             None => 0.0,

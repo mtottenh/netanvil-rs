@@ -1,8 +1,10 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use netanvil_types::{PidGains, RateConfig, RateController, TargetMetric};
 
 use super::arbiter::{Arbiter, ArbiterConfig};
+use super::clock::Clock;
 use super::constraint::Constraint;
 use super::pid_constraint::PidConstraint;
 use super::smoothing::Smoother;
@@ -27,6 +29,7 @@ pub fn build_rate_controller(
     control_interval: Duration,
     start_time: Instant,
     test_duration: Duration,
+    clock: Arc<dyn Clock>,
 ) -> Box<dyn RateController> {
     let controller: Box<dyn RateController> = match rate {
         RateConfig::Static { rps } => {
@@ -35,9 +38,10 @@ pub fn build_rate_controller(
         }
         RateConfig::Step { steps } => {
             tracing::info!(num_steps = steps.len(), "rate controller: step");
-            Box::new(StepRateController::with_start_time(
+            Box::new(StepRateController::with_start_time_and_clock(
                 steps.clone(),
                 start_time,
+                clock,
             ))
         }
         RateConfig::Pid {
@@ -66,12 +70,13 @@ pub fn build_rate_controller(
                         kd: *kd,
                     },
                 );
-                Box::new(SlowStart::new(
+                Box::new(SlowStart::new_with_clock(
                     pid,
                     *initial_rps,
                     target.max_rps,
                     test_duration,
                     control_interval,
+                    clock,
                 ))
             }
             PidGains::Auto {
@@ -100,12 +105,13 @@ pub fn build_rate_controller(
                         control_interval,
                     },
                 );
-                Box::new(SlowStart::new(
+                Box::new(SlowStart::new_with_clock(
                     pid,
                     *initial_rps,
                     target.max_rps,
                     test_duration,
                     control_interval,
+                    clock,
                 ))
             }
         },
@@ -129,12 +135,13 @@ pub fn build_rate_controller(
                 *max_rps,
                 control_interval,
             );
-            Box::new(SlowStart::new(
+            Box::new(SlowStart::new_with_clock(
                 pid,
                 *initial_rps,
                 *max_rps,
                 test_duration,
                 control_interval,
+                clock,
             ))
         }
         RateConfig::Ramp {
@@ -156,21 +163,22 @@ pub fn build_rate_controller(
                 num_external_constraints = external_constraints.len(),
                 "rate controller: ramp (AIMD)"
             );
-            // Ramp controller uses AIMD with its own progressive ceiling —
-            // no PID, no SlowStart wrapper.
-            Box::new(RampRateController::new(RampConfig {
-                warmup_rps: *warmup_rps,
-                warmup_duration: *warmup_duration,
-                latency_multiplier: *latency_multiplier,
-                max_error_rate: *max_error_rate,
-                min_rps: *min_rps,
-                max_rps: *max_rps,
-                control_interval,
-                test_duration,
-                smoothing_window: 0, // use default
-                enable_ratio_freeze: true,
-                external_constraints: external_constraints.clone(),
-            }))
+            Box::new(RampRateController::new_with_clock(
+                RampConfig {
+                    warmup_rps: *warmup_rps,
+                    warmup_duration: *warmup_duration,
+                    latency_multiplier: *latency_multiplier,
+                    max_error_rate: *max_error_rate,
+                    min_rps: *min_rps,
+                    max_rps: *max_rps,
+                    control_interval,
+                    test_duration,
+                    smoothing_window: 0,
+                    enable_ratio_freeze: true,
+                    external_constraints: external_constraints.clone(),
+                },
+                clock,
+            ))
         }
     };
     controller
@@ -189,6 +197,7 @@ pub fn build_arbiter(
     _control_interval: Duration,
     _start_time: Instant,
     test_duration: Duration,
+    clock: Arc<dyn Clock>,
 ) -> Option<Box<dyn RateController>> {
     match rate {
         RateConfig::Static { .. } | RateConfig::Step { .. } => None,
@@ -216,7 +225,7 @@ pub fn build_arbiter(
             let mut constraints: Vec<Box<dyn Constraint>> = vec![
                 Box::new(ThresholdConstraint::timeout(*max_error_rate)),
                 Box::new(ThresholdConstraint::inflight()),
-                Box::new(ThresholdConstraint::latency(0.0, 3)), // threshold set after warmup
+                Box::new(ThresholdConstraint::latency(0.0, 3)),
                 Box::new(ThresholdConstraint::error_rate(*max_error_rate)),
             ];
 
@@ -226,7 +235,8 @@ pub fn build_arbiter(
 
             Some(Box::new(Arbiter::new(
                 ArbiterConfig::new(constraints, *warmup_rps, *min_rps, *max_rps, test_duration)
-                    .with_warmup(*warmup_rps, *warmup_duration, *latency_multiplier),
+                    .with_warmup(*warmup_rps, *warmup_duration, *latency_multiplier)
+                    .with_clock(clock),
             )))
         }
 
@@ -268,13 +278,16 @@ pub fn build_arbiter(
                 false, // manual gains, no scheduling
             ))];
 
-            Some(Box::new(Arbiter::new(ArbiterConfig::new(
-                constraints,
-                *initial_rps,
-                target.min_rps,
-                target.max_rps,
-                test_duration,
-            ))))
+            Some(Box::new(Arbiter::new(
+                ArbiterConfig::new(
+                    constraints,
+                    *initial_rps,
+                    target.min_rps,
+                    target.max_rps,
+                    test_duration,
+                )
+                .with_clock(clock),
+            )))
         }
 
         RateConfig::CompositePid {
@@ -325,13 +338,16 @@ pub fn build_arbiter(
                 })
                 .collect();
 
-            Some(Box::new(Arbiter::new(ArbiterConfig::new(
-                constraints,
-                *initial_rps,
-                *min_rps,
-                *max_rps,
-                test_duration,
-            ))))
+            Some(Box::new(Arbiter::new(
+                ArbiterConfig::new(
+                    constraints,
+                    *initial_rps,
+                    *min_rps,
+                    *max_rps,
+                    test_duration,
+                )
+                .with_clock(clock),
+            )))
         }
     }
 }

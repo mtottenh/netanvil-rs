@@ -6,11 +6,13 @@
 //! Uses static dispatch to the inner controller — `SlowStart<PidRateController>`
 //! is monomorphized, with only one dyn dispatch at the `Box` boundary.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use netanvil_types::{ControllerInfo, MetricsSummary, RateController, RateDecision};
 
 use super::ceiling::ProgressiveCeiling;
+use super::clock::Clock;
 
 /// Generic progressive-ceiling wrapper. Ramps the inner controller's ceiling
 /// from `initial_rps` to `max_rps` over `test_duration / 2`.
@@ -38,6 +40,26 @@ impl<C: RateController> SlowStart<C> {
         Self {
             inner,
             ceiling: ProgressiveCeiling::started(initial_rps, max_rps, test_duration / 2),
+        }
+    }
+
+    /// Create with a custom clock for deterministic testing.
+    pub fn new_with_clock(
+        inner: C,
+        initial_rps: f64,
+        max_rps: f64,
+        test_duration: Duration,
+        _control_interval: Duration,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self {
+            inner,
+            ceiling: ProgressiveCeiling::started_with_clock(
+                initial_rps,
+                max_rps,
+                test_duration / 2,
+                clock,
+            ),
         }
     }
 }

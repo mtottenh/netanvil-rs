@@ -1,8 +1,11 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use netanvil_types::{
     ControllerInfo, ControllerType, MetricsSummary, RateController, RateDecision,
 };
+
+use super::clock::{Clock, SystemClock};
 
 /// Rate controller that changes rates at predefined time offsets.
 ///
@@ -12,24 +15,40 @@ pub struct StepRateController {
     steps: Vec<(Duration, f64)>,
     current_rps: f64,
     start_time: Instant,
+    clock: Arc<dyn Clock>,
 }
 
 impl StepRateController {
     pub fn new(steps: Vec<(Duration, f64)>) -> Self {
+        Self::new_with_clock(steps, Arc::new(SystemClock))
+    }
+
+    pub fn new_with_clock(steps: Vec<(Duration, f64)>, clock: Arc<dyn Clock>) -> Self {
         assert!(
             !steps.is_empty(),
             "step controller requires at least one step"
         );
         let initial_rps = steps[0].1;
+        let start_time = clock.now();
         Self {
             steps,
             current_rps: initial_rps,
-            start_time: Instant::now(),
+            start_time,
+            clock,
         }
     }
 
     /// Create with an explicit start time (for testing).
     pub fn with_start_time(steps: Vec<(Duration, f64)>, start_time: Instant) -> Self {
+        Self::with_start_time_and_clock(steps, start_time, Arc::new(SystemClock))
+    }
+
+    /// Create with an explicit start time and custom clock.
+    pub fn with_start_time_and_clock(
+        steps: Vec<(Duration, f64)>,
+        start_time: Instant,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         assert!(
             !steps.is_empty(),
             "step controller requires at least one step"
@@ -39,6 +58,7 @@ impl StepRateController {
             steps,
             current_rps: initial_rps,
             start_time,
+            clock,
         }
     }
 
@@ -53,14 +73,12 @@ impl StepRateController {
             ));
         }
         self.current_rps = self.steps[index].1;
-        // Adjust start_time so that elapsed matches this step's offset,
-        // causing the schedule to continue from here.
-        self.start_time = Instant::now() - self.steps[index].0;
+        self.start_time = self.clock.now() - self.steps[index].0;
         Ok(self.current_rps)
     }
 
     fn current_step_index(&self) -> usize {
-        let elapsed = self.start_time.elapsed();
+        let elapsed = self.clock.elapsed_since(self.start_time);
         let mut idx = 0;
         for (i, &(offset, _)) in self.steps.iter().enumerate() {
             if elapsed >= offset {
@@ -73,7 +91,7 @@ impl StepRateController {
     }
 
     fn update_from_time(&mut self) {
-        let elapsed = self.start_time.elapsed();
+        let elapsed = self.clock.elapsed_since(self.start_time);
         let mut rps = self.steps[0].1;
         for &(offset, step_rps) in &self.steps {
             if elapsed >= offset {

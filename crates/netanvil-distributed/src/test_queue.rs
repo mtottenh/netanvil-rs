@@ -518,6 +518,7 @@ impl TestQueue {
             test_config.control_interval,
             std::time::Instant::now(),
             test_config.duration,
+            netanvil_core::clock::system_clock(),
         );
 
         let result = if let Some(ref tls) = config.tls {

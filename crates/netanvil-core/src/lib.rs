@@ -42,6 +42,7 @@ pub type GeneratorFactory = GenericGeneratorFactory<netanvil_types::HttpRequestS
 pub type TransformerFactory = GenericTransformerFactory<netanvil_types::HttpRequestSpec>;
 
 pub use controller::builder::{build_arbiter, build_rate_controller};
+pub use controller::clock::{self, Clock, SystemClock, TestClock};
 pub use controller::{
     Arbiter, ArbiterConfig, AutotuneParams, AutotuningPidController, CompositePidController,
     CongestionAvoidanceConfig, IncreasePolicyConfig, PidGainValues, PidRateController,

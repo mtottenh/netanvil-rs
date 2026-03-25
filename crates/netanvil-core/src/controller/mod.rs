@@ -2,6 +2,7 @@ pub(crate) mod arbiter;
 pub mod autotune;
 pub mod builder;
 mod ceiling;
+pub mod clock;
 mod composite_pid;
 pub mod composition;
 pub mod constraint;

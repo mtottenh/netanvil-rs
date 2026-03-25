@@ -253,6 +253,13 @@ pub trait RateController {
         }
     }
 
+    /// Return the name of the binding constraint from the last tick.
+    /// Used by shadow validation to diagnose divergences between controllers.
+    /// Default: None (controller doesn't track binding constraints).
+    fn last_binding(&self) -> Option<&str> {
+        None
+    }
+
     /// Apply a typed parameter update. Returns a JSON response body on
     /// success, or an error message on failure.
     ///

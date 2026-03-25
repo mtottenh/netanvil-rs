@@ -498,22 +498,27 @@ impl Constraint for ThresholdConstraint {
         let severity = self.compute_severity(smoothed);
         self.last_severity = severity;
 
-        // --- Self-caused detection: freeze streak and cap at Hold ---
-        // When we recently increased rate (within 2 ticks) and the severity
-        // spike is mild (below cap), it's likely external noise during our
-        // rate change — cap at Hold and do NOT advance the violation streak
-        // (prevents persistence accumulation during suppression window).
-        if let Some(cap) = self.self_caused_cap {
-            if ctx.ticks_since_increase <= 2 && severity < cap {
-                return Some(ConstraintOutput {
-                    intent: ConstraintIntent::Hold(ctx.current_rate),
-                    severity,
-                });
-            }
-        }
-
         // --- Map severity to action ---
         let raw_action = self.severity_mapping.map_to_action(severity, raw_value);
+
+        // --- Self-caused detection ---
+        // Matches the old ramp's behavior: when the signal is NOT self-caused
+        // (ticks_since_increase > 2) and severity is mild (below cap), the
+        // spike is likely external noise — cap at Hold and freeze the violation
+        // streak to prevent persistence accumulation from external noise.
+        //
+        // When self-caused IS true (ticks_since_increase <= 2), let the action
+        // through unchanged — a severity spike after our own rate increase is
+        // a real capacity signal, not noise.
+        if let Some(cap) = self.self_caused_cap {
+            if ctx.ticks_since_increase > 2 && severity < cap {
+                let capped_action = raw_action.min(ConstraintAction::Hold);
+                // Don't advance streak — this was external noise.
+                let intent = self.action_to_intent(capped_action, ctx.current_rate);
+                self.last_severity = severity;
+                return Some(ConstraintOutput { intent, severity });
+            }
+        }
 
         update_streak(&mut self.state.violation_streak, severity);
         let action = apply_persistence(

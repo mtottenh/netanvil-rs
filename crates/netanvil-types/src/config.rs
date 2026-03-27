@@ -374,7 +374,7 @@ pub struct PidConstraint {
 }
 
 /// Which metric the PID controller targets.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TargetMetric {
     LatencyP50,
     LatencyP90,

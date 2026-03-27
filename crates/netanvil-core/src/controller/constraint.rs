@@ -6,6 +6,7 @@
 
 use netanvil_types::MetricsSummary;
 
+use super::autotune::ExplorationManager;
 use super::constraints::ConstraintClass;
 
 // ---------------------------------------------------------------------------
@@ -119,6 +120,19 @@ pub trait Constraint {
     ) -> Result<serde_json::Value, String> {
         Err("no updates supported".into())
     }
+
+    /// Whether this constraint requires an exploration phase to determine its
+    /// control parameters (e.g., auto-tuned PID gains). During exploration,
+    /// `evaluate()` should return `None` (passive). After exploration, the
+    /// arbiter calls `on_exploration_complete()` with the shared manager.
+    fn requires_exploration(&self) -> bool {
+        false
+    }
+
+    /// Called when the arbiter's exploration phase completes. Constraints that
+    /// returned `true` from `requires_exploration()` should extract their
+    /// gains from the manager by matching on their target metric.
+    fn on_exploration_complete(&mut self, _manager: &ExplorationManager) {}
 
     /// Called when warmup completes, with baseline data.
     ///

@@ -6,6 +6,7 @@
 
 use netanvil_types::TargetMetric;
 
+use super::autotune::{ExplorationManager, ExplorationPhase, CONSERVATIVE_GAINS};
 use super::constraint::{Constraint, ConstraintIntent, ConstraintOutput, EvalContext};
 use super::constraints::ConstraintClass;
 use super::pid_math::{
@@ -170,6 +171,10 @@ pub struct PidConstraint {
     // Diagnostic: rate-limit overflow/NaN warnings (re-armed on successful evaluate)
     overflow_warned: bool,
     nan_warned: bool,
+
+    // Auto-tuning: if true, this constraint is passive (evaluate returns None)
+    // until on_exploration_complete delivers computed gains.
+    awaiting_exploration: bool,
 }
 
 impl PidConstraint {
@@ -195,6 +200,7 @@ impl PidConstraint {
             last_desired_rate: 0.0,
             overflow_warned: false,
             nan_warned: false,
+            awaiting_exploration: false,
         }
     }
 
@@ -223,6 +229,35 @@ impl PidConstraint {
             use_scheduling,
             tracking_gain: DEFAULT_TRACKING_GAIN,
         })
+    }
+
+    /// Create a PID constraint configured for auto-tuning exploration.
+    ///
+    /// Uses conservative placeholder gains until `on_exploration_complete()`
+    /// delivers computed gains from the `ExplorationManager`. Returns `None`
+    /// from `evaluate()` while `awaiting_exploration` is true.
+    pub fn auto_tuning(
+        id: String,
+        metric: TargetMetric,
+        target: f64,
+        smoother: Smoother,
+    ) -> Self {
+        let direction = MetricDirection::from_metric(&metric);
+        let mut s = Self::from_config(PidConstraintConfig {
+            id,
+            class: ConstraintClass::OperatingPoint,
+            metric,
+            direction,
+            target,
+            kp: CONSERVATIVE_GAINS.kp,
+            ki: CONSERVATIVE_GAINS.ki,
+            kd: CONSERVATIVE_GAINS.kd,
+            smoother,
+            use_scheduling: true,
+            tracking_gain: DEFAULT_TRACKING_GAIN,
+        });
+        s.awaiting_exploration = true;
+        s
     }
 
     /// Set the target value. Resets the integrator because the accumulated
@@ -305,6 +340,11 @@ impl PidConstraint {
 
 impl Constraint for PidConstraint {
     fn evaluate(&mut self, ctx: &EvalContext) -> Option<ConstraintOutput> {
+        // Passive during exploration — gains not yet determined.
+        if self.awaiting_exploration {
+            return None;
+        }
+
         // Contract: evaluate should not be called twice without post_select.
         debug_assert!(
             self.eval_cache.is_none(),
@@ -459,6 +499,47 @@ impl Constraint for PidConstraint {
         // producing a kick. Same mechanism as NaN/overflow recovery.
         self.derivative_valid = false;
         self.eval_cache = None;
+    }
+
+    fn requires_exploration(&self) -> bool {
+        self.awaiting_exploration
+    }
+
+    fn on_exploration_complete(&mut self, manager: &ExplorationManager) {
+        if !self.awaiting_exploration {
+            return;
+        }
+
+        // Find our metric in the manager by TargetMetric value.
+        let gains = manager
+            .metrics
+            .iter()
+            .enumerate()
+            .find(|(_, m)| m.metric == self.metric)
+            .map(|(idx, _)| match &manager.phase {
+                ExplorationPhase::Complete => manager.compute_gains_for(idx),
+                _ => CONSERVATIVE_GAINS,
+            })
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    constraint = %self.id,
+                    metric = ?self.metric,
+                    "no matching metric in exploration manager, using conservative gains"
+                );
+                CONSERVATIVE_GAINS
+            });
+
+        tracing::info!(
+            constraint = %self.id,
+            kp = format!("{:.4}", gains.kp),
+            ki = format!("{:.4}", gains.ki),
+            kd = format!("{:.4}", gains.kd),
+            dead_time_ticks = gains.dead_time_ticks,
+            "exploration complete, applying computed gains"
+        );
+
+        self.set_gains(gains.kp, gains.ki, gains.kd);
+        self.awaiting_exploration = false;
     }
 
     fn constraint_state(&self) -> Vec<(String, f64)> {

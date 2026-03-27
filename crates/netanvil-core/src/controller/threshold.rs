@@ -635,3 +635,103 @@ impl Constraint for ThresholdConstraint {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use netanvil_types::MetricsSummary;
+
+    fn make_ctx(p99_ms: f64, ticks_since_increase: u32) -> (Box<MetricsSummary>, EvalContext<'static>) {
+        let summary = Box::new(MetricsSummary {
+            total_requests: 100,
+            latency_p99_ns: (p99_ms * 1_000_000.0) as u64,
+            latency_p90_ns: (p99_ms * 0.9 * 1_000_000.0) as u64,
+            latency_p50_ns: (p99_ms * 0.5 * 1_000_000.0) as u64,
+            ..Default::default()
+        });
+        let summary_ref: &'static MetricsSummary = Box::leak(summary);
+        let ctx = EvalContext {
+            summary: summary_ref,
+            current_rate: 1000.0,
+            ticks_since_increase,
+            min_rps: 10.0,
+            max_rps: 50000.0,
+        };
+        // Leak is fine in tests — process exits.
+        (Box::new(MetricsSummary::default()), ctx)
+    }
+
+    /// Regression: self-caused detection must NOT suppress AllowIncrease
+    /// after a rate increase. (Fixed 2026-04-10: logic was inverted,
+    /// causing 4× slower clean ramp.)
+    #[test]
+    fn self_caused_does_not_suppress_allow_increase() {
+        let mut c = ThresholdConstraint::latency(15.0, 3);
+
+        // Warm up median smoother (needs 3 samples).
+        for _ in 0..3 {
+            let (_, ctx) = make_ctx(5.0, 10);
+            c.evaluate(&ctx);
+        }
+
+        // Right after a rate increase (ticks_since_increase=0),
+        // p99=5ms, target=15ms → severity=0.33 → AllowIncrease.
+        // Self-caused gate must NOT suppress this to Hold.
+        let (_, ctx) = make_ctx(5.0, 0);
+        let output = c.evaluate(&ctx).expect("should produce output");
+        assert!(
+            matches!(output.intent, ConstraintIntent::NoObjection),
+            "mild severity after rate increase should be NoObjection, got {:?}",
+            output.intent
+        );
+    }
+
+    /// The complement: when NOT self-caused, mild backoff IS capped at Hold.
+    /// (Noise rejection: external noise shouldn't cause backoff, only hold.)
+    #[test]
+    fn not_self_caused_mild_backoff_capped_at_hold() {
+        let mut c = ThresholdConstraint::latency(15.0, 3);
+
+        // Feed values in the GentleBackoff band (severity 1.0-1.5) to the
+        // median smoother. Need 3 samples for the median to reflect them.
+        // 18ms / 15ms = 1.2 → GentleBackoff.
+        for _ in 0..3 {
+            let (_, ctx) = make_ctx(18.0, 10);
+            c.evaluate(&ctx);
+        }
+
+        // NOT self-caused (ticks_since_increase=10), severity=1.2 < cap 1.5.
+        // Without the self-caused cap, this would be GentleBackoff.
+        // With the cap (!self_caused && mild), it should be capped at Hold.
+        let (_, ctx) = make_ctx(18.0, 10);
+        let output = c.evaluate(&ctx).expect("should produce output");
+        assert!(
+            matches!(output.intent, ConstraintIntent::Hold(_)),
+            "mild backoff without recent increase should be capped at Hold, got {:?}",
+            output.intent
+        );
+    }
+
+    /// Severe spikes are never suppressed, regardless of self-caused status.
+    #[test]
+    fn severe_spike_not_suppressed_regardless_of_self_caused() {
+        let mut c = ThresholdConstraint::latency(15.0, 3);
+
+        // Feed severe values through the median smoother (need 3 samples).
+        // 80ms / 15ms = 5.3 → well above cap 1.5.
+        for _ in 0..3 {
+            let (_, ctx) = make_ctx(80.0, 10);
+            c.evaluate(&ctx);
+        }
+
+        // Severe spike right after increase (self-caused).
+        // Severity 5.3 > cap 1.5, so self-caused gate doesn't apply.
+        let (_, ctx) = make_ctx(80.0, 0);
+        let output = c.evaluate(&ctx).expect("should produce output");
+        assert!(
+            matches!(output.intent, ConstraintIntent::DesireRate(_)),
+            "severe spike should produce backoff, got {:?}",
+            output.intent
+        );
+    }
+}

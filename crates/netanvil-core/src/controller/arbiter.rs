@@ -11,6 +11,7 @@ use netanvil_types::{
     ControllerInfo, ControllerType, MetricsSummary, RateController, RateDecision,
 };
 
+use super::autotune::ExplorationManager;
 use super::ceiling::ProgressiveCeiling;
 use super::clock::{Clock, SystemClock};
 use super::composition::{CompositionStrategy, ConstraintEval, MinSelector};
@@ -247,6 +248,7 @@ impl RateChangeLimits {
 // ---------------------------------------------------------------------------
 
 enum ArbiterPhase {
+    Exploration(ExplorationManager),
     Warmup {
         warmup_rps: f64,
         warmup_duration: Duration,
@@ -256,6 +258,10 @@ enum ArbiterPhase {
     },
     Active,
 }
+
+/// Abort threshold: if a catastrophic constraint desires rate below this
+/// fraction of the exploration rate, abort exploration.
+const EXPLORATION_ABORT_THRESHOLD: f64 = 0.85;
 
 // ---------------------------------------------------------------------------
 // Arbiter configuration
@@ -286,6 +292,7 @@ pub struct ArbiterConfig {
     known_good_window: Duration,
     warmup: Option<(f64, Duration, f64)>,
     clock: Option<Arc<dyn Clock>>,
+    exploration_manager: Option<ExplorationManager>,
 }
 
 impl ArbiterConfig {
@@ -314,6 +321,7 @@ impl ArbiterConfig {
             known_good_window: Duration::from_secs(60),
             warmup: None,
             clock: None,
+            exploration_manager: None,
         }
     }
 
@@ -360,6 +368,14 @@ impl ArbiterConfig {
         self.clock = Some(clock);
         self
     }
+
+    /// Enable an exploration phase before active control. The arbiter will
+    /// drive rate according to the exploration pattern and deliver computed
+    /// gains to constraints via `on_exploration_complete()`.
+    pub fn with_exploration(mut self, manager: ExplorationManager) -> Self {
+        self.exploration_manager = Some(manager);
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -397,15 +413,24 @@ pub struct Arbiter {
     last_binding: Option<String>,
 
     clock: Arc<dyn Clock>,
+
+    // Preserved from config for Exploration→Warmup transition.
+    warmup_config: Option<(f64, Duration, f64)>,
+
+    // Initial RPS from config, needed for post-exploration phase setup.
+    initial_rps: f64,
 }
 
 impl Arbiter {
     pub fn new(config: ArbiterConfig) -> Self {
-        // Lazy default: use SystemClock if no clock was injected via with_clock().
         let clock: Arc<dyn Clock> =
             config.clock.unwrap_or_else(|| Arc::new(SystemClock));
 
-        let phase = if let Some((rps, dur, mult)) = config.warmup {
+        // Determine phase: Exploration takes priority, then Warmup, then Active.
+        let warmup_config = config.warmup;
+        let phase = if let Some(manager) = config.exploration_manager {
+            ArbiterPhase::Exploration(manager)
+        } else if let Some((rps, dur, mult)) = warmup_config {
             ArbiterPhase::Warmup {
                 warmup_rps: rps,
                 warmup_duration: dur,
@@ -418,15 +443,14 @@ impl Arbiter {
         };
 
         let current_rps = match &phase {
+            ArbiterPhase::Exploration(mgr) => mgr.initial_rps * 0.5, // baseline rate
             ArbiterPhase::Warmup { warmup_rps, .. } => *warmup_rps,
             ArbiterPhase::Active => config.initial_rps,
         };
 
-        let ceiling_start = current_rps;
+        let ceiling_start = config.initial_rps; // ceiling starts from initial, not exploration baseline
 
-        // If no warmup, start the ceiling immediately. With warmup,
-        // the ceiling is started on transition to Active so that the
-        // progressive-ramp clock doesn't tick during warmup.
+        // Ceiling is deferred (not started) during Exploration and Warmup.
         let ceiling = if matches!(phase, ArbiterPhase::Active) {
             ProgressiveCeiling::started_with_clock(
                 ceiling_start,
@@ -469,6 +493,8 @@ impl Arbiter {
             log_every_n_ticks: 10,
             last_binding: None,
             clock,
+            warmup_config,
+            initial_rps: config.initial_rps,
         }
     }
 
@@ -477,6 +503,127 @@ impl Arbiter {
     /// logging entirely (state-change events still log).
     pub fn set_log_every_n_ticks(&mut self, n: u32) {
         self.log_every_n_ticks = n;
+    }
+
+    /// Abort exploration: deliver conservative gains, transition to Active (or Warmup).
+    fn abort_exploration(&mut self) {
+        let manager = match std::mem::replace(&mut self.phase, ArbiterPhase::Active) {
+            ArbiterPhase::Exploration(m) => m,
+            _ => return,
+        };
+        // Sequence point: all tick() calls done. Notify constraints.
+        for c in &mut self.constraints {
+            c.on_exploration_complete(&manager);
+        }
+        self.transition_post_exploration();
+    }
+
+    /// After exploration completes, transition to Warmup (if configured) or Active.
+    fn transition_post_exploration(&mut self) {
+        if let Some((rps, dur, mult)) = self.warmup_config.take() {
+            self.current_rps = rps;
+            self.phase = ArbiterPhase::Warmup {
+                warmup_rps: rps,
+                warmup_duration: dur,
+                start: self.clock.now(),
+                p99_samples: Vec::with_capacity(64),
+                latency_multiplier: mult,
+            };
+            tracing::info!("arbiter: exploration → warmup");
+        } else {
+            self.current_rps = self.initial_rps;
+            self.ceiling.start_now();
+            // phase is already Active from the mem::replace in abort_exploration
+            // or set by the caller
+            tracing::info!("arbiter: exploration → active");
+        }
+    }
+
+    fn exploration_tick(&mut self, summary: &MetricsSummary) -> RateDecision {
+        let manager = match &mut self.phase {
+            ArbiterPhase::Exploration(m) => m,
+            _ => unreachable!("exploration_tick called outside exploration phase"),
+        };
+
+        if let Some(rate) = manager.tick(summary) {
+            // Still exploring. Safety: evaluate only Catastrophic constraints.
+            // Operating-point constraints are NOT evaluated to avoid contaminating
+            // their smoother/persistence state with exploration's artificial step.
+            let mut safe_rate = rate;
+            let ctx = EvalContext {
+                summary,
+                current_rate: self.current_rps,
+                ticks_since_increase: 0,
+                min_rps: self.min_rps,
+                max_rps: self.max_rps,
+            };
+
+            let mut should_abort = false;
+            for c in &mut self.constraints {
+                if c.requires_exploration() || c.class() != ConstraintClass::Catastrophic {
+                    continue;
+                }
+                if let Some(output) = c.evaluate(&ctx) {
+                    let abort = match output.intent {
+                        ConstraintIntent::NoObjection => false,
+                        ConstraintIntent::Hold(_) => output.severity >= 1.0,
+                        ConstraintIntent::DesireRate(d) => {
+                            d < safe_rate * EXPLORATION_ABORT_THRESHOLD
+                        }
+                    };
+                    if abort {
+                        tracing::warn!(
+                            constraint = %c.id(),
+                            severity = format!("{:.2}", output.severity),
+                            "catastrophic constraint fired during exploration, aborting"
+                        );
+                        should_abort = true;
+                        if let ConstraintIntent::DesireRate(d) = output.intent {
+                            safe_rate = safe_rate.min(d);
+                        }
+                    }
+                }
+            }
+
+            if should_abort {
+                self.current_rps = safe_rate.clamp(self.min_rps, self.max_rps);
+                self.abort_exploration();
+                return RateDecision {
+                    target_rps: self.current_rps,
+                };
+            }
+
+            self.current_rps = safe_rate.clamp(self.min_rps, self.max_rps);
+            RateDecision {
+                target_rps: self.current_rps,
+            }
+        } else {
+            // Exploration complete (or failed — compute_gains_for handles both).
+            // Sequence point: all tick() calls done, now notify constraints.
+            let manager = match std::mem::replace(&mut self.phase, ArbiterPhase::Active) {
+                ArbiterPhase::Exploration(m) => m,
+                _ => unreachable!(),
+            };
+
+            let phase_label = format!("{:?}", manager.phase);
+            tracing::info!(
+                exploration_phase = phase_label,
+                "arbiter: exploration complete, delivering gains to constraints"
+            );
+
+            for c in &mut self.constraints {
+                c.on_exploration_complete(&manager);
+            }
+
+            self.transition_post_exploration();
+
+            // Run the next phase's first tick immediately.
+            match &self.phase {
+                ArbiterPhase::Warmup { .. } => self.warmup_tick(summary),
+                ArbiterPhase::Active => self.active_tick(summary),
+                ArbiterPhase::Exploration(_) => unreachable!(),
+            }
+        }
     }
 
     fn warmup_tick(&mut self, summary: &MetricsSummary) -> RateDecision {
@@ -495,7 +642,7 @@ impl Arbiter {
                     p99_samples,
                     *latency_multiplier,
                 ),
-                ArbiterPhase::Active => unreachable!(),
+                _ => unreachable!("warmup_tick called outside warmup phase"),
             };
 
         // Collect warmup samples
@@ -709,6 +856,7 @@ impl Arbiter {
 impl RateController for Arbiter {
     fn update(&mut self, summary: &MetricsSummary) -> RateDecision {
         match &self.phase {
+            ArbiterPhase::Exploration(_) => self.exploration_tick(summary),
             ArbiterPhase::Warmup { .. } => self.warmup_tick(summary),
             ArbiterPhase::Active => self.active_tick(summary),
         }
@@ -726,6 +874,11 @@ impl RateController for Arbiter {
             // kick on the next evaluate.
             self.notify_rate_override();
         }
+        // Abort exploration on external rate override.
+        if matches!(self.phase, ArbiterPhase::Exploration(_)) {
+            tracing::info!(rps, "arbiter: external set_rate during exploration, aborting");
+            self.abort_exploration();
+        }
     }
 
     fn set_max_rps(&mut self, max_rps: f64) {
@@ -738,6 +891,12 @@ impl RateController for Arbiter {
     }
 
     fn controller_state(&self) -> Vec<(&'static str, f64)> {
+        if let ArbiterPhase::Exploration(ref manager) = self.phase {
+            return vec![(
+                "netanvil_arbiter_exploration_progress",
+                manager.exploration_progress(),
+            )];
+        }
         if matches!(self.phase, ArbiterPhase::Warmup { .. }) {
             return Vec::new();
         }
@@ -776,7 +935,11 @@ impl RateController for Arbiter {
             current_rps: self.current_rps,
             editable_actions: vec!["set_max_rps".into(), "set_min_rps".into()],
             params: serde_json::json!({
-                "phase": if matches!(self.phase, ArbiterPhase::Warmup { .. }) { "warmup" } else { "active" },
+                "phase": match &self.phase {
+                    ArbiterPhase::Exploration(_) => "exploration",
+                    ArbiterPhase::Warmup { .. } => "warmup",
+                    ArbiterPhase::Active => "active",
+                },
                 "constraints": self.constraints.iter().map(|c| c.id()).collect::<Vec<_>>(),
                 "ramping_ticks": self.ramping_ticks,
                 "in_cooldown": self.cooldown.is_active(),

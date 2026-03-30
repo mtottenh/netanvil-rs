@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use netanvil_types::{PidGains, RateConfig, RateController, TargetMetric};
 
 use super::arbiter::{Arbiter, ArbiterConfig};
+use super::autotune::{ExplorationManager, MetricExploration};
 use super::clock::Clock;
 use super::constraint::Constraint;
 use super::pid_constraint::PidConstraint;
@@ -194,7 +195,7 @@ pub fn build_rate_controller(
 /// validated, the old builder paths can be replaced.
 pub fn build_arbiter(
     rate: &RateConfig,
-    _control_interval: Duration,
+    control_interval: Duration,
     _start_time: Instant,
     test_duration: Duration,
     clock: Arc<dyn Clock>,
@@ -246,9 +247,50 @@ pub fn build_arbiter(
         } => {
             let (kp, ki, kd) = match &target.gains {
                 PidGains::Manual { kp, ki, kd } => (*kp, *ki, *kd),
-                PidGains::Auto { .. } => {
-                    // Auto-tuning PID via Arbiter not yet supported — fall back to legacy.
-                    return None;
+                PidGains::Auto {
+                    autotune_duration,
+                    smoothing,
+                } => {
+                    tracing::info!(
+                        initial_rps,
+                        metric = ?target.metric,
+                        target_value = target.value,
+                        ?autotune_duration,
+                        smoothing,
+                        "rate controller: arbiter (PID auto-tune)"
+                    );
+
+                    let smoother = Smoother::ema(*smoothing);
+                    let constraint = PidConstraint::auto_tuning(
+                        format!("{:?}", target.metric),
+                        target.metric.clone(),
+                        target.value,
+                        smoother,
+                    );
+                    let constraints: Vec<Box<dyn Constraint>> =
+                        vec![Box::new(constraint)];
+
+                    let exploration = ExplorationManager::new(
+                        vec![MetricExploration::new(
+                            target.metric.clone(),
+                            target.value,
+                        )],
+                        *initial_rps,
+                        *autotune_duration,
+                        control_interval,
+                    );
+
+                    return Some(Box::new(Arbiter::new(
+                        ArbiterConfig::new(
+                            constraints,
+                            *initial_rps,
+                            target.min_rps,
+                            target.max_rps,
+                            test_duration,
+                        )
+                        .with_exploration(exploration)
+                        .with_clock(clock),
+                    )));
                 }
             };
 
@@ -296,58 +338,95 @@ pub fn build_arbiter(
             min_rps,
             max_rps,
         } => {
-            // Only support all-manual gains via Arbiter for now.
-            let all_manual = pid_constraints
+            let has_auto = pid_constraints
                 .iter()
-                .all(|c| matches!(c.gains, PidGains::Manual { .. }));
-            if !all_manual {
-                return None;
-            }
+                .any(|c| matches!(c.gains, PidGains::Auto { .. }));
 
             tracing::info!(
                 initial_rps,
                 num_constraints = pid_constraints.len(),
+                has_auto,
                 min_rps,
                 max_rps,
                 "rate controller: arbiter (composite PID config)"
             );
 
+            // Build constraints, preserving user-specified order.
+            let mut auto_explorations = Vec::new();
             let constraints: Vec<Box<dyn Constraint>> = pid_constraints
                 .iter()
                 .map(|c| {
-                    let (kp, ki, kd) = match &c.gains {
-                        PidGains::Manual { kp, ki, kd } => (*kp, *ki, *kd),
-                        _ => unreachable!(), // checked above
-                    };
-                    let smoother = match &c.metric {
-                        TargetMetric::LatencyP50
-                        | TargetMetric::LatencyP90
-                        | TargetMetric::LatencyP99 => Smoother::median(3),
-                        _ => Smoother::ema(0.3),
-                    };
-                    Box::new(PidConstraint::new(
-                        format!("{:?}", c.metric),
-                        c.metric.clone(),
-                        c.limit,
-                        kp,
-                        ki,
-                        kd,
-                        smoother,
-                        false,
-                    )) as Box<dyn Constraint>
+                    match &c.gains {
+                        PidGains::Manual { kp, ki, kd } => {
+                            let smoother = match &c.metric {
+                                TargetMetric::LatencyP50
+                                | TargetMetric::LatencyP90
+                                | TargetMetric::LatencyP99 => Smoother::median(3),
+                                _ => Smoother::ema(0.3),
+                            };
+                            Box::new(PidConstraint::new(
+                                format!("{:?}", c.metric),
+                                c.metric.clone(),
+                                c.limit,
+                                *kp,
+                                *ki,
+                                *kd,
+                                smoother,
+                                false,
+                            )) as Box<dyn Constraint>
+                        }
+                        PidGains::Auto {
+                            autotune_duration: _,
+                            smoothing,
+                        } => {
+                            let smoother = Smoother::ema(*smoothing);
+                            auto_explorations.push(MetricExploration::new(
+                                c.metric.clone(),
+                                c.limit,
+                            ));
+                            Box::new(PidConstraint::auto_tuning(
+                                format!("{:?}", c.metric),
+                                c.metric.clone(),
+                                c.limit,
+                                smoother,
+                            )) as Box<dyn Constraint>
+                        }
+                    }
                 })
                 .collect();
 
-            Some(Box::new(Arbiter::new(
-                ArbiterConfig::new(
-                    constraints,
+            let mut config = ArbiterConfig::new(
+                constraints,
+                *initial_rps,
+                *min_rps,
+                *max_rps,
+                test_duration,
+            );
+
+            // If any constraints need auto-tuning, create a shared ExplorationManager.
+            if !auto_explorations.is_empty() {
+                // Use the max autotune_duration across all auto constraints.
+                let autotune_duration = pid_constraints
+                    .iter()
+                    .filter_map(|c| match &c.gains {
+                        PidGains::Auto {
+                            autotune_duration, ..
+                        } => Some(*autotune_duration),
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap_or(Duration::from_secs(3));
+
+                let exploration = ExplorationManager::new(
+                    auto_explorations,
                     *initial_rps,
-                    *min_rps,
-                    *max_rps,
-                    test_duration,
-                )
-                .with_clock(clock),
-            )))
+                    autotune_duration,
+                    control_interval,
+                );
+                config = config.with_exploration(exploration);
+            }
+
+            Some(Box::new(Arbiter::new(config.with_clock(clock))))
         }
     }
 }

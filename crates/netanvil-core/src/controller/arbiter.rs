@@ -505,13 +505,25 @@ impl Arbiter {
         self.log_every_n_ticks = n;
     }
 
-    /// Abort exploration: deliver conservative gains, transition to Active (or Warmup).
-    fn abort_exploration(&mut self) {
+    /// Extract the ExplorationManager, deliver gains to constraints, and
+    /// transition to the next phase (Warmup if configured, else Active).
+    ///
+    /// Used by both the natural completion path and the abort path.
+    fn finish_exploration(&mut self) {
         let manager = match std::mem::replace(&mut self.phase, ArbiterPhase::Active) {
             ArbiterPhase::Exploration(m) => m,
             _ => return,
         };
-        // Sequence point: all tick() calls done. Notify constraints.
+
+        let phase_label = format!("{:?}", manager.phase);
+        tracing::info!(
+            exploration_phase = phase_label,
+            "arbiter: exploration finished, delivering gains to constraints"
+        );
+
+        // Sequence point: all tick() calls are done before this point.
+        // The manager is now owned (moved out of the phase via mem::replace),
+        // so we can freely iterate &mut self.constraints while borrowing &manager.
         for c in &mut self.constraints {
             c.on_exploration_complete(&manager);
         }
@@ -540,12 +552,16 @@ impl Arbiter {
     }
 
     fn exploration_tick(&mut self, summary: &MetricsSummary) -> RateDecision {
-        let manager = match &mut self.phase {
-            ArbiterPhase::Exploration(m) => m,
+        // Borrow scope: &mut self.phase is borrowed only for the manager.tick()
+        // call inside the Some(rate) arm. The borrow ends at the arm boundary,
+        // so the else branch can call finish_exploration() which does mem::replace
+        // on self.phase without conflict.
+        let tick_result = match &mut self.phase {
+            ArbiterPhase::Exploration(m) => m.tick(summary),
             _ => unreachable!("exploration_tick called outside exploration phase"),
         };
 
-        if let Some(rate) = manager.tick(summary) {
+        if let Some(rate) = tick_result {
             // Still exploring. Safety: evaluate only Catastrophic constraints.
             // Operating-point constraints are NOT evaluated to avoid contaminating
             // their smoother/persistence state with exploration's artificial step.
@@ -587,7 +603,7 @@ impl Arbiter {
 
             if should_abort {
                 self.current_rps = safe_rate.clamp(self.min_rps, self.max_rps);
-                self.abort_exploration();
+                self.finish_exploration();
                 return RateDecision {
                     target_rps: self.current_rps,
                 };
@@ -599,25 +615,11 @@ impl Arbiter {
             }
         } else {
             // Exploration complete (or failed — compute_gains_for handles both).
-            // Sequence point: all tick() calls done, now notify constraints.
-            let manager = match std::mem::replace(&mut self.phase, ArbiterPhase::Active) {
-                ArbiterPhase::Exploration(m) => m,
-                _ => unreachable!(),
-            };
+            self.finish_exploration();
 
-            let phase_label = format!("{:?}", manager.phase);
-            tracing::info!(
-                exploration_phase = phase_label,
-                "arbiter: exploration complete, delivering gains to constraints"
-            );
-
-            for c in &mut self.constraints {
-                c.on_exploration_complete(&manager);
-            }
-
-            self.transition_post_exploration();
-
-            // Run the next phase's first tick immediately.
+            // Run the next phase's first tick immediately. Note: if warmup_tick
+            // or active_tick panics, the stack trace will show exploration_tick
+            // as the caller — this is expected, not a bug.
             match &self.phase {
                 ArbiterPhase::Warmup { .. } => self.warmup_tick(summary),
                 ArbiterPhase::Active => self.active_tick(summary),
@@ -877,7 +879,7 @@ impl RateController for Arbiter {
         // Abort exploration on external rate override.
         if matches!(self.phase, ArbiterPhase::Exploration(_)) {
             tracing::info!(rps, "arbiter: external set_rate during exploration, aborting");
-            self.abort_exploration();
+            self.finish_exploration();
         }
     }
 

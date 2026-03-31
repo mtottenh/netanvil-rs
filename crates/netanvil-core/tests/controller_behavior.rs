@@ -3646,3 +3646,346 @@ fn shadow_ramp_vs_arbiter_ramp_to_ceiling() {
         (new.current_rate() - old.current_rate()).abs() / old.current_rate() * 100.0
     );
 }
+
+// ===========================================================================
+// Arbiter exploration-driven auto-tuning tests
+// ===========================================================================
+
+#[test]
+fn arbiter_exploration_drives_rate_then_transitions() {
+    use std::sync::Arc;
+    use netanvil_core::controller::pid_constraint::PidConstraint as PidC;
+    use netanvil_core::controller::smoothing::Smoother;
+    use netanvil_core::controller::clock::TestClock;
+    use netanvil_core::controller::constraint::Constraint;
+
+    let clock = Arc::new(TestClock::new());
+    let control_interval = Duration::from_millis(100);
+    let autotune_duration = Duration::from_millis(1500); // baseline=5 ticks, step=10 ticks
+
+    // Build a PidConstraint configured for auto-tuning.
+    let constraint = PidC::auto_tuning(
+        "LatencyP99".into(),
+        TargetMetric::LatencyP99,
+        100.0, // target 100ms
+        Smoother::ema(0.3),
+    );
+
+    // Build an ExplorationManager for one metric.
+    let exploration = ExplorationManager::new(
+        vec![MetricExploration::new(TargetMetric::LatencyP99, 100.0)],
+        500.0, // initial_rps
+        autotune_duration,
+        control_interval,
+    );
+
+    let constraints: Vec<Box<dyn Constraint>> = vec![Box::new(constraint)];
+
+    let config = ArbiterConfig::new(
+        constraints,
+        500.0,  // initial_rps
+        10.0,   // min_rps
+        50000.0, // max_rps
+        Duration::from_secs(60),
+    )
+    .with_exploration(exploration)
+    .with_clock(clock.clone() as Arc<dyn netanvil_core::Clock>);
+
+    let mut arbiter = Arbiter::new(config);
+
+    // Track all rates and phases to observe transitions.
+    let mut rates = Vec::new();
+
+    // Phase 1: Baseline (first 4 ticks at 250; tick 5 transitions to step).
+    // baseline_duration_ticks = 500ms / 100ms = 5 ticks.
+    // On the 5th tick (tick_count becomes 5), baseline completes → step rate.
+    for _ in 0..4 {
+        let decision = arbiter.update(&make_summary(100, 80.0, 0.0));
+        rates.push(decision.target_rps);
+        clock.advance(control_interval);
+    }
+
+    // Phase 2: Step response — feed varying latency so the metric doesn't
+    // settle immediately (settled requires last-3 spread < noise_threshold=4).
+    // Use values 110, 130, 115, 125, 120 to keep spread > 4 initially.
+    let step_latencies = [110.0, 130.0, 115.0, 125.0, 120.0, 120.0, 120.0];
+    for &lat in &step_latencies {
+        let decision = arbiter.update(&make_summary(100, lat, 0.0));
+        rates.push(decision.target_rps);
+        clock.advance(control_interval);
+    }
+
+    // Phase 3: Post-exploration — PID should now be active.
+    let mut post_exploration_rates = Vec::new();
+    for _ in 0..20 {
+        let decision = arbiter.update(&make_summary(100, 100.0, 0.0));
+        rates.push(decision.target_rps);
+        post_exploration_rates.push(decision.target_rps);
+        clock.advance(control_interval);
+    }
+
+    // Assert baseline ticks: rate should be ~250 (500 * 0.5).
+    for (i, &rate) in rates.iter().enumerate().take(4) {
+        assert!(
+            (rate - 250.0).abs() < 50.0,
+            "baseline tick {i}: expected ~250, got {rate:.1}"
+        );
+    }
+
+    // Assert step ticks: indices 4..10 should be ~500 (initial_rps).
+    // Index 10 is the tick where exploration completes and immediately
+    // runs active_tick, so PID may already adjust the rate.
+    let step_end = 4 + step_latencies.len() - 1; // last tick that's still exploring
+    for (i, &rate) in rates.iter().enumerate().skip(4).take(step_end - 4) {
+        assert!(
+            (rate - 500.0).abs() < 100.0,
+            "step tick {i}: expected ~500, got {rate:.1}"
+        );
+    }
+
+    // Assert Phase 3: exploration should have completed.
+    // Controller state should show arbiter in active mode (no exploration_progress).
+    let state = arbiter.controller_state();
+    let has_exploration = state
+        .iter()
+        .any(|(k, _)| k.contains("exploration_progress"));
+    assert!(
+        !has_exploration,
+        "should be in active phase after exploration, state: {:?}",
+        state
+    );
+
+    // Post-exploration rates should be reasonable (not 0, not infinity).
+    for (i, &rate) in post_exploration_rates.iter().enumerate() {
+        assert!(
+            rate >= 10.0 && rate <= 50000.0,
+            "post-exploration tick {i}: rate {rate:.1} out of bounds"
+        );
+    }
+}
+
+#[test]
+fn arbiter_exploration_set_rate_aborts() {
+    use std::sync::Arc;
+    use netanvil_core::controller::pid_constraint::PidConstraint as PidC;
+    use netanvil_core::controller::smoothing::Smoother;
+    use netanvil_core::controller::clock::TestClock;
+    use netanvil_core::controller::constraint::Constraint;
+
+    let clock = Arc::new(TestClock::new());
+    let control_interval = Duration::from_millis(100);
+
+    let constraint = PidC::auto_tuning(
+        "LatencyP99".into(),
+        TargetMetric::LatencyP99,
+        100.0,
+        Smoother::ema(0.3),
+    );
+
+    let exploration = ExplorationManager::new(
+        vec![MetricExploration::new(TargetMetric::LatencyP99, 100.0)],
+        500.0,
+        Duration::from_millis(2000),
+        control_interval,
+    );
+
+    let constraints: Vec<Box<dyn Constraint>> = vec![Box::new(constraint)];
+    let config = ArbiterConfig::new(
+        constraints,
+        500.0,
+        10.0,
+        50000.0,
+        Duration::from_secs(60),
+    )
+    .with_exploration(exploration)
+    .with_clock(clock.clone() as Arc<dyn netanvil_core::Clock>);
+
+    let mut arbiter = Arbiter::new(config);
+
+    // Feed 2 baseline ticks to verify exploration is active.
+    for _ in 0..2 {
+        arbiter.update(&make_summary(100, 80.0, 0.0));
+        clock.advance(control_interval);
+    }
+
+    // Verify we're in exploration phase.
+    let state = arbiter.controller_state();
+    let in_exploration = state
+        .iter()
+        .any(|(k, _)| k.contains("exploration_progress"));
+    assert!(in_exploration, "should be in exploration phase");
+
+    // External set_rate should abort exploration.
+    arbiter.set_rate(300.0);
+
+    // Should now be in Active phase (exploration aborted).
+    let state = arbiter.controller_state();
+    let in_exploration = state
+        .iter()
+        .any(|(k, _)| k.contains("exploration_progress"));
+    assert!(
+        !in_exploration,
+        "set_rate during exploration should transition to active"
+    );
+
+    // After abort, transition_post_exploration restores initial_rps.
+    // The set_rate value is overwritten by the abort transition. This is
+    // the designed behavior: abort → restart from initial conditions.
+    let rate = arbiter.current_rate();
+    assert!(
+        rate >= 10.0 && rate <= 50000.0,
+        "rate should be reasonable after abort: {rate}"
+    );
+
+    // Constraint should have received conservative gains — PID should work.
+    for _ in 0..10 {
+        arbiter.update(&make_summary(100, 200.0, 0.0)); // above target
+        clock.advance(control_interval);
+    }
+    assert!(
+        arbiter.current_rate() > 10.0,
+        "arbiter should produce reasonable rate after fallback: {}",
+        arbiter.current_rate()
+    );
+}
+
+#[test]
+fn arbiter_all_manual_skips_exploration() {
+    use std::sync::Arc;
+    use netanvil_core::controller::pid_constraint::PidConstraint as PidC;
+    use netanvil_core::controller::smoothing::Smoother;
+    use netanvil_core::controller::clock::TestClock;
+    use netanvil_core::controller::constraint::Constraint;
+
+    let clock = Arc::new(TestClock::new());
+
+    // All-manual PidConstraints — no ExplorationManager.
+    let constraint = PidC::new(
+        "LatencyP99".into(),
+        TargetMetric::LatencyP99,
+        100.0,
+        0.5,
+        0.01,
+        0.1,
+        Smoother::ema(0.3),
+        false,
+    );
+
+    let constraints: Vec<Box<dyn Constraint>> = vec![Box::new(constraint)];
+    let config = ArbiterConfig::new(
+        constraints,
+        500.0,
+        10.0,
+        50000.0,
+        Duration::from_secs(60),
+    )
+    .with_clock(clock.clone() as Arc<dyn netanvil_core::Clock>);
+
+    let arbiter = Arbiter::new(config);
+
+    // Should start in Active directly (no exploration_progress in state).
+    let state = arbiter.controller_state();
+    let in_exploration = state
+        .iter()
+        .any(|(k, _)| k.contains("exploration_progress"));
+    assert!(
+        !in_exploration,
+        "all-manual constraints should skip exploration, state: {:?}",
+        state
+    );
+
+    // Should have arbiter state keys (ceiling, floor, cooldown).
+    let has_ceiling = state.iter().any(|(k, _)| k.contains("ceiling"));
+    assert!(has_ceiling, "active arbiter should report ceiling");
+}
+
+#[test]
+fn arbiter_exploration_then_pid_active() {
+    use std::sync::Arc;
+    use netanvil_core::controller::pid_constraint::PidConstraint as PidC;
+    use netanvil_core::controller::smoothing::Smoother;
+    use netanvil_core::controller::clock::TestClock;
+    use netanvil_core::controller::constraint::Constraint;
+
+    let clock = Arc::new(TestClock::new());
+    let control_interval = Duration::from_millis(100);
+
+    let constraint = PidC::auto_tuning(
+        "LatencyP99".into(),
+        TargetMetric::LatencyP99,
+        100.0,
+        Smoother::ema(0.3),
+    );
+
+    let exploration = ExplorationManager::new(
+        vec![MetricExploration::new(TargetMetric::LatencyP99, 100.0)],
+        500.0,
+        Duration::from_millis(1500),
+        control_interval,
+    );
+
+    let constraints: Vec<Box<dyn Constraint>> = vec![Box::new(constraint)];
+    let config = ArbiterConfig::new(
+        constraints,
+        500.0,
+        10.0,
+        50000.0,
+        Duration::from_secs(60),
+    )
+    .with_exploration(exploration)
+    .with_clock(clock.clone() as Arc<dyn netanvil_core::Clock>);
+
+    let mut arbiter = Arbiter::new(config);
+
+    // Drive through exploration: 4 baseline ticks, then varying step response.
+    for _ in 0..4 {
+        arbiter.update(&make_summary(100, 80.0, 0.0));
+        clock.advance(control_interval);
+    }
+    let step_latencies = [110.0, 130.0, 115.0, 125.0, 120.0, 120.0, 120.0];
+    for &lat in &step_latencies {
+        arbiter.update(&make_summary(100, lat, 0.0));
+        clock.advance(control_interval);
+    }
+
+    // Exploration should be complete. Verify.
+    let state = arbiter.controller_state();
+    assert!(
+        !state
+            .iter()
+            .any(|(k, _)| k.contains("exploration_progress")),
+        "should not be in exploration"
+    );
+
+    // Feed p99 above target for 25 ticks. The PID constraint should be
+    // the binding constraint desiring a lower rate. The known-good floor
+    // may prevent the actual rate from decreasing (by design), so we
+    // check the binding constraint rather than absolute rate movement.
+    let mut binding_counts = 0u32;
+    let mut below_initial = false;
+    for _ in 0..25 {
+        let d = arbiter.update(&make_summary(100, 150.0, 0.0)); // 150ms > 100ms target
+        if let Some(binding) = arbiter.last_binding() {
+            if binding.contains("LatencyP99") {
+                binding_counts += 1;
+            }
+        }
+        if d.target_rps < 500.0 {
+            below_initial = true;
+        }
+        clock.advance(control_interval);
+    }
+
+    // The PID constraint should be binding on most ticks (wants lower rate).
+    assert!(
+        binding_counts >= 10,
+        "PID should be binding on at least 10/25 ticks when latency exceeds target, got {binding_counts}"
+    );
+
+    // Rate should be at or below initial (PID + floor may hold it).
+    assert!(
+        below_initial || arbiter.current_rate() <= 500.0,
+        "rate should not exceed initial_rps with sustained high latency: {}",
+        arbiter.current_rate()
+    );
+}

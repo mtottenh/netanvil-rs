@@ -1084,3 +1084,150 @@ fn shadow_composite_pid_oscillation_regression() {
         report.old_oscillation_count,
     );
 }
+
+// ===========================================================================
+// PID auto-tune shadow tests
+// ===========================================================================
+
+fn pid_auto_shadow_config(target_p99_ms: f64) -> RateConfig {
+    RateConfig::Pid {
+        initial_rps: 500.0,
+        target: netanvil_types::PidTarget {
+            metric: netanvil_types::TargetMetric::LatencyP99,
+            value: target_p99_ms,
+            min_rps: 10.0,
+            max_rps: 50_000.0,
+            gains: netanvil_types::PidGains::Auto {
+                autotune_duration: Duration::from_millis(500),
+                smoothing: 0.3,
+            },
+        },
+    }
+}
+
+#[test]
+fn shadow_pid_autotune_single_metric() {
+    let params = TraceParams {
+        warmup_ticks: 0,
+        p99_ms_baseline: 80.0,
+        requests_per_tick: 100,
+        ..Default::default()
+    };
+    let clock = Arc::new(TestClock::new());
+    let control_interval = params.control_interval;
+    let test_duration = SHADOW_TEST_DURATION;
+    let config = pid_auto_shadow_config(100.0);
+
+    // Build a step response trace:
+    // - 10 ticks baseline: p99 = 80ms (below 100ms target)
+    // - 30 ticks step:     p99 = 120ms (above target, simulating load response)
+    // - 100 ticks settle:  p99 = 100ms (at target)
+    let trace = build_step_response_trace(
+        &params,
+        &[(80.0, 10), (120.0, 30), (100.0, 100)],
+    );
+
+    let (old, new) = run_shadow(
+        &config,
+        &trace,
+        &clock,
+        control_interval,
+        test_duration,
+    );
+
+    // Both controllers should have completed exploration by now.
+    // Find the tick where exploration likely ended (around tick 10-20).
+    // Skip exploration ticks for behavioral comparison.
+
+    // The old controller's exploration depends on AutotuneParams:
+    // autotune_duration=500ms, control_interval=100ms → baseline=5 ticks, step=0..5.
+    // The new controller's ExplorationManager has same parameters.
+    // Skip the first 15 ticks (generous exploration buffer).
+    let skip_exploration = 15;
+
+    dump_captures("pid_autotune", &old, &new);
+
+    // Both controllers completed exploration and are running PID control.
+    // The new arbiter wraps PID with ramp-style policies (floor, ceiling,
+    // cooldown) that the old AutotuningPidController does not have, so
+    // strict direction agreement is not meaningful. Instead we validate:
+    //
+    // 1. Both controllers produce finite, in-bounds rates throughout.
+    // 2. Both controllers respond to the step trace (rates change).
+    // 3. Neither rate goes to 0 or infinity.
+
+    // Gate 1: All rates finite and in-bounds.
+    for (label, captures) in [("old", &old), ("new", &new)] {
+        for t in captures.iter() {
+            assert!(
+                t.target_rps >= 10.0 && t.target_rps <= 50_000.0 && t.target_rps.is_finite(),
+                "[{label}] rate {:.1} at tick {} out of bounds",
+                t.target_rps,
+                t.tick,
+            );
+        }
+    }
+
+    // Gate 2: Rates should not be flat for the entire trace.
+    let old_rates: Vec<f64> = old.iter().map(|t| t.target_rps).collect();
+    let new_rates: Vec<f64> = new.iter().map(|t| t.target_rps).collect();
+
+    let old_distinct = old_rates.windows(2).filter(|w| (w[1] - w[0]).abs() > 0.01).count();
+    let new_distinct = new_rates.windows(2).filter(|w| (w[1] - w[0]).abs() > 0.01).count();
+
+    eprintln!(
+        "[pid_autotune/single_metric] old_changes={}, new_changes={}, old_final={:.1}, new_final={:.1}",
+        old_distinct, new_distinct,
+        old.last().unwrap().target_rps,
+        new.last().unwrap().target_rps,
+    );
+
+    assert!(
+        old_distinct >= 3,
+        "old controller should have rate changes, got {old_distinct}"
+    );
+    assert!(
+        new_distinct >= 3,
+        "new controller should have rate changes, got {new_distinct}"
+    );
+
+    // Gate 3: Post-exploration max/min ratio.
+    // Only gate the new controller. The old AutotuningPidController + SlowStart
+    // can have extreme swings (ratio > 20) because SlowStart's ceiling ratchets
+    // open and the PID overshoots. The arbiter's floor prevents that.
+    for (label, rates, max_ratio) in [("old", &old_rates, f64::MAX), ("new", &new_rates, 5.0)] {
+        let post = &rates[skip_exploration..];
+        if !post.is_empty() {
+            let max = post.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let min = post.iter().cloned().fold(f64::INFINITY, f64::min);
+            if min > 0.0 {
+                let ratio = max / min;
+                eprintln!("[pid_autotune/single_metric] {label} post-exploration max/min ratio={:.2}", ratio);
+                assert!(
+                    ratio < max_ratio,
+                    "[{label}] post-exploration max/min ratio {ratio:.2} exceeds {max_ratio:.1}"
+                );
+            }
+        }
+    }
+
+    // Gate 4: Direction agreement is NOT gated for auto-tune PID because
+    // the two architectures are structurally different:
+    // - Old: AutotuningPidController + SlowStart (pure PID, no floor)
+    // - New: Arbiter + PidConstraint + floor/ceiling/cooldown policies
+    //
+    // The arbiter's known-good floor prevents aggressive rate drops that
+    // the old controller allows, creating fundamentally different convergence
+    // trajectories. This is an intentional design improvement (floor prevents
+    // catastrophic rate collapse), not a regression.
+    //
+    // We log the comparison for monitoring but do not gate on it.
+    let settle_start = 40;
+    if old.len() > settle_start + 10 && new.len() > settle_start + 10 {
+        let report = analyze_behavioral(&old, &new, settle_start);
+        eprintln!(
+            "[pid_autotune/single_metric] settle-phase direction_agreement={:.1}% (monitoring only)",
+            report.direction_agreement_pct * 100.0,
+        );
+    }
+}

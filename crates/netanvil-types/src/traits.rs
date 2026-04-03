@@ -218,8 +218,7 @@ pub type HttpTransformer = dyn RequestTransformer<Spec = HttpRequestSpec>;
 ///
 /// The coordinator owns the controller exclusively — no sharing, no Send needed.
 ///
-/// Implementations: StaticRateController, StepRateController, PidRateController,
-///                  ExternalRateController
+/// Implementations: StaticRateController, StepRateController, Arbiter
 pub trait RateController {
     fn update(&mut self, summary: &MetricsSummary) -> RateDecision;
     fn current_rate(&self) -> f64;
@@ -230,7 +229,7 @@ pub trait RateController {
     fn set_rate(&mut self, _rps: f64) {}
 
     /// Dynamically adjust the upper RPS bound.
-    /// Used by `SlowStart<C>` to progressively raise the ceiling.
+    /// Used by the Arbiter's progressive ceiling.
     /// Default: no-op (controllers without max_rps ignore this).
     fn set_max_rps(&mut self, _max_rps: f64) {}
 

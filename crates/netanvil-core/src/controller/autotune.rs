@@ -1,8 +1,7 @@
 //! Autotuning logic for PID rate controllers.
 //!
 //! Provides the exploration state machine and Cohen-Coon gain computation.
-//! Used by both `AutotuningPidController` (single-metric) and
-//! `CompositePidController` (multi-constraint).
+//! Used by the Arbiter's exploration phase for auto-tuning PID constraints.
 //!
 //! PID math (gain scheduling, PID state, step computation) lives in
 //! [`super::pid_math`] and is re-exported here for backwards compatibility.

@@ -44,10 +44,8 @@ pub type TransformerFactory = GenericTransformerFactory<netanvil_types::HttpRequ
 pub use controller::builder::{build_arbiter, build_rate_controller};
 pub use controller::clock::{self, Clock, SystemClock, TestClock};
 pub use controller::{
-    Arbiter, ArbiterConfig, AutotuneParams, AutotuningPidController, CompositePidController,
-    CongestionAvoidanceConfig, IncreasePolicyConfig, PidGainValues, PidRateController,
-    PidStepInput, RampConfig, RampRateController, RateChangeLimits, SlowStart,
-    StaticRateController, StepRateController,
+    Arbiter, ArbiterConfig, CongestionAvoidanceConfig, IncreasePolicyConfig, PidStepInput,
+    RateChangeLimits, StaticRateController, StepRateController,
 };
 pub use coordinator::Coordinator;
 pub use coordinator::ProgressUpdate;

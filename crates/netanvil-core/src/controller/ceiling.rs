@@ -4,8 +4,7 @@
 //! Supports deferred start for controllers with a warmup phase — before
 //! `start_now()` is called, `ceiling()` returns `start_value`.
 //!
-//! Used by both `SlowStart<C>` (immediate start) and `RampRateController`
-//! (deferred start after warmup completes).
+//! Used by the Arbiter (deferred start after warmup completes).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

@@ -20,10 +20,13 @@ pub mod udp_spec;
 
 pub use command::{ScheduledRequest, TimerCommand, WorkerCommand};
 pub use config::{
-    ConnectionConfig, ConnectionPolicy, EventLogOutput, ExternalConstraintConfig, HttpVersion,
-    MissingSignalBehavior, PidConstraint, PidGains, PidTarget, PluginConfig, PluginType,
-    ProtocolConfig, RateConfig, ResponseSignalConfig, SchedulerConfig, SignalAggregation,
-    SignalDirection, TargetMetric, TestConfig, TlsConfig,
+    BackoffConfig, BaselineMultiplier, BoundsConfig, ConnectionConfig, ConnectionPolicy,
+    ConstraintClassConfig, ConstraintConfig, EventLogOutput, ExternalConstraintConfig,
+    ExternalMetricRef, GainsConfig, HttpVersion, InternalMetric, MetricRef,
+    MissingSignalBehavior, PluginConfig, PluginType,
+    ProtocolConfig, RateConfig, ResponseSignalConfig, SchedulerConfig, SetpointConstraintConfig,
+    SignalAggregation, SignalDirection, SmootherConfig, TargetMetric, TestConfig,
+    ThresholdConstraintConfig, ThresholdSource, TlsConfig, WarmupConfig,
 };
 pub use controller::{ControllerInfo, ControllerType, ControllerView, HoldCommand, HoldState};
 pub use distributed::{MetricsFetcher, NodeCommander, NodeDiscovery, RemoteMetrics};

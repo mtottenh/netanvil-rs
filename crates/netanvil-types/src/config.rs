@@ -229,9 +229,13 @@ impl TestConfig {
         match &self.rate {
             RateConfig::Static { rps } => *rps,
             RateConfig::Step { steps } => steps.first().map(|(_, rps)| *rps).unwrap_or(100.0),
-            RateConfig::Pid { initial_rps, .. } => *initial_rps,
-            RateConfig::CompositePid { initial_rps, .. } => *initial_rps,
-            RateConfig::Ramp { warmup_rps, .. } => *warmup_rps,
+            RateConfig::Adaptive {
+                warmup,
+                initial_rps,
+                bounds,
+                ..
+            } => initial_rps
+                .unwrap_or_else(|| warmup.as_ref().map(|w| w.rps).unwrap_or(bounds.min_rps)),
         }
     }
 }
@@ -292,85 +296,17 @@ pub enum RateConfig {
     Static { rps: f64 },
     /// Rate changes at specified time offsets. Vec of (offset_from_start, rps).
     Step { steps: Vec<(Duration, f64)> },
-    /// PID controller targeting a single metric.
-    Pid { initial_rps: f64, target: PidTarget },
-    /// PID controller with multiple simultaneous constraints.
-    /// Finds the maximum rate where ALL constraints are satisfied.
-    CompositePid {
-        initial_rps: f64,
-        constraints: Vec<PidConstraint>,
-        min_rps: f64,
-        max_rps: f64,
-    },
-    /// Adaptive ramp: learn baseline latency during warmup, then use PID
-    /// to find the maximum rate where latency stays within a multiplier
-    /// of the baseline. Runs indefinitely if duration is 0.
-    Ramp {
-        /// RPS during warmup phase (default: 10)
-        warmup_rps: f64,
-        /// Duration of warmup phase to learn baseline latency
-        warmup_duration: Duration,
-        /// Acceptable latency multiplier over baseline.
-        /// E.g., 3.0 means "p99 can be 3x the warmup baseline before backing off"
-        latency_multiplier: f64,
-        /// Maximum error rate (%) before forcing rate reduction (default: 5.0)
-        max_error_rate: f64,
-        /// Minimum RPS floor
-        min_rps: f64,
-        /// Maximum RPS ceiling
-        max_rps: f64,
-        /// External signal constraints. Empty = no external constraints (default).
-        /// Each maps a named signal to a backoff threshold.
+    /// Unified adaptive controller: feedback-based rate control with
+    /// composable constraints (threshold and/or PID setpoint tracking).
+    Adaptive {
+        bounds: BoundsConfig,
         #[serde(default)]
-        external_constraints: Vec<ExternalConstraintConfig>,
+        warmup: Option<WarmupConfig>,
+        /// Starting rate when no warmup is configured. Defaults to bounds.min_rps.
+        #[serde(default)]
+        initial_rps: Option<f64>,
+        constraints: Vec<ConstraintConfig>,
     },
-}
-
-/// PID controller target configuration (single-metric mode).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PidTarget {
-    pub metric: TargetMetric,
-    /// Target value for the metric (e.g., 200ms for latency)
-    pub value: f64,
-    /// PID gains — auto-tuned by default, or manually specified.
-    pub gains: PidGains,
-    /// Min/max RPS bounds
-    pub min_rps: f64,
-    pub max_rps: f64,
-}
-
-/// How PID gains are determined.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PidGains {
-    /// Automatically determine gains from system response (default).
-    Auto {
-        /// Maximum duration for the exploration phase. Default: 3s.
-        autotune_duration: Duration,
-        /// EMA smoothing factor for metric noise reduction (0.0-1.0). Default: 0.3.
-        smoothing: f64,
-    },
-    /// User-specified fixed gains.
-    Manual { kp: f64, ki: f64, kd: f64 },
-}
-
-impl Default for PidGains {
-    fn default() -> Self {
-        PidGains::Auto {
-            autotune_duration: Duration::from_secs(3),
-            smoothing: 0.3,
-        }
-    }
-}
-
-/// A single constraint in composite PID mode.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PidConstraint {
-    /// Which metric to constrain.
-    pub metric: TargetMetric,
-    /// Upper limit for this metric (e.g., 500.0 for "p99 < 500ms").
-    pub limit: f64,
-    /// Per-constraint gains. Defaults to auto-tuning.
-    pub gains: PidGains,
 }
 
 /// Which metric the PID controller targets.
@@ -610,6 +546,199 @@ pub enum MissingSignalBehavior {
     Hold,
     /// Treat as worst-case violation (hard backoff).
     Backoff,
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive controller config types (Step 1 of API rationalization)
+// ---------------------------------------------------------------------------
+
+fn default_persistence() -> u32 {
+    1
+}
+
+fn default_tracking_gain() -> f64 {
+    0.5
+}
+
+fn default_autotune_duration() -> Duration {
+    Duration::from_secs(3)
+}
+
+fn default_smoothing() -> f64 {
+    0.3
+}
+
+/// Reference to a metric source — either a built-in internal metric or an
+/// external signal endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MetricRef {
+    Internal(InternalMetric),
+    External(ExternalMetricRef),
+}
+
+/// Built-in metrics available from the metrics collector.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum InternalMetric {
+    LatencyP50,
+    LatencyP90,
+    LatencyP99,
+    ErrorRate,
+    ThroughputSend,
+    ThroughputRecv,
+    TimeoutFraction,
+    InFlightDropFraction,
+}
+
+/// Reference to an external metric signal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalMetricRef {
+    pub name: String,
+    #[serde(default)]
+    pub direction: SignalDirection,
+    #[serde(default = "default_stale_ticks")]
+    pub stale_after_ticks: u32,
+    #[serde(default)]
+    pub on_missing: MissingSignalBehavior,
+}
+
+/// A single constraint in the Adaptive rate controller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ConstraintConfig {
+    Threshold(ThresholdConstraintConfig),
+    Setpoint(SetpointConstraintConfig),
+}
+
+/// Configuration for a threshold-based (AIMD) constraint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThresholdConstraintConfig {
+    pub id: String,
+    pub metric: MetricRef,
+    #[serde(default)]
+    pub smoother: Option<SmootherConfig>,
+    /// Override the default constraint class. Defaults: TimeoutFraction and
+    /// InFlightDropFraction -> Catastrophic; everything else -> OperatingPoint.
+    /// Most users should leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_override: Option<ConstraintClassConfig>,
+    #[serde(flatten)]
+    pub threshold_source: ThresholdSource,
+    #[serde(default = "default_persistence")]
+    pub persistence: u32,
+    #[serde(default)]
+    pub self_caused_cap: Option<f64>,
+    #[serde(default)]
+    pub backoff: Option<BackoffConfig>,
+}
+
+/// How the threshold value is determined.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ThresholdSource {
+    Absolute {
+        threshold: f64,
+    },
+    FromBaseline {
+        threshold_from_baseline: BaselineMultiplier,
+    },
+}
+
+/// Multiplier applied to the warmup baseline to derive a threshold.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BaselineMultiplier {
+    pub multiplier: f64,
+}
+
+/// Configuration for a setpoint-tracking (PID) constraint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetpointConstraintConfig {
+    pub id: String,
+    pub metric: MetricRef,
+    #[serde(default)]
+    pub smoother: Option<SmootherConfig>,
+    pub target: f64,
+    #[serde(default)]
+    pub gains: GainsConfig,
+    #[serde(default = "default_tracking_gain")]
+    pub tracking_gain: f64,
+}
+
+/// How PID gains are determined for a setpoint constraint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GainsConfig {
+    Auto {
+        #[serde(default = "default_autotune_duration")]
+        autotune_duration: Duration,
+        #[serde(default = "default_smoothing")]
+        smoothing: f64,
+    },
+    Manual {
+        kp: f64,
+        ki: f64,
+        kd: f64,
+    },
+}
+
+impl Default for GainsConfig {
+    fn default() -> Self {
+        GainsConfig::Auto {
+            autotune_duration: default_autotune_duration(),
+            smoothing: default_smoothing(),
+        }
+    }
+}
+
+/// Rate bounds for the Adaptive controller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoundsConfig {
+    pub min_rps: f64,
+    pub max_rps: f64,
+}
+
+/// Warmup phase configuration for the Adaptive controller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WarmupConfig {
+    pub rps: f64,
+    pub duration: Duration,
+}
+
+/// Signal smoother configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SmootherConfig {
+    None,
+    Ema { alpha: f64 },
+    Median { size: usize },
+}
+
+/// Backoff factor overrides for threshold constraints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackoffConfig {
+    #[serde(default = "default_gentle")]
+    pub gentle: f64,
+    #[serde(default = "default_moderate")]
+    pub moderate: f64,
+    #[serde(default = "default_hard")]
+    pub hard: f64,
+}
+
+fn default_gentle() -> f64 {
+    0.90
+}
+fn default_moderate() -> f64 {
+    0.75
+}
+fn default_hard() -> f64 {
+    0.50
+}
+
+/// Constraint class override for threshold constraints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ConstraintClassConfig {
+    OperatingPoint,
+    Catastrophic,
 }
 
 /// TLS configuration for mTLS between leader and agent nodes.

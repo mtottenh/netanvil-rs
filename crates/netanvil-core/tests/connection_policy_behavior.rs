@@ -69,12 +69,13 @@ fn always_new_policy_always_adds_connection_close() {
 #[test]
 fn mixed_policy_respects_persistent_ratio() {
     // With persistent_ratio=0.5, approximately half should get Connection: close
-    let transformer = ConnectionPolicyTransformer::new(
+    let transformer = ConnectionPolicyTransformer::with_seed(
         Box::new(NoopTransformer),
         ConnectionPolicy::Mixed {
             persistent_ratio: 0.5,
             connection_lifetime: None,
         },
+        42,
     );
 
     let ctx = make_context();
@@ -170,12 +171,13 @@ fn fixed_lifetime_forces_close_at_boundary() {
 fn uniform_lifetime_varies_connection_lengths() {
     // persistent_ratio=1.0, lifetime=Uniform(5,15)
     // Connections should close at varying intervals between 5 and 15.
-    let transformer = ConnectionPolicyTransformer::new(
+    let transformer = ConnectionPolicyTransformer::with_seed(
         Box::new(NoopTransformer),
         ConnectionPolicy::Mixed {
             persistent_ratio: 1.0,
             connection_lifetime: Some(CountDistribution::Uniform { min: 5, max: 15 }),
         },
+        42,
     );
 
     let ctx = make_context();
@@ -217,7 +219,7 @@ fn uniform_lifetime_varies_connection_lengths() {
 fn normal_lifetime_clusters_around_mean() {
     // persistent_ratio=1.0, lifetime=Normal(50, 5)
     // Connections should close around 50 requests with stddev 5.
-    let transformer = ConnectionPolicyTransformer::new(
+    let transformer = ConnectionPolicyTransformer::with_seed(
         Box::new(NoopTransformer),
         ConnectionPolicy::Mixed {
             persistent_ratio: 1.0,
@@ -226,6 +228,7 @@ fn normal_lifetime_clusters_around_mean() {
                 stddev: 5.0,
             }),
         },
+        42,
     );
 
     let ctx = make_context();

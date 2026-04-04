@@ -31,9 +31,23 @@ pub struct LifecycleCounter {
 
 impl LifecycleCounter {
     /// Create a new counter, sampling the initial limit from `distribution`.
+    /// Uses OS entropy for the internal RNG.
     pub fn new(distribution: ValueDistribution<u32>) -> Self {
         let sampler = Sampler::new(&distribution);
         let mut rng = SmallRng::from_entropy();
+        let limit = sampler.sample(&mut rng);
+        Self {
+            sampler,
+            count: 0,
+            limit,
+            rng,
+        }
+    }
+
+    /// Create a counter with a deterministic seed for reproducible behavior.
+    pub fn with_seed(distribution: ValueDistribution<u32>, seed: u64) -> Self {
+        let sampler = Sampler::new(&distribution);
+        let mut rng = SmallRng::seed_from_u64(seed);
         let limit = sampler.sample(&mut rng);
         Self {
             sampler,

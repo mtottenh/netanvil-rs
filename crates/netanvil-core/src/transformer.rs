@@ -83,6 +83,29 @@ impl ConnectionPolicyTransformer {
             rng: RefCell::new(SmallRng::from_entropy()),
         }
     }
+
+    /// Create with a deterministic seed for reproducible behavior in tests.
+    /// Production code should use `new()` which seeds from OS entropy.
+    pub fn with_seed(
+        inner: Box<dyn RequestTransformer<Spec = HttpRequestSpec>>,
+        policy: ConnectionPolicy,
+        seed: u64,
+    ) -> Self {
+        let lifecycle = match &policy {
+            ConnectionPolicy::Mixed {
+                connection_lifetime: Some(dist),
+                ..
+            } => Some(LifecycleCounter::with_seed(dist.clone(), seed)),
+            _ => None,
+        };
+
+        Self {
+            inner,
+            policy,
+            lifecycle: RefCell::new(lifecycle),
+            rng: RefCell::new(SmallRng::seed_from_u64(seed)),
+        }
+    }
 }
 
 impl RequestTransformer for ConnectionPolicyTransformer {

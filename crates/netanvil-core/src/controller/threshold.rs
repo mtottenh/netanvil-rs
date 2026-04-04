@@ -185,10 +185,13 @@ pub struct ThresholdConfig {
     /// values are worse (throughput, available capacity). Determines severity
     /// computation direction.
     pub direction: SignalDirection,
+    /// If set, derive threshold from warmup baseline: `baseline × multiplier`.
+    /// Used by latency constraints with `ThresholdSource::FromBaseline`.
+    pub baseline_multiplier: Option<f64>,
 }
 
 impl ThresholdConfig {
-    /// Defaults for a timeout constraint (matches old ramp eval_timeout).
+    /// Defaults for a timeout constraint.
     pub fn timeout_defaults(max_error_rate_pct: f64) -> Self {
         let soft_threshold = (max_error_rate_pct / 100.0 * 0.5).max(0.01);
         Self {
@@ -204,6 +207,7 @@ impl ThresholdConfig {
             external: None,
             self_caused_cap: None,
             direction: SignalDirection::HigherIsWorse,
+            baseline_multiplier: None,
         }
     }
 
@@ -222,6 +226,7 @@ impl ThresholdConfig {
             external: None,
             self_caused_cap: None,
             direction: SignalDirection::HigherIsWorse,
+            baseline_multiplier: None,
         }
     }
 
@@ -241,6 +246,7 @@ impl ThresholdConfig {
             external: None,
             self_caused_cap: Some(1.5),
             direction: SignalDirection::HigherIsWorse,
+            baseline_multiplier: None,
         }
     }
 
@@ -259,6 +265,7 @@ impl ThresholdConfig {
             external: None,
             self_caused_cap: None,
             direction: SignalDirection::HigherIsWorse,
+            baseline_multiplier: None,
         }
     }
 
@@ -284,6 +291,7 @@ impl ThresholdConfig {
             external: Some(config),
             self_caused_cap: None,
             direction,
+            baseline_multiplier: None,
         }
     }
 }
@@ -319,6 +327,10 @@ pub struct ThresholdConstraint {
     // Cached from last evaluate() for observability
     last_severity: f64,
     last_smoothed_value: f64,
+
+    // Baseline-derived threshold: if set, on_warmup_complete sets
+    // threshold = baseline × multiplier.
+    baseline_multiplier: Option<f64>,
 }
 
 impl ThresholdConstraint {
@@ -343,6 +355,7 @@ impl ThresholdConstraint {
             self_caused_cap: config.self_caused_cap,
             last_severity: 0.0,
             last_smoothed_value: 0.0,
+            baseline_multiplier: config.baseline_multiplier,
         }
     }
 
@@ -356,10 +369,19 @@ impl ThresholdConstraint {
         Self::new(ThresholdConfig::inflight_defaults())
     }
 
-    /// Convenience: build a latency constraint from defaults.
+    /// Convenience: build a latency constraint with an absolute threshold.
     pub fn latency(target_p99_ms: f64, smoothing_window: usize) -> Self {
         let mut config = ThresholdConfig::latency_defaults(smoothing_window);
         config.threshold = target_p99_ms;
+        Self::new(config)
+    }
+
+    /// Convenience: build a latency constraint that derives threshold from
+    /// warmup baseline × multiplier.
+    pub fn latency_from_baseline(multiplier: f64, smoothing_window: usize) -> Self {
+        let mut config = ThresholdConfig::latency_defaults(smoothing_window);
+        config.threshold = 0.0;
+        config.baseline_multiplier = Some(multiplier);
         Self::new(config)
     }
 
@@ -602,37 +624,31 @@ impl Constraint for ThresholdConstraint {
         }
     }
 
-    fn on_warmup_complete(
-        &mut self,
-        baseline: &super::constraint::WarmupBaseline,
-        latency_multiplier: f64,
-    ) {
-        // Only latency constraints derive their threshold from warmup baseline.
-        if matches!(
-            self.metric,
-            MetricExtractor::LatencyP99Ms
-                | MetricExtractor::LatencyP90Ms
-                | MetricExtractor::LatencyP50Ms
-        ) {
-            if baseline.sample_count == 0 || baseline.baseline_p99_ms <= 0.0 {
-                tracing::warn!(
-                    constraint = %self.id,
-                    sample_count = baseline.sample_count,
-                    baseline_p99_ms = format!("{:.2}", baseline.baseline_p99_ms),
-                    "warmup produced no usable baseline — keeping current threshold"
-                );
-                return;
-            }
-            let target = baseline.baseline_p99_ms * latency_multiplier;
-            self.set_threshold(target);
-            tracing::info!(
+    fn on_warmup_complete(&mut self, baseline: &super::constraint::WarmupBaseline) {
+        // Only constraints with a baseline_multiplier derive their threshold.
+        let multiplier = match self.baseline_multiplier {
+            Some(m) => m,
+            None => return,
+        };
+
+        if baseline.sample_count == 0 || baseline.baseline_p99_ms <= 0.0 {
+            tracing::warn!(
                 constraint = %self.id,
+                sample_count = baseline.sample_count,
                 baseline_p99_ms = format!("{:.2}", baseline.baseline_p99_ms),
-                multiplier = latency_multiplier,
-                target_ms = format!("{:.2}", target),
-                "threshold set from warmup baseline"
+                "warmup produced no usable baseline — keeping current threshold"
             );
+            return;
         }
+        let target = baseline.baseline_p99_ms * multiplier;
+        self.set_threshold(target);
+        tracing::info!(
+            constraint = %self.id,
+            baseline_p99_ms = format!("{:.2}", baseline.baseline_p99_ms),
+            multiplier,
+            target_ms = format!("{:.2}", target),
+            "threshold set from warmup baseline"
+        );
     }
 }
 

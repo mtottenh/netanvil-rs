@@ -254,7 +254,6 @@ enum ArbiterPhase {
         warmup_duration: Duration,
         start: Instant,
         p99_samples: Vec<f64>,
-        latency_multiplier: f64,
     },
     Active,
 }
@@ -290,7 +289,7 @@ pub struct ArbiterConfig {
     cooldown_recovery_multiplier: f64,
     known_good_floor_fraction: f64,
     known_good_window: Duration,
-    warmup: Option<(f64, Duration, f64)>,
+    warmup: Option<(f64, Duration)>,
     clock: Option<Arc<dyn Clock>>,
     exploration_manager: Option<ExplorationManager>,
 }
@@ -357,8 +356,8 @@ impl ArbiterConfig {
         self
     }
 
-    pub fn with_warmup(mut self, rps: f64, duration: Duration, latency_multiplier: f64) -> Self {
-        self.warmup = Some((rps, duration, latency_multiplier));
+    pub fn with_warmup(mut self, rps: f64, duration: Duration) -> Self {
+        self.warmup = Some((rps, duration));
         self
     }
 
@@ -415,7 +414,7 @@ pub struct Arbiter {
     clock: Arc<dyn Clock>,
 
     // Preserved from config for Exploration→Warmup transition.
-    warmup_config: Option<(f64, Duration, f64)>,
+    warmup_config: Option<(f64, Duration)>,
 
     // Initial RPS from config, needed for post-exploration phase setup.
     initial_rps: f64,
@@ -430,13 +429,12 @@ impl Arbiter {
         let warmup_config = config.warmup;
         let phase = if let Some(manager) = config.exploration_manager {
             ArbiterPhase::Exploration(manager)
-        } else if let Some((rps, dur, mult)) = warmup_config {
+        } else if let Some((rps, dur)) = warmup_config {
             ArbiterPhase::Warmup {
                 warmup_rps: rps,
                 warmup_duration: dur,
                 start: clock.now(),
                 p99_samples: Vec::with_capacity(64),
-                latency_multiplier: mult,
             }
         } else {
             ArbiterPhase::Active
@@ -532,14 +530,13 @@ impl Arbiter {
 
     /// After exploration completes, transition to Warmup (if configured) or Active.
     fn transition_post_exploration(&mut self) {
-        if let Some((rps, dur, mult)) = self.warmup_config.take() {
+        if let Some((rps, dur)) = self.warmup_config.take() {
             self.current_rps = rps;
             self.phase = ArbiterPhase::Warmup {
                 warmup_rps: rps,
                 warmup_duration: dur,
                 start: self.clock.now(),
                 p99_samples: Vec::with_capacity(64),
-                latency_multiplier: mult,
             };
             tracing::info!("arbiter: exploration → warmup");
         } else {
@@ -629,20 +626,18 @@ impl Arbiter {
     }
 
     fn warmup_tick(&mut self, summary: &MetricsSummary) -> RateDecision {
-        let (warmup_rps, warmup_duration, start, p99_samples, latency_multiplier) =
+        let (warmup_rps, warmup_duration, start, p99_samples) =
             match &mut self.phase {
                 ArbiterPhase::Warmup {
                     warmup_rps,
                     warmup_duration,
                     start,
                     p99_samples,
-                    latency_multiplier,
                 } => (
                     *warmup_rps,
                     *warmup_duration,
                     *start,
                     p99_samples,
-                    *latency_multiplier,
                 ),
                 _ => unreachable!("warmup_tick called outside warmup phase"),
             };
@@ -661,23 +656,21 @@ impl Arbiter {
             p99_samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let n = p99_samples.len();
             let baseline_p99_ms = p99_samples[n / 2];
-            let target_p99_ms = baseline_p99_ms * latency_multiplier;
 
             tracing::info!(
                 baseline_p99_ms = format!("{:.2}", baseline_p99_ms),
-                target_p99_ms = format!("{:.2}", target_p99_ms),
-                multiplier = latency_multiplier,
                 warmup_samples = n,
                 "arbiter warmup complete, transitioning to active control"
             );
 
-            // Notify constraints via lifecycle hook.
+            // Notify constraints. Each constraint uses its own baseline_multiplier
+            // (if set) to derive its threshold from the baseline.
             let baseline = WarmupBaseline {
                 baseline_p99_ms,
                 sample_count: n,
             };
             for c in &mut self.constraints {
-                c.on_warmup_complete(&baseline, latency_multiplier);
+                c.on_warmup_complete(&baseline);
             }
 
             self.ceiling.start_now();

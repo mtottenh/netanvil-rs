@@ -137,10 +137,9 @@ pub trait Constraint {
     /// Called when warmup completes, with baseline data.
     ///
     /// Constraints that need warmup data (e.g., latency threshold derived from
-    /// baseline × multiplier) override this to initialize. Other constraints
-    /// ignore it. The `latency_multiplier` is provided so the constraint can
-    /// compute its own target from the baseline.
-    fn on_warmup_complete(&mut self, _baseline: &WarmupBaseline, _latency_multiplier: f64) {}
+    /// baseline × multiplier) override this to initialize. Each constraint
+    /// stores its own multiplier if needed. Other constraints ignore this.
+    fn on_warmup_complete(&mut self, _baseline: &WarmupBaseline) {}
 
     /// Called when the rate is overridden externally (e.g., hold/release API,
     /// `set_rate`). Constraints with derivative state (PID) should invalidate

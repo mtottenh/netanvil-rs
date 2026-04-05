@@ -10,11 +10,8 @@ use std::time::Duration;
 
 use netanvil_types::{MetricsSummary, TargetMetric};
 
-// Re-export PID math so existing `use super::autotune::*` imports keep working.
-pub use super::pid_math::{
-    extract_metric, gain_schedule, pid_compute, pid_step_fixed, pid_step_with_scheduling,
-    pid_update_state, GainMultipliers, PidOutput, PidState, PidStepInput,
-};
+// Re-export PID math used by controllers and tests.
+pub use super::pid_math::{extract_metric, gain_schedule, GainMultipliers, PidState};
 
 // ---------------------------------------------------------------------------
 // Exploration state machine

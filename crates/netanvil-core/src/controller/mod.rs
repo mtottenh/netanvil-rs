@@ -16,6 +16,5 @@ pub mod threshold;
 pub use arbiter::{
     Arbiter, ArbiterConfig, CongestionAvoidanceConfig, IncreasePolicyConfig, RateChangeLimits,
 };
-pub use pid_math::PidStepInput;
 pub use static_rate::StaticRateController;
 pub use step_rate::StepRateController;

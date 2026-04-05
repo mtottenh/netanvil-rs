@@ -498,9 +498,7 @@ where
     if steady_state_secs < config.duration.as_secs_f64() * 0.25 {
         let uses_pid = matches!(
             config.rate,
-            netanvil_types::RateConfig::Pid { .. }
-                | netanvil_types::RateConfig::CompositePid { .. }
-                | netanvil_types::RateConfig::Ramp { .. }
+            netanvil_types::RateConfig::Adaptive { .. }
         );
         if uses_pid {
             tracing::warn!(

@@ -1,17 +1,22 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use netanvil_types::{PidGains, RateConfig, RateController, TargetMetric};
+use netanvil_types::{
+    BackoffConfig as BackoffConfigType, ConstraintClassConfig, ConstraintConfig, GainsConfig,
+    InternalMetric, MetricRef, RateConfig, RateController, SmootherConfig, TargetMetric,
+    ThresholdSource,
+};
 
 use super::arbiter::{Arbiter, ArbiterConfig};
 use super::autotune::{ExplorationManager, MetricExploration};
 use super::clock::Clock;
 use super::constraint::Constraint;
+use super::constraints::ConstraintClass;
 use super::pid_constraint::PidConstraint;
 use super::smoothing::Smoother;
 use super::static_rate::StaticRateController;
 use super::step_rate::StepRateController;
-use super::threshold::ThresholdConstraint;
+use super::threshold::{BackoffSchedule, MetricExtractor, SeverityMapping, ThresholdConfig, ThresholdConstraint};
 
 /// Build a `Box<dyn RateController>` from a [`RateConfig`].
 ///
@@ -41,202 +46,53 @@ pub fn build_rate_controller(
             ))
         }
 
-        RateConfig::Ramp {
-            warmup_rps,
-            warmup_duration,
-            latency_multiplier,
-            max_error_rate,
-            min_rps,
-            max_rps,
-            external_constraints,
-        } => {
-            tracing::info!(
-                warmup_rps,
-                ?warmup_duration,
-                latency_multiplier,
-                max_error_rate,
-                min_rps,
-                max_rps,
-                num_external_constraints = external_constraints.len(),
-                "rate controller: arbiter (ramp config)"
-            );
-
-            let mut constraints: Vec<Box<dyn Constraint>> = vec![
-                Box::new(ThresholdConstraint::timeout(*max_error_rate)),
-                Box::new(ThresholdConstraint::inflight()),
-                Box::new(ThresholdConstraint::latency(0.0, 3)),
-                Box::new(ThresholdConstraint::error_rate(*max_error_rate)),
-            ];
-
-            for ext in external_constraints {
-                constraints.push(Box::new(ThresholdConstraint::external(ext.clone())));
-            }
-
-            Box::new(Arbiter::new(
-                ArbiterConfig::new(constraints, *warmup_rps, *min_rps, *max_rps, test_duration)
-                    .with_warmup(*warmup_rps, *warmup_duration, *latency_multiplier)
-                    .with_clock(clock),
-            ))
-        }
-
-        RateConfig::Pid {
+        RateConfig::Adaptive {
+            bounds,
+            warmup,
             initial_rps,
-            target,
+            constraints: constraint_configs,
         } => {
-            match &target.gains {
-                PidGains::Manual { kp, ki, kd } => {
-                    tracing::info!(
-                        initial_rps,
-                        metric = ?target.metric,
-                        target_value = target.value,
-                        kp, ki, kd,
-                        "rate controller: arbiter (PID manual)"
-                    );
-
-                    let smoother = match &target.metric {
-                        TargetMetric::LatencyP50
-                        | TargetMetric::LatencyP90
-                        | TargetMetric::LatencyP99 => Smoother::median(3),
-                        _ => Smoother::ema(0.3),
-                    };
-
-                    let constraints: Vec<Box<dyn Constraint>> =
-                        vec![Box::new(PidConstraint::new(
-                            format!("{:?}", target.metric),
-                            target.metric.clone(),
-                            target.value,
-                            *kp,
-                            *ki,
-                            *kd,
-                            smoother,
-                            false,
-                        ))];
-
-                    Box::new(Arbiter::new(
-                        ArbiterConfig::new(
-                            constraints,
-                            *initial_rps,
-                            target.min_rps,
-                            target.max_rps,
-                            test_duration,
-                        )
-                        .with_clock(clock),
-                    ))
-                }
-                PidGains::Auto {
-                    autotune_duration,
-                    smoothing,
-                } => {
-                    tracing::info!(
-                        initial_rps,
-                        metric = ?target.metric,
-                        target_value = target.value,
-                        ?autotune_duration,
-                        smoothing,
-                        "rate controller: arbiter (PID auto-tune)"
-                    );
-
-                    let smoother = Smoother::ema(*smoothing);
-                    let constraint = PidConstraint::auto_tuning(
-                        format!("{:?}", target.metric),
-                        target.metric.clone(),
-                        target.value,
-                        smoother,
-                    );
-                    let constraints: Vec<Box<dyn Constraint>> = vec![Box::new(constraint)];
-
-                    let exploration = ExplorationManager::new(
-                        vec![MetricExploration::new(target.metric.clone(), target.value)],
-                        *initial_rps,
-                        *autotune_duration,
-                        control_interval,
-                    );
-
-                    Box::new(Arbiter::new(
-                        ArbiterConfig::new(
-                            constraints,
-                            *initial_rps,
-                            target.min_rps,
-                            target.max_rps,
-                            test_duration,
-                        )
-                        .with_exploration(exploration)
-                        .with_clock(clock),
-                    ))
-                }
-            }
-        }
-
-        RateConfig::CompositePid {
-            initial_rps,
-            constraints: pid_constraints,
-            min_rps,
-            max_rps,
-        } => {
-            let has_auto = pid_constraints
-                .iter()
-                .any(|c| matches!(c.gains, PidGains::Auto { .. }));
+            let effective_initial_rps = initial_rps
+                .unwrap_or_else(|| warmup.as_ref().map(|w| w.rps).unwrap_or(bounds.min_rps));
 
             tracing::info!(
-                initial_rps,
-                num_constraints = pid_constraints.len(),
-                has_auto,
-                min_rps,
-                max_rps,
-                "rate controller: arbiter (composite PID)"
+                initial_rps = effective_initial_rps,
+                num_constraints = constraint_configs.len(),
+                min_rps = bounds.min_rps,
+                max_rps = bounds.max_rps,
+                has_warmup = warmup.is_some(),
+                "rate controller: arbiter (adaptive config)"
             );
 
-            let mut auto_explorations = Vec::new();
-            let constraints: Vec<Box<dyn Constraint>> = pid_constraints
+            let mut auto_explorations: Vec<MetricExploration> = Vec::new();
+            let constraints: Vec<Box<dyn Constraint>> = constraint_configs
                 .iter()
-                .map(|c| match &c.gains {
-                    PidGains::Manual { kp, ki, kd } => {
-                        let smoother = match &c.metric {
-                            TargetMetric::LatencyP50
-                            | TargetMetric::LatencyP90
-                            | TargetMetric::LatencyP99 => Smoother::median(3),
-                            _ => Smoother::ema(0.3),
-                        };
-                        Box::new(PidConstraint::new(
-                            format!("{:?}", c.metric),
-                            c.metric.clone(),
-                            c.limit,
-                            *kp,
-                            *ki,
-                            *kd,
-                            smoother,
-                            false,
-                        )) as Box<dyn Constraint>
-                    }
-                    PidGains::Auto { smoothing, .. } => {
-                        let smoother = Smoother::ema(*smoothing);
-                        auto_explorations
-                            .push(MetricExploration::new(c.metric.clone(), c.limit));
-                        Box::new(PidConstraint::auto_tuning(
-                            format!("{:?}", c.metric),
-                            c.metric.clone(),
-                            c.limit,
-                            smoother,
-                        )) as Box<dyn Constraint>
-                    }
-                })
+                .map(|cc| build_adaptive_constraint(cc, warmup.is_some(), &mut auto_explorations))
                 .collect();
 
             let mut config = ArbiterConfig::new(
                 constraints,
-                *initial_rps,
-                *min_rps,
-                *max_rps,
+                effective_initial_rps,
+                bounds.min_rps,
+                bounds.max_rps,
                 test_duration,
             );
 
+            if let Some(ref w) = warmup {
+                config = config.with_warmup(w.rps, w.duration);
+            }
+
             if !auto_explorations.is_empty() {
-                let autotune_duration = pid_constraints
+                // Use the maximum autotune_duration from all auto-tuning constraints.
+                let autotune_duration = constraint_configs
                     .iter()
-                    .filter_map(|c| match &c.gains {
-                        PidGains::Auto {
-                            autotune_duration, ..
-                        } => Some(*autotune_duration),
+                    .filter_map(|cc| match cc {
+                        ConstraintConfig::Setpoint(sc) => match &sc.gains {
+                            GainsConfig::Auto {
+                                autotune_duration, ..
+                            } => Some(*autotune_duration),
+                            _ => None,
+                        },
                         _ => None,
                     })
                     .max()
@@ -244,7 +100,7 @@ pub fn build_rate_controller(
 
                 let exploration = ExplorationManager::new(
                     auto_explorations,
-                    *initial_rps,
+                    effective_initial_rps,
                     autotune_duration,
                     control_interval,
                 );
@@ -253,6 +109,289 @@ pub fn build_rate_controller(
 
             Box::new(Arbiter::new(config.with_clock(clock)))
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive constraint mapping helpers
+// ---------------------------------------------------------------------------
+
+/// Map a `ConstraintConfig` to a `Box<dyn Constraint>`.
+///
+/// Also accumulates `MetricExploration` entries for auto-tuning PID constraints.
+fn build_adaptive_constraint(
+    cc: &ConstraintConfig,
+    has_warmup: bool,
+    auto_explorations: &mut Vec<MetricExploration>,
+) -> Box<dyn Constraint> {
+    match cc {
+        ConstraintConfig::Threshold(tc) => {
+            let metric = map_metric_ref_to_extractor(&tc.metric);
+            let smoother = map_smoother_config(&tc.smoother, &tc.metric);
+            let class = map_constraint_class(&tc.class_override, &tc.metric);
+            let direction = map_metric_direction(&tc.metric);
+            let backoff = map_backoff_config(&tc.backoff);
+
+            let (threshold, baseline_multiplier) = match &tc.threshold_source {
+                ThresholdSource::Absolute { threshold } => (*threshold, None),
+                ThresholdSource::FromBaseline {
+                    threshold_from_baseline,
+                } => {
+                    if !has_warmup {
+                        panic!(
+                            "constraint '{}' uses threshold_from_baseline but no warmup is \
+                             configured -- add a warmup block or use threshold: <value>",
+                            tc.id
+                        );
+                    }
+                    (0.0, Some(threshold_from_baseline.multiplier))
+                }
+            };
+
+            let severity_mapping = map_severity_for_threshold(&tc.metric, threshold);
+
+            Box::new(ThresholdConstraint::new(ThresholdConfig {
+                id: tc.id.clone(),
+                class,
+                metric,
+                smoother,
+                threshold,
+                severity_mapping,
+                persistence: tc.persistence,
+                recovery_seed: default_recovery_seed(class),
+                backoff,
+                external: map_external_constraint_config(&tc.metric),
+                self_caused_cap: tc.self_caused_cap,
+                direction,
+                baseline_multiplier,
+            }))
+        }
+        ConstraintConfig::Setpoint(sc) => {
+            // Validate: setpoint on TimeoutFraction/InFlightDropFraction is nonsensical.
+            if let MetricRef::Internal(ref im) = sc.metric {
+                if matches!(
+                    im,
+                    InternalMetric::TimeoutFraction | InternalMetric::InFlightDropFraction
+                ) {
+                    panic!(
+                        "constraint '{}': Setpoint on {:?} is not meaningful -- \
+                         use a Threshold constraint instead",
+                        sc.id, im
+                    );
+                }
+            }
+
+            let target_metric = map_metric_ref_to_target(&sc.metric);
+            let smoother = map_smoother_config_for_pid(&sc.smoother, &sc.metric, &sc.gains);
+
+            match &sc.gains {
+                GainsConfig::Manual { kp, ki, kd } => {
+                    let mut constraint = PidConstraint::new(
+                        sc.id.clone(),
+                        target_metric,
+                        sc.target,
+                        *kp,
+                        *ki,
+                        *kd,
+                        smoother,
+                        false,
+                    );
+                    constraint.set_tracking_gain(sc.tracking_gain);
+                    Box::new(constraint)
+                }
+                GainsConfig::Auto { smoothing, .. } => {
+                    // Use the smoothing value if the user didn't specify a custom smoother.
+                    let smoother = if sc.smoother.is_some() {
+                        smoother
+                    } else {
+                        Smoother::ema(*smoothing)
+                    };
+                    auto_explorations.push(MetricExploration::new(
+                        target_metric.clone(),
+                        sc.target,
+                    ));
+                    let mut constraint = PidConstraint::auto_tuning(
+                        sc.id.clone(),
+                        target_metric,
+                        sc.target,
+                        smoother,
+                    );
+                    constraint.set_tracking_gain(sc.tracking_gain);
+                    Box::new(constraint)
+                }
+            }
+        }
+    }
+}
+
+/// Map `MetricRef` to `MetricExtractor` (for threshold constraints).
+fn map_metric_ref_to_extractor(metric: &MetricRef) -> MetricExtractor {
+    match metric {
+        MetricRef::Internal(im) => match im {
+            InternalMetric::LatencyP50 => MetricExtractor::LatencyP50Ms,
+            InternalMetric::LatencyP90 => MetricExtractor::LatencyP90Ms,
+            InternalMetric::LatencyP99 => MetricExtractor::LatencyP99Ms,
+            InternalMetric::ErrorRate => MetricExtractor::ErrorRatePct,
+            InternalMetric::ThroughputSend | InternalMetric::ThroughputRecv => {
+                // Threshold on throughput is unusual but possible.
+                // Use ErrorRatePct as a fallback — throughput thresholds should
+                // generally be expressed as Setpoint constraints.
+                panic!(
+                    "Threshold constraints on {:?} are not supported -- use a Setpoint constraint",
+                    im
+                );
+            }
+            InternalMetric::TimeoutFraction => MetricExtractor::TimeoutFraction,
+            InternalMetric::InFlightDropFraction => MetricExtractor::InFlightDropFraction,
+        },
+        MetricRef::External(ext) => MetricExtractor::External {
+            signal_name: ext.name.clone(),
+            direction: ext.direction,
+        },
+    }
+}
+
+/// Map `MetricRef` to `TargetMetric` (for PID setpoint constraints).
+fn map_metric_ref_to_target(metric: &MetricRef) -> TargetMetric {
+    match metric {
+        MetricRef::Internal(im) => match im {
+            InternalMetric::LatencyP50 => TargetMetric::LatencyP50,
+            InternalMetric::LatencyP90 => TargetMetric::LatencyP90,
+            InternalMetric::LatencyP99 => TargetMetric::LatencyP99,
+            InternalMetric::ErrorRate => TargetMetric::ErrorRate,
+            InternalMetric::ThroughputSend => TargetMetric::ThroughputSend,
+            InternalMetric::ThroughputRecv => TargetMetric::ThroughputRecv,
+            InternalMetric::TimeoutFraction | InternalMetric::InFlightDropFraction => {
+                // Validated by caller — should not reach here.
+                unreachable!("TimeoutFraction/InFlightDropFraction should be caught by validation")
+            }
+        },
+        MetricRef::External(ext) => TargetMetric::External {
+            name: ext.name.clone(),
+        },
+    }
+}
+
+/// Map `SmootherConfig` to `Smoother`, with per-metric defaults.
+fn map_smoother_config(config: &Option<SmootherConfig>, metric: &MetricRef) -> Smoother {
+    match config {
+        Some(SmootherConfig::None) => Smoother::none(),
+        Some(SmootherConfig::Ema { alpha }) => Smoother::ema(*alpha),
+        Some(SmootherConfig::Median { size }) => Smoother::median(*size),
+        None => default_smoother_for_metric(metric),
+    }
+}
+
+/// Map `SmootherConfig` to `Smoother` for PID constraints.
+fn map_smoother_config_for_pid(
+    config: &Option<SmootherConfig>,
+    metric: &MetricRef,
+    gains: &GainsConfig,
+) -> Smoother {
+    match config {
+        Some(SmootherConfig::None) => Smoother::none(),
+        Some(SmootherConfig::Ema { alpha }) => Smoother::ema(*alpha),
+        Some(SmootherConfig::Median { size }) => Smoother::median(*size),
+        None => match gains {
+            GainsConfig::Auto { smoothing, .. } => Smoother::ema(*smoothing),
+            GainsConfig::Manual { .. } => default_smoother_for_metric(metric),
+        },
+    }
+}
+
+/// Default smoother by metric type: median for latency, EMA for everything else.
+fn default_smoother_for_metric(metric: &MetricRef) -> Smoother {
+    match metric {
+        MetricRef::Internal(
+            InternalMetric::LatencyP50
+            | InternalMetric::LatencyP90
+            | InternalMetric::LatencyP99,
+        ) => Smoother::median(3),
+        _ => Smoother::ema(0.3),
+    }
+}
+
+/// Map constraint class from config override or derive from metric.
+fn map_constraint_class(
+    class_override: &Option<ConstraintClassConfig>,
+    metric: &MetricRef,
+) -> ConstraintClass {
+    match class_override {
+        Some(ConstraintClassConfig::OperatingPoint) => ConstraintClass::OperatingPoint,
+        Some(ConstraintClassConfig::Catastrophic) => ConstraintClass::Catastrophic,
+        None => match metric {
+            MetricRef::Internal(
+                InternalMetric::TimeoutFraction | InternalMetric::InFlightDropFraction,
+            ) => ConstraintClass::Catastrophic,
+            _ => ConstraintClass::OperatingPoint,
+        },
+    }
+}
+
+/// Map metric direction from MetricRef.
+fn map_metric_direction(metric: &MetricRef) -> netanvil_types::SignalDirection {
+    match metric {
+        MetricRef::Internal(
+            InternalMetric::ThroughputSend | InternalMetric::ThroughputRecv,
+        ) => netanvil_types::SignalDirection::LowerIsWorse,
+        MetricRef::External(ext) => ext.direction,
+        _ => netanvil_types::SignalDirection::HigherIsWorse,
+    }
+}
+
+/// Map backoff config to BackoffSchedule.
+fn map_backoff_config(config: &Option<BackoffConfigType>) -> BackoffSchedule {
+    match config {
+        Some(bc) => BackoffSchedule {
+            gentle: bc.gentle,
+            moderate: bc.moderate,
+            hard: bc.hard,
+        },
+        None => BackoffSchedule::default(),
+    }
+}
+
+/// Map severity mapping based on metric type and threshold.
+fn map_severity_for_threshold(metric: &MetricRef, threshold: f64) -> SeverityMapping {
+    match metric {
+        MetricRef::Internal(InternalMetric::TimeoutFraction) => {
+            // Convert threshold (fraction) to percentage for TimeoutDirect.
+            SeverityMapping::TimeoutDirect {
+                max_error_rate_pct: threshold * 100.0,
+            }
+        }
+        MetricRef::Internal(InternalMetric::InFlightDropFraction) => {
+            SeverityMapping::InFlightDirect
+        }
+        MetricRef::Internal(InternalMetric::ErrorRate) => SeverityMapping::ErrorRateDirect {
+            max_error_rate_pct: threshold,
+        },
+        _ => SeverityMapping::Graduated,
+    }
+}
+
+/// Build an `ExternalConstraintConfig` from a `MetricRef::External`, if applicable.
+fn map_external_constraint_config(
+    metric: &MetricRef,
+) -> Option<netanvil_types::ExternalConstraintConfig> {
+    match metric {
+        MetricRef::External(ext) => Some(netanvil_types::ExternalConstraintConfig {
+            signal_name: ext.name.clone(),
+            threshold: 0.0, // Will be overridden by the calling code.
+            direction: ext.direction,
+            on_missing: ext.on_missing,
+            stale_after_ticks: ext.stale_after_ticks,
+            persistence: 1,
+        }),
+        MetricRef::Internal(_) => None,
+    }
+}
+
+/// Default recovery seed by constraint class.
+fn default_recovery_seed(class: ConstraintClass) -> f64 {
+    match class {
+        ConstraintClass::Catastrophic => 20.0,
+        ConstraintClass::OperatingPoint => 5.0,
     }
 }
 

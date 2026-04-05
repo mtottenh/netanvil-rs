@@ -119,38 +119,54 @@ impl ProgressiveCeiling {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::TestClock;
 
     #[test]
     fn returns_start_before_started() {
-        let c = ProgressiveCeiling::new(100.0, 10000.0, Duration::from_secs(60));
+        let clock = Arc::new(TestClock::new());
+        let c = ProgressiveCeiling::new_with_clock(
+            100.0, 10000.0, Duration::from_secs(60), clock,
+        );
         assert_eq!(c.ceiling(), 100.0);
         assert_eq!(c.progress(), 0.0);
     }
 
     #[test]
     fn ramps_after_start() {
-        let c = ProgressiveCeiling::started(100.0, 10000.0, Duration::from_millis(100));
-        // Immediately after start, ceiling is near start_value
-        assert!(c.ceiling() < 1000.0);
-        std::thread::sleep(Duration::from_millis(120));
-        // After ramp_duration, ceiling is at end_value
+        let clock = Arc::new(TestClock::new());
+        let c = ProgressiveCeiling::started_with_clock(
+            100.0, 10000.0, Duration::from_millis(100), clock.clone(),
+        );
+        // Immediately after start, ceiling is at start_value
+        assert_eq!(c.ceiling(), 100.0);
+        assert_eq!(c.progress(), 0.0);
+
+        // After full ramp_duration, ceiling is at end_value
+        clock.advance(Duration::from_millis(100));
         assert!((c.ceiling() - 10000.0).abs() < 1.0);
         assert!((c.progress() - 1.0).abs() < 0.01);
     }
 
     #[test]
     fn deferred_start() {
-        let mut c = ProgressiveCeiling::new(100.0, 10000.0, Duration::from_millis(100));
+        let clock = Arc::new(TestClock::new());
+        let mut c = ProgressiveCeiling::new_with_clock(
+            100.0, 10000.0, Duration::from_millis(100), clock.clone(),
+        );
         assert_eq!(c.ceiling(), 100.0);
+
         c.start_now();
-        std::thread::sleep(Duration::from_millis(120));
+        clock.advance(Duration::from_millis(100));
         assert!((c.ceiling() - 10000.0).abs() < 1.0);
     }
 
     #[test]
     fn set_end_value() {
-        let mut c = ProgressiveCeiling::started(100.0, 10000.0, Duration::from_millis(100));
-        std::thread::sleep(Duration::from_millis(120));
+        let clock = Arc::new(TestClock::new());
+        let mut c = ProgressiveCeiling::started_with_clock(
+            100.0, 10000.0, Duration::from_millis(100), clock.clone(),
+        );
+        clock.advance(Duration::from_millis(100));
         assert!((c.ceiling() - 10000.0).abs() < 1.0);
 
         c.set_end_value(5000.0);
@@ -159,29 +175,34 @@ mod tests {
 
     #[test]
     fn zero_duration_gives_end_value() {
-        let c = ProgressiveCeiling::started(100.0, 10000.0, Duration::ZERO);
+        let clock = Arc::new(TestClock::new());
+        let c = ProgressiveCeiling::started_with_clock(
+            100.0, 10000.0, Duration::ZERO, clock,
+        );
         assert_eq!(c.ceiling(), 10000.0);
         assert_eq!(c.progress(), 1.0);
     }
 
     #[test]
     fn milestone_detection() {
-        let mut c = ProgressiveCeiling::started(0.0, 100.0, Duration::from_millis(100));
+        let clock = Arc::new(TestClock::new());
+        let mut c = ProgressiveCeiling::started_with_clock(
+            0.0, 100.0, Duration::from_millis(100), clock.clone(),
+        );
         assert_eq!(c.check_milestone(), None); // 0% — not a new milestone
 
-        std::thread::sleep(Duration::from_millis(30));
-        // ~30% progress → 25% milestone
+        clock.advance(Duration::from_millis(30));
+        // 30% progress → 25% milestone
         assert_eq!(c.check_milestone(), Some(25));
         // Same milestone shouldn't fire again
         assert_eq!(c.check_milestone(), None);
 
-        std::thread::sleep(Duration::from_millis(30));
-        // ~60% → 50% milestone
+        clock.advance(Duration::from_millis(30));
+        // 60% → 50% milestone
         assert_eq!(c.check_milestone(), Some(50));
 
-        std::thread::sleep(Duration::from_millis(50));
-        // 100%+ → should get 75 or 100
-        let m = c.check_milestone();
-        assert!(m == Some(75) || m == Some(100));
+        clock.advance(Duration::from_millis(50));
+        // 110% → 100% milestone (75 was skipped because we jumped over it)
+        assert_eq!(c.check_milestone(), Some(100));
     }
 }

@@ -401,6 +401,10 @@ fn convert_rate(spec: RateSpecConfig) -> Result<RateConfig, SpecError> {
                 warmup,
                 initial_rps,
                 constraints,
+                increase: None,
+                cooldown: None,
+                floor: None,
+                rate_change_limits: None,
             })
         }
     }

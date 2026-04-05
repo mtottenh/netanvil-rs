@@ -1,12 +1,28 @@
 //! Constraint vocabulary types and generic helpers.
 //!
-//! These primitives are shared infrastructure for any controller that uses
-//! constraint-based rate decisions. Currently used by the ramp controller;
-//! available for composite PID or future controllers.
+//! Shared infrastructure for the Arbiter's constraint-based rate decisions.
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+//
+// These constants are intentionally NOT exposed in the user-facing config.
+//
+// The graduated severity boundaries (0.7 / 1.0 / 1.5 / 2.0 in
+// `graduated_action`) form a coherent hysteresis design: the 0.7-1.0 hold
+// band prevents flapping at the threshold, the 1.0-2.0 zone provides
+// graduated response, and >=2.0 triggers hard backoff. Exposing them
+// individually invites misconfiguration (e.g., collapsing the hold band)
+// that's better addressed by adjusting threshold, persistence, or backoff
+// factors — all of which ARE user-configurable.
+//
+// Recovery EMA parameters control internal cooldown sizing and are tuned
+// for typical web service recovery patterns. Users control cooldown
+// behavior via cooldown_min_ticks and cooldown_recovery_multiplier, which
+// are the right abstraction level.
+//
+// If a real workload surfaces where these values don't work and the
+// existing knobs can't fix it, expose them then — not preemptively.
 
 /// Severity above which persistence is bypassed (immediate backoff).
 pub(crate) const SEVERITY_BYPASS_PERSISTENCE: f64 = 3.0;

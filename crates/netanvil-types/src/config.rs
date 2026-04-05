@@ -306,6 +306,19 @@ pub enum RateConfig {
         #[serde(default)]
         initial_rps: Option<f64>,
         constraints: Vec<ConstraintConfig>,
+        /// How rate increases when no constraints object.
+        #[serde(default)]
+        increase: Option<IncreasePolicyConfig>,
+        /// Post-backoff increase suppression.
+        #[serde(default)]
+        cooldown: Option<CooldownPolicyConfig>,
+        /// Known-good rate floor (prevents deep drops on transient spikes).
+        #[serde(default)]
+        floor: Option<FloorPolicyConfig>,
+        /// Per-tick rate-of-change limits (asymmetric: increases bounded
+        /// more tightly than decreases).
+        #[serde(default)]
+        rate_change_limits: Option<RateChangeLimitsConfig>,
     },
 }
 
@@ -739,6 +752,127 @@ fn default_hard() -> f64 {
 pub enum ConstraintClassConfig {
     OperatingPoint,
     Catastrophic,
+}
+
+// ---------------------------------------------------------------------------
+// Controller-level policy configs (optional fields on Adaptive)
+// ---------------------------------------------------------------------------
+
+/// How rate increases when no constraints object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum IncreasePolicyConfig {
+    /// Rate grows by `factor` per clean tick (e.g., 1.10 = +10%/tick).
+    /// Near a known failure rate, switches to additive increase.
+    Multiplicative {
+        #[serde(default = "default_increase_factor")]
+        factor: f64,
+        /// Switch to additive when current > failure_rate × this value.
+        #[serde(default = "default_congestion_avoidance_at")]
+        congestion_avoidance_at: f64,
+    },
+    /// Fixed increment per clean tick.
+    Additive { increment: f64 },
+}
+
+impl Default for IncreasePolicyConfig {
+    fn default() -> Self {
+        Self::Multiplicative {
+            factor: default_increase_factor(),
+            congestion_avoidance_at: default_congestion_avoidance_at(),
+        }
+    }
+}
+
+fn default_increase_factor() -> f64 {
+    1.10
+}
+fn default_congestion_avoidance_at() -> f64 {
+    0.85
+}
+
+/// Post-backoff increase suppression.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CooldownPolicyConfig {
+    /// Minimum cooldown ticks after a backoff.
+    #[serde(default = "default_cooldown_min_ticks")]
+    pub min_ticks: u32,
+    /// Cooldown duration = recovery_estimate × this multiplier.
+    #[serde(default = "default_cooldown_multiplier")]
+    pub recovery_multiplier: f64,
+}
+
+impl Default for CooldownPolicyConfig {
+    fn default() -> Self {
+        Self {
+            min_ticks: default_cooldown_min_ticks(),
+            recovery_multiplier: default_cooldown_multiplier(),
+        }
+    }
+}
+
+fn default_cooldown_min_ticks() -> u32 {
+    2
+}
+fn default_cooldown_multiplier() -> f64 {
+    1.5
+}
+
+/// Known-good rate floor. Prevents deep rate drops on transient spikes.
+/// Set to `None` (via `"floor": null`) to disable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FloorPolicyConfig {
+    /// Floor = best_rate_in_window × fraction (e.g., 0.80 = 80%).
+    #[serde(default = "default_floor_fraction")]
+    pub fraction: f64,
+    /// Window for geometric decay of the known-good rate.
+    #[serde(default = "default_floor_window")]
+    pub window: Duration,
+}
+
+impl Default for FloorPolicyConfig {
+    fn default() -> Self {
+        Self {
+            fraction: default_floor_fraction(),
+            window: default_floor_window(),
+        }
+    }
+}
+
+fn default_floor_fraction() -> f64 {
+    0.80
+}
+fn default_floor_window() -> Duration {
+    Duration::from_secs(60)
+}
+
+/// Per-tick rate-of-change limits. Asymmetric: increases are bounded
+/// more tightly than decreases to prevent overshoot while allowing
+/// aggressive backoff.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateChangeLimitsConfig {
+    /// Maximum increase per tick as a fraction (e.g., 0.20 = +20%).
+    #[serde(default = "default_max_increase")]
+    pub max_increase_pct: f64,
+    /// Maximum decrease per tick as a fraction (e.g., 0.50 = -50%).
+    #[serde(default = "default_max_decrease")]
+    pub max_decrease_pct: f64,
+}
+
+impl Default for RateChangeLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_increase_pct: default_max_increase(),
+            max_decrease_pct: default_max_decrease(),
+        }
+    }
+}
+
+fn default_max_increase() -> f64 {
+    0.20
+}
+fn default_max_decrease() -> f64 {
+    0.50
 }
 
 /// TLS configuration for mTLS between leader and agent nodes.

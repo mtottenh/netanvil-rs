@@ -9,7 +9,11 @@ use std::time::Duration;
 
 use netanvil_core::clock::{system_clock, Clock, TestClock};
 use netanvil_core::{build_arbiter, build_rate_controller};
-use netanvil_types::{MetricsSummary, RateConfig, RateController};
+use netanvil_types::{
+    BaselineMultiplier, BoundsConfig, ConstraintClassConfig, ConstraintConfig, GainsConfig,
+    InternalMetric, MetricRef, MetricsSummary, RateConfig, RateController,
+    SetpointConstraintConfig, ThresholdConstraintConfig, ThresholdSource, WarmupConfig,
+};
 
 // ---------------------------------------------------------------------------
 // Per-tick capture
@@ -450,14 +454,60 @@ fn dump_captures(label: &str, old: &[TickCapture], new: &[TickCapture]) {
 // ---------------------------------------------------------------------------
 
 fn ramp_shadow_config(warmup_ticks: usize, control_interval: Duration) -> RateConfig {
-    RateConfig::Ramp {
-        warmup_rps: 100.0,
-        warmup_duration: warmup_duration_for(warmup_ticks, control_interval),
-        latency_multiplier: 3.0,
-        max_error_rate: 5.0,
-        min_rps: 10.0,
-        max_rps: 50_000.0,
-        external_constraints: vec![],
+    RateConfig::Adaptive {
+        bounds: BoundsConfig {
+            min_rps: 10.0,
+            max_rps: 50_000.0,
+        },
+        warmup: Some(WarmupConfig {
+            rps: 100.0,
+            duration: warmup_duration_for(warmup_ticks, control_interval),
+        }),
+        initial_rps: None,
+        constraints: vec![
+            ConstraintConfig::Threshold(ThresholdConstraintConfig {
+                id: "timeout".into(),
+                metric: MetricRef::Internal(InternalMetric::TimeoutFraction),
+                smoother: None,
+                class_override: Some(ConstraintClassConfig::Catastrophic),
+                threshold_source: ThresholdSource::Absolute { threshold: 0.01 },
+                persistence: 1,
+                self_caused_cap: None,
+                backoff: None,
+            }),
+            ConstraintConfig::Threshold(ThresholdConstraintConfig {
+                id: "inflight".into(),
+                metric: MetricRef::Internal(InternalMetric::InFlightDropFraction),
+                smoother: None,
+                class_override: Some(ConstraintClassConfig::Catastrophic),
+                threshold_source: ThresholdSource::Absolute { threshold: 0.01 },
+                persistence: 1,
+                self_caused_cap: None,
+                backoff: None,
+            }),
+            ConstraintConfig::Threshold(ThresholdConstraintConfig {
+                id: "latency".into(),
+                metric: MetricRef::Internal(InternalMetric::LatencyP99),
+                smoother: None,
+                class_override: None,
+                threshold_source: ThresholdSource::FromBaseline {
+                    threshold_from_baseline: BaselineMultiplier { multiplier: 3.0 },
+                },
+                persistence: 3,
+                self_caused_cap: None,
+                backoff: None,
+            }),
+            ConstraintConfig::Threshold(ThresholdConstraintConfig {
+                id: "error_rate".into(),
+                metric: MetricRef::Internal(InternalMetric::ErrorRate),
+                smoother: None,
+                class_override: None,
+                threshold_source: ThresholdSource::Absolute { threshold: 5.0 },
+                persistence: 1,
+                self_caused_cap: None,
+                backoff: None,
+            }),
+        ],
     }
 }
 
@@ -468,47 +518,62 @@ fn ramp_shadow_config(warmup_ticks: usize, control_interval: Duration) -> RateCo
 const SHADOW_TEST_DURATION: Duration = Duration::from_millis(2);
 
 fn pid_shadow_config(target_p99_ms: f64) -> RateConfig {
-    RateConfig::Pid {
-        initial_rps: 500.0,
-        target: netanvil_types::PidTarget {
-            metric: netanvil_types::TargetMetric::LatencyP99,
-            value: target_p99_ms,
+    RateConfig::Adaptive {
+        bounds: BoundsConfig {
             min_rps: 10.0,
             max_rps: 50_000.0,
-            gains: netanvil_types::PidGains::Manual {
+        },
+        warmup: None,
+        initial_rps: Some(500.0),
+        constraints: vec![ConstraintConfig::Setpoint(SetpointConstraintConfig {
+            id: "LatencyP99".into(),
+            metric: MetricRef::Internal(InternalMetric::LatencyP99),
+            smoother: None,
+            target: target_p99_ms,
+            gains: GainsConfig::Manual {
                 kp: 0.5,
                 ki: 0.01,
                 kd: 0.1,
             },
-        },
+            tracking_gain: 0.5,
+        })],
     }
 }
 
 fn composite_pid_shadow_config() -> RateConfig {
-    RateConfig::CompositePid {
-        initial_rps: 500.0,
+    RateConfig::Adaptive {
+        bounds: BoundsConfig {
+            min_rps: 10.0,
+            max_rps: 50_000.0,
+        },
+        warmup: None,
+        initial_rps: Some(500.0),
         constraints: vec![
-            netanvil_types::PidConstraint {
-                metric: netanvil_types::TargetMetric::LatencyP99,
-                limit: 100.0,
-                gains: netanvil_types::PidGains::Manual {
+            ConstraintConfig::Setpoint(SetpointConstraintConfig {
+                id: "LatencyP99".into(),
+                metric: MetricRef::Internal(InternalMetric::LatencyP99),
+                smoother: None,
+                target: 100.0,
+                gains: GainsConfig::Manual {
                     kp: 0.5,
                     ki: 0.01,
                     kd: 0.1,
                 },
-            },
-            netanvil_types::PidConstraint {
-                metric: netanvil_types::TargetMetric::ErrorRate,
-                limit: 5.0,
-                gains: netanvil_types::PidGains::Manual {
+                tracking_gain: 0.5,
+            }),
+            ConstraintConfig::Setpoint(SetpointConstraintConfig {
+                id: "ErrorRate".into(),
+                metric: MetricRef::Internal(InternalMetric::ErrorRate),
+                smoother: None,
+                target: 5.0,
+                gains: GainsConfig::Manual {
                     kp: 0.3,
                     ki: 0.005,
                     kd: 0.05,
                 },
-            },
+                tracking_gain: 0.5,
+            }),
         ],
-        min_rps: 10.0,
-        max_rps: 50_000.0,
     }
 }
 
@@ -1090,18 +1155,24 @@ fn shadow_composite_pid_oscillation_regression() {
 // ===========================================================================
 
 fn pid_auto_shadow_config(target_p99_ms: f64) -> RateConfig {
-    RateConfig::Pid {
-        initial_rps: 500.0,
-        target: netanvil_types::PidTarget {
-            metric: netanvil_types::TargetMetric::LatencyP99,
-            value: target_p99_ms,
+    RateConfig::Adaptive {
+        bounds: BoundsConfig {
             min_rps: 10.0,
             max_rps: 50_000.0,
-            gains: netanvil_types::PidGains::Auto {
+        },
+        warmup: None,
+        initial_rps: Some(500.0),
+        constraints: vec![ConstraintConfig::Setpoint(SetpointConstraintConfig {
+            id: "LatencyP99".into(),
+            metric: MetricRef::Internal(InternalMetric::LatencyP99),
+            smoother: None,
+            target: target_p99_ms,
+            gains: GainsConfig::Auto {
                 autotune_duration: Duration::from_millis(500),
                 smoothing: 0.3,
             },
-        },
+            tracking_gain: 0.5,
+        })],
     }
 }
 

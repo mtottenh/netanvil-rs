@@ -11,7 +11,10 @@ use std::time::Duration;
 
 use netanvil_core::run_test;
 use netanvil_http::HttpExecutor;
-use netanvil_types::{ConnectionConfig, PidTarget, RateConfig, TargetMetric, TestConfig};
+use netanvil_types::{
+    BoundsConfig, ConnectionConfig, ConstraintConfig, ExternalMetricRef, GainsConfig,
+    InternalMetric, MetricRef, RateConfig, SetpointConstraintConfig, TestConfig, WarmupConfig,
+};
 
 /// Test server that:
 /// - Serves GET / (target endpoint for load generation)
@@ -99,21 +102,30 @@ fn pid_controller_adapts_rate_based_on_external_server_load() {
     let config = TestConfig {
         targets: vec![format!("http://{}/", server_addr)],
         duration: Duration::from_secs(6),
-        rate: RateConfig::Pid {
-            initial_rps: 2000.0, // start well above equilibrium
-            target: PidTarget {
-                metric: TargetMetric::External {
+        rate: RateConfig::Adaptive {
+            bounds: BoundsConfig {
+                min_rps: 50.0,
+                max_rps: 5000.0,
+            },
+            warmup: None,
+            initial_rps: Some(2000.0), // start well above equilibrium
+            constraints: vec![ConstraintConfig::Setpoint(SetpointConstraintConfig {
+                id: "load".into(),
+                metric: MetricRef::External(ExternalMetricRef {
                     name: "load".into(),
-                },
-                value: 70.0,
-                gains: netanvil_types::PidGains::Manual {
+                    direction: netanvil_types::SignalDirection::default(),
+                    stale_after_ticks: 3,
+                    on_missing: netanvil_types::MissingSignalBehavior::default(),
+                }),
+                smoother: None,
+                target: 70.0,
+                gains: GainsConfig::Manual {
                     kp: 0.3,
                     ki: 0.01,
                     kd: 0.1,
                 },
-                min_rps: 50.0,
-                max_rps: 5000.0,
-            },
+                tracking_gain: 0.5,
+            })],
         },
         num_cores: 1,
         connections: ConnectionConfig {
@@ -163,19 +175,25 @@ fn pid_without_external_signal_generates_requests() {
     let config = TestConfig {
         targets: vec![format!("http://{}/", server_addr)],
         duration: Duration::from_secs(3),
-        rate: RateConfig::Pid {
-            initial_rps: 200.0,
-            target: PidTarget {
-                metric: TargetMetric::LatencyP99,
-                value: 100.0,
-                gains: netanvil_types::PidGains::Manual {
+        rate: RateConfig::Adaptive {
+            bounds: BoundsConfig {
+                min_rps: 10.0,
+                max_rps: 5000.0,
+            },
+            warmup: None,
+            initial_rps: Some(200.0),
+            constraints: vec![ConstraintConfig::Setpoint(SetpointConstraintConfig {
+                id: "LatencyP99".into(),
+                metric: MetricRef::Internal(InternalMetric::LatencyP99),
+                smoother: None,
+                target: 100.0,
+                gains: GainsConfig::Manual {
                     kp: 0.1,
                     ki: 0.01,
                     kd: 0.05,
                 },
-                min_rps: 10.0,
-                max_rps: 5000.0,
-            },
+                tracking_gain: 0.5,
+            })],
         },
         num_cores: 1,
         connections: ConnectionConfig {

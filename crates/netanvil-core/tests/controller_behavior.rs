@@ -1,13 +1,16 @@
+use std::sync::Arc;
 use std::time::Duration;
 
-use netanvil_core::clock::system_clock;
+use netanvil_core::clock::{Clock, TestClock};
 use netanvil_core::controller::autotune::{
     compute_cohen_coon_gains, gain_schedule, ExplorationManager, MetricExploration, PidState,
 };
-use netanvil_core::{Arbiter, ArbiterConfig, StaticRateController, StepRateController};
+use netanvil_core::{build_arbiter, Arbiter, ArbiterConfig, StaticRateController, StepRateController};
 use netanvil_types::{
-    ExternalConstraintConfig, MetricsSummary, MissingSignalBehavior, RateController,
-    SignalDirection, TargetMetric,
+    BaselineMultiplier, BoundsConfig, ConstraintClassConfig, ConstraintConfig,
+    ExternalConstraintConfig, InternalMetric, MetricRef, MetricsSummary, MissingSignalBehavior,
+    RateConfig, RateController, SignalDirection, TargetMetric, ThresholdConstraintConfig,
+    ThresholdSource, WarmupConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -48,27 +51,27 @@ fn static_controller_ignores_all_metrics() {
 
 #[test]
 fn step_controller_follows_time_based_schedule() {
+    let clock = Arc::new(TestClock::new());
     let steps = vec![
         (Duration::from_millis(0), 100.0),
         (Duration::from_millis(100), 300.0),
         (Duration::from_millis(200), 50.0),
     ];
 
-    let start = std::time::Instant::now();
-    let mut ctrl = StepRateController::with_start_time(steps, start);
+    let mut ctrl = StepRateController::new_with_clock(steps, clock.clone() as Arc<dyn Clock>);
     let summary = MetricsSummary::default();
 
     // At t=0, should be 100 RPS
     let decision = ctrl.update(&summary);
     assert_eq!(decision.target_rps, 100.0);
 
-    // Wait past first step boundary
-    std::thread::sleep(Duration::from_millis(120));
+    // Advance past first step boundary (100ms)
+    clock.advance(Duration::from_millis(120));
     let decision = ctrl.update(&summary);
     assert_eq!(decision.target_rps, 300.0);
 
-    // Wait past second step boundary
-    std::thread::sleep(Duration::from_millis(100));
+    // Advance past second step boundary (200ms)
+    clock.advance(Duration::from_millis(100));
     let decision = ctrl.update(&summary);
     assert_eq!(decision.target_rps, 50.0);
 }
@@ -356,36 +359,95 @@ fn exploration_detects_dead_time() {
 // Arbiter behavioral tests
 // ---------------------------------------------------------------------------
 
-/// Helper to build an Arbiter from a ramp config via the builder.
+/// Helper to build an Arbiter from an Adaptive config via the builder.
+///
+/// Accepts a clock and test_duration so tests can use TestClock for
+/// deterministic timing instead of thread::sleep.
 fn build_ramp_arbiter(
     warmup_rps: f64,
     max_error_rate: f64,
     min_rps: f64,
     max_rps: f64,
     latency_multiplier: f64,
+    clock: Arc<dyn Clock>,
+    test_duration: Duration,
 ) -> Box<dyn RateController> {
-    let config = netanvil_types::RateConfig::Ramp {
-        warmup_rps,
-        warmup_duration: Duration::from_millis(100),
-        latency_multiplier,
-        max_error_rate,
-        min_rps,
-        max_rps,
-        external_constraints: vec![],
+    let config = RateConfig::Adaptive {
+        bounds: BoundsConfig { min_rps, max_rps },
+        warmup: Some(WarmupConfig {
+            rps: warmup_rps,
+            duration: Duration::from_millis(100),
+        }),
+        initial_rps: None,
+        constraints: vec![
+            ConstraintConfig::Threshold(ThresholdConstraintConfig {
+                id: "timeout".into(),
+                metric: MetricRef::Internal(InternalMetric::TimeoutFraction),
+                smoother: None,
+                class_override: Some(ConstraintClassConfig::Catastrophic),
+                threshold_source: ThresholdSource::Absolute { threshold: 0.01 },
+                persistence: 1,
+                self_caused_cap: None,
+                backoff: None,
+            }),
+            ConstraintConfig::Threshold(ThresholdConstraintConfig {
+                id: "inflight".into(),
+                metric: MetricRef::Internal(InternalMetric::InFlightDropFraction),
+                smoother: None,
+                class_override: Some(ConstraintClassConfig::Catastrophic),
+                threshold_source: ThresholdSource::Absolute { threshold: 0.01 },
+                persistence: 1,
+                self_caused_cap: None,
+                backoff: None,
+            }),
+            ConstraintConfig::Threshold(ThresholdConstraintConfig {
+                id: "latency".into(),
+                metric: MetricRef::Internal(InternalMetric::LatencyP99),
+                smoother: None,
+                class_override: None,
+                threshold_source: ThresholdSource::FromBaseline {
+                    threshold_from_baseline: BaselineMultiplier {
+                        multiplier: latency_multiplier,
+                    },
+                },
+                persistence: 3,
+                self_caused_cap: None,
+                backoff: None,
+            }),
+            ConstraintConfig::Threshold(ThresholdConstraintConfig {
+                id: "error_rate".into(),
+                metric: MetricRef::Internal(InternalMetric::ErrorRate),
+                smoother: None,
+                class_override: None,
+                threshold_source: ThresholdSource::Absolute {
+                    threshold: max_error_rate,
+                },
+                persistence: 1,
+                self_caused_cap: None,
+                backoff: None,
+            }),
+        ],
     };
-    netanvil_core::build_arbiter(
+    let start_time = clock.now();
+    build_arbiter(
         &config,
         Duration::from_millis(100),
-        std::time::Instant::now(),
-        Duration::from_secs(60),
-        system_clock(),
+        start_time,
+        test_duration,
+        clock,
     )
-    .expect("ramp config should produce an arbiter")
+    .expect("adaptive config should produce an arbiter")
 }
 
 #[test]
 fn arbiter_ramp_warmup_holds_rate() {
-    let mut ctrl = build_ramp_arbiter(100.0, 5.0, 10.0, 50000.0, 3.0);
+    let clock = Arc::new(TestClock::new());
+    // test_duration=2ms so ceiling opens almost immediately (ramp_duration = 1ms).
+    let mut ctrl = build_ramp_arbiter(
+        100.0, 5.0, 10.0, 50000.0, 3.0,
+        clock.clone() as Arc<dyn Clock>,
+        Duration::from_millis(2),
+    );
     let summary = MetricsSummary {
         total_requests: 100,
         latency_p99_ns: 5_000_000, // 5ms
@@ -398,7 +460,12 @@ fn arbiter_ramp_warmup_holds_rate() {
 
 #[test]
 fn arbiter_ramp_transitions_to_active_and_increases() {
-    let mut ctrl = build_ramp_arbiter(100.0, 5.0, 10.0, 50000.0, 3.0);
+    let clock = Arc::new(TestClock::new());
+    let mut ctrl = build_ramp_arbiter(
+        100.0, 5.0, 10.0, 50000.0, 3.0,
+        clock.clone() as Arc<dyn Clock>,
+        Duration::from_millis(2),
+    );
     let warmup_summary = MetricsSummary {
         total_requests: 100,
         latency_p99_ns: 5_000_000, // 5ms
@@ -406,13 +473,14 @@ fn arbiter_ramp_transitions_to_active_and_increases() {
         ..Default::default()
     };
 
-    // Warmup: collect samples
+    // Warmup: collect samples, advancing clock each tick
     for _ in 0..5 {
         ctrl.update(&warmup_summary);
+        clock.advance(Duration::from_millis(20));
     }
 
-    // Force warmup to end by sleeping past duration
-    std::thread::sleep(Duration::from_millis(120));
+    // Advance past the 100ms warmup duration
+    clock.advance(Duration::from_millis(20));
 
     // First tick after warmup should transition and start ramping
     let clean_summary = MetricsSummary {
@@ -433,32 +501,50 @@ fn arbiter_ramp_transitions_to_active_and_increases() {
 
 #[test]
 fn arbiter_ramp_backs_off_on_latency_spike() {
-    let mut ctrl = build_ramp_arbiter(100.0, 5.0, 10.0, 50000.0, 3.0);
+    let clock = Arc::new(TestClock::new());
+    // Use test_duration=2ms so the ceiling opens fully (ramp_duration=1ms).
+    // This ensures the ceiling is NOT the binding constraint — the test
+    // validates that the latency threshold constraint causes backoff, not
+    // that the ceiling clips rate. Previously, test_duration=60s meant
+    // the ceiling barely opened during the ~200ms real-time test, which
+    // masked whether the test was actually exercising latency backoff or
+    // just hitting a closed ceiling.
+    let mut ctrl = build_ramp_arbiter(
+        100.0, 5.0, 10.0, 50000.0, 3.0,
+        clock.clone() as Arc<dyn Clock>,
+        Duration::from_millis(2),
+    );
+
+    let control_interval = Duration::from_millis(100);
 
     // Warmup
     let warmup = MetricsSummary {
         total_requests: 100,
         latency_p99_ns: 5_000_000, // 5ms baseline
-        window_duration: Duration::from_millis(100),
+        window_duration: control_interval,
         ..Default::default()
     };
     for _ in 0..5 {
         ctrl.update(&warmup);
+        clock.advance(control_interval);
     }
-    std::thread::sleep(Duration::from_millis(120));
-    ctrl.update(&warmup); // transition
+    // Advance past the 100ms warmup duration (5 ticks × 20ms would be
+    // 100ms already, but be explicit)
+    ctrl.update(&warmup); // transition tick
+    clock.advance(control_interval);
 
     // Ramp up with clean ticks
     let clean = MetricsSummary {
         total_requests: 100,
         latency_p99_ns: 5_000_000,
-        window_duration: Duration::from_millis(100),
+        window_duration: control_interval,
         ..Default::default()
     };
     let mut rate = 0.0;
     for _ in 0..10 {
         let d = ctrl.update(&clean);
         rate = d.target_rps;
+        clock.advance(control_interval);
     }
     let pre_spike_rate = rate;
 
@@ -466,11 +552,14 @@ fn arbiter_ramp_backs_off_on_latency_spike() {
     let spike = MetricsSummary {
         total_requests: 100,
         latency_p99_ns: 100_000_000, // 100ms — severity ~6.7x
-        window_duration: Duration::from_millis(100),
+        window_duration: control_interval,
         ..Default::default()
     };
-    // Need persistence=2 for latency, so two spikes
+    // Need persistence=3 for latency, so three spikes
     ctrl.update(&spike);
+    clock.advance(control_interval);
+    ctrl.update(&spike);
+    clock.advance(control_interval);
     let d = ctrl.update(&spike);
 
     assert!(
@@ -824,33 +913,43 @@ fn arbiter_rate_of_change_clamp() {
 /// 5.7: on_warmup_complete propagates baseline to latency constraint.
 #[test]
 fn arbiter_warmup_sets_latency_threshold() {
-    let mut ctrl = build_ramp_arbiter(100.0, 5.0, 10.0, 50000.0, 3.0);
+    let clock = Arc::new(TestClock::new());
+    let control_interval = Duration::from_millis(100);
+    let mut ctrl = build_ramp_arbiter(
+        100.0, 5.0, 10.0, 50000.0, 3.0,
+        clock.clone() as Arc<dyn Clock>,
+        Duration::from_millis(2),
+    );
 
     // Feed warmup samples at ~5ms p99.
     let warmup = MetricsSummary {
         total_requests: 100,
         latency_p99_ns: 5_000_000, // 5ms
-        window_duration: Duration::from_millis(100),
+        window_duration: control_interval,
         ..Default::default()
     };
     for _ in 0..5 {
         ctrl.update(&warmup);
+        clock.advance(control_interval);
     }
-    std::thread::sleep(Duration::from_millis(120));
+    // Advance past the 100ms warmup duration
+    clock.advance(control_interval);
 
     // Transition to active — latency threshold should be 5ms × 3.0 = 15ms.
     // Now feed 12ms latency: below threshold (15ms) → should not back off.
     let under_threshold = MetricsSummary {
         total_requests: 100,
         latency_p99_ns: 12_000_000, // 12ms < 15ms target
-        window_duration: Duration::from_millis(100),
+        window_duration: control_interval,
         ..Default::default()
     };
     ctrl.update(&under_threshold); // first active tick
+    clock.advance(control_interval);
 
     // Several clean ticks to let it ramp.
     for _ in 0..5 {
         ctrl.update(&under_threshold);
+        clock.advance(control_interval);
     }
     let rate_at_12ms = ctrl.current_rate();
 
@@ -858,11 +957,14 @@ fn arbiter_warmup_sets_latency_threshold() {
     let over_threshold = MetricsSummary {
         total_requests: 100,
         latency_p99_ns: 20_000_000, // 20ms > 15ms target
-        window_duration: Duration::from_millis(100),
+        window_duration: control_interval,
         ..Default::default()
     };
-    // Need persistence=2 for latency, so two ticks.
+    // Need persistence=3 for latency, so three ticks.
     ctrl.update(&over_threshold);
+    clock.advance(control_interval);
+    ctrl.update(&over_threshold);
+    clock.advance(control_interval);
     let d = ctrl.update(&over_threshold);
 
     assert!(

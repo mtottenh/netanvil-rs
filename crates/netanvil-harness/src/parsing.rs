@@ -4,8 +4,10 @@ use anyhow::{Context, Result};
 
 use netanvil_core::{GeneratorFactory, GenericGeneratorFactory};
 use netanvil_types::{
-    ConnectionPolicy, CountDistribution, HttpVersion, PidTarget, PluginType, RateConfig,
-    ResponseSignalConfig, SchedulerConfig, SignalAggregation, TargetMetric, ValueDistribution,
+    BaselineMultiplier, BoundsConfig, ConnectionPolicy, ConstraintClassConfig, ConstraintConfig,
+    CountDistribution, HttpVersion, InternalMetric, MetricRef, PluginType, RateConfig,
+    ResponseSignalConfig, SchedulerConfig, SignalAggregation,
+    TargetMetric, ThresholdConstraintConfig, ThresholdSource, ValueDistribution, WarmupConfig,
     WeightedValue,
 };
 
@@ -63,9 +65,15 @@ pub fn parse_target_metric(s: &str) -> Result<TargetMetric> {
     }
 }
 
+/// Parsed constraint: metric and limit value.
+pub struct ParsedConstraint {
+    pub metric: TargetMetric,
+    pub limit: f64,
+}
+
 /// Parse a PID constraint string: "metric < value" or "metric > value".
 /// Only '<' (upper limit) is supported for now.
-pub fn parse_pid_constraint(s: &str) -> Result<netanvil_types::PidConstraint> {
+pub fn parse_pid_constraint(s: &str) -> Result<ParsedConstraint> {
     let parts: Vec<&str> = s.split('<').collect();
     if parts.len() != 2 {
         anyhow::bail!(
@@ -77,11 +85,7 @@ pub fn parse_pid_constraint(s: &str) -> Result<netanvil_types::PidConstraint> {
         .trim()
         .parse()
         .context("invalid numeric limit in constraint")?;
-    Ok(netanvil_types::PidConstraint {
-        metric,
-        limit,
-        gains: netanvil_types::PidGains::default(),
-    })
+    Ok(ParsedConstraint { metric, limit })
 }
 
 /// Parse step definitions: "0s:100,5s:500,10s:200"
@@ -873,27 +877,6 @@ pub fn build_redis_plugin_factory(
     }
 }
 
-pub fn build_pid_gains(
-    pid_kp: Option<f64>,
-    pid_ki: Option<f64>,
-    pid_kd: Option<f64>,
-    autotune_duration: Duration,
-) -> netanvil_types::PidGains {
-    match (pid_kp, pid_ki, pid_kd) {
-        (Some(kp), Some(ki), Some(kd)) => netanvil_types::PidGains::Manual { kp, ki, kd },
-        (None, None, None) => netanvil_types::PidGains::Auto {
-            autotune_duration,
-            smoothing: 0.3,
-        },
-        // Partial specification: fill missing with defaults
-        (kp, ki, kd) => netanvil_types::PidGains::Manual {
-            kp: kp.unwrap_or(0.1),
-            ki: ki.unwrap_or(0.01),
-            kd: kd.unwrap_or(0.05),
-        },
-    }
-}
-
 /// PID-specific arguments for building a rate config.
 pub struct PidArgs<'a> {
     pub metric: &'a str,
@@ -929,52 +912,85 @@ pub fn build_rate_config(
             Ok(RateConfig::Step { steps })
         }
         "pid" => {
-            if !pid.constraints.is_empty() {
-                let mut constraints: Vec<netanvil_types::PidConstraint> = pid
-                    .constraints
-                    .iter()
-                    .map(|s| parse_pid_constraint(s))
-                    .collect::<Result<_>>()?;
-
-                let gains = build_pid_gains(pid.kp, pid.ki, pid.kd, pid.autotune_duration);
-                if matches!(gains, netanvil_types::PidGains::Manual { .. }) {
-                    for c in &mut constraints {
-                        c.gains = gains.clone();
-                    }
-                }
-
-                Ok(RateConfig::CompositePid {
-                    initial_rps: rps,
-                    constraints,
+            anyhow::bail!(
+                "rate mode 'pid' has been replaced. Use --rate-mode adaptive with \
+                 --pid-constraint flags, or see docs for equivalent config."
+            )
+        }
+        "ramp" => {
+            anyhow::bail!(
+                "rate mode 'ramp' has been replaced. Use --rate-mode adaptive, \
+                 or see docs for equivalent config."
+            )
+        }
+        "adaptive" => {
+            // Direct Adaptive mode: same as ramp for now but users can
+            // further customize via config files in the future.
+            let warmup_rps = rps.clamp(1.0, 100.0);
+            Ok(RateConfig::Adaptive {
+                bounds: BoundsConfig {
                     min_rps: pid.min_rps,
                     max_rps: pid.max_rps,
-                })
-            } else {
-                let metric = parse_target_metric(pid.metric)?;
-                let gains = build_pid_gains(pid.kp, pid.ki, pid.kd, pid.autotune_duration);
-                Ok(RateConfig::Pid {
-                    initial_rps: rps,
-                    target: PidTarget {
-                        metric,
-                        value: pid.target,
-                        gains,
-                        min_rps: pid.min_rps,
-                        max_rps: pid.max_rps,
-                    },
-                })
-            }
+                },
+                warmup: Some(WarmupConfig {
+                    rps: warmup_rps,
+                    duration: ramp.warmup_duration,
+                }),
+                initial_rps: None,
+                constraints: vec![
+                    ConstraintConfig::Threshold(ThresholdConstraintConfig {
+                        id: "timeout".into(),
+                        metric: MetricRef::Internal(InternalMetric::TimeoutFraction),
+                        smoother: None,
+                        class_override: Some(ConstraintClassConfig::Catastrophic),
+                        threshold_source: ThresholdSource::Absolute { threshold: 0.01 },
+                        persistence: 1,
+                        self_caused_cap: None,
+                        backoff: None,
+                    }),
+                    ConstraintConfig::Threshold(ThresholdConstraintConfig {
+                        id: "inflight".into(),
+                        metric: MetricRef::Internal(InternalMetric::InFlightDropFraction),
+                        smoother: None,
+                        class_override: Some(ConstraintClassConfig::Catastrophic),
+                        threshold_source: ThresholdSource::Absolute { threshold: 0.01 },
+                        persistence: 1,
+                        self_caused_cap: None,
+                        backoff: None,
+                    }),
+                    ConstraintConfig::Threshold(ThresholdConstraintConfig {
+                        id: "latency".into(),
+                        metric: MetricRef::Internal(InternalMetric::LatencyP99),
+                        smoother: None,
+                        class_override: None,
+                        threshold_source: ThresholdSource::FromBaseline {
+                            threshold_from_baseline: BaselineMultiplier {
+                                multiplier: ramp.latency_multiplier,
+                            },
+                        },
+                        persistence: 3,
+                        self_caused_cap: None,
+                        backoff: None,
+                    }),
+                    ConstraintConfig::Threshold(ThresholdConstraintConfig {
+                        id: "error_rate".into(),
+                        metric: MetricRef::Internal(InternalMetric::ErrorRate),
+                        smoother: None,
+                        class_override: None,
+                        threshold_source: ThresholdSource::Absolute {
+                            threshold: ramp.max_error_rate,
+                        },
+                        persistence: 1,
+                        self_caused_cap: None,
+                        backoff: None,
+                    }),
+                ],
+            })
         }
-        "ramp" => Ok(RateConfig::Ramp {
-            warmup_rps: rps.clamp(1.0, 100.0), // warmup at low rate (capped at 100)
-            warmup_duration: ramp.warmup_duration,
-            latency_multiplier: ramp.latency_multiplier,
-            max_error_rate: ramp.max_error_rate,
-            min_rps: pid.min_rps,
-            max_rps: pid.max_rps,
-            external_constraints: Vec::new(),
-        }),
         other => {
-            anyhow::bail!("unknown rate mode: {other} (use 'static', 'step', 'pid', or 'ramp')")
+            anyhow::bail!(
+                "unknown rate mode: {other} (use 'static', 'step', 'pid', 'ramp', or 'adaptive')"
+            )
         }
     }
 }
@@ -1314,8 +1330,8 @@ mod tests {
     }
 
     #[test]
-    fn build_pid_rate_with_manual_gains() {
-        let rate = build_rate_config(
+    fn build_pid_rate_mode_returns_error() {
+        let result = build_rate_config(
             "pid",
             500.0,
             None,
@@ -1335,29 +1351,20 @@ mod tests {
                 latency_multiplier: 3.0,
                 max_error_rate: 5.0,
             },
-        )
-        .unwrap();
-        match rate {
-            RateConfig::Pid {
-                initial_rps,
-                target,
-            } => {
-                assert_eq!(initial_rps, 500.0);
-                assert_eq!(target.value, 200.0);
-                assert!(matches!(target.metric, TargetMetric::LatencyP99));
-                assert!(
-                    matches!(target.gains, netanvil_types::PidGains::Manual { kp, .. } if (kp - 0.1).abs() < 0.001)
-                );
-            }
-            _ => panic!("expected Pid"),
-        }
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("replaced"),
+            "error should mention replacement: {err}"
+        );
     }
 
     #[test]
-    fn build_pid_rate_autotune_default() {
-        let rate = build_rate_config(
-            "pid",
-            500.0,
+    fn build_ramp_rate_mode_returns_error() {
+        let result = build_rate_config(
+            "ramp",
+            100.0,
             None,
             &PidArgs {
                 metric: "latency-p99",
@@ -1375,38 +1382,30 @@ mod tests {
                 latency_multiplier: 3.0,
                 max_error_rate: 5.0,
             },
-        )
-        .unwrap();
-        match rate {
-            RateConfig::Pid { target, .. } => {
-                assert!(matches!(
-                    target.gains,
-                    netanvil_types::PidGains::Auto { .. }
-                ));
-            }
-            _ => panic!("expected Pid"),
-        }
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("replaced"),
+            "error should mention replacement: {err}"
+        );
     }
 
     #[test]
-    fn build_composite_pid() {
-        let constraints = vec![
-            "latency-p99 < 500".to_string(),
-            "error-rate < 2".to_string(),
-        ];
+    fn build_adaptive_rate() {
         let rate = build_rate_config(
-            "pid",
-            1000.0,
+            "adaptive",
+            100.0,
             None,
             &PidArgs {
-                metric: "p99",
+                metric: "latency-p99",
                 target: 200.0,
                 kp: None,
                 ki: None,
                 kd: None,
                 min_rps: 10.0,
                 max_rps: 50000.0,
-                constraints: &constraints,
+                constraints: &[],
                 autotune_duration: Duration::from_secs(3),
             },
             &RampArgs {
@@ -1417,17 +1416,18 @@ mod tests {
         )
         .unwrap();
         match rate {
-            RateConfig::CompositePid {
-                initial_rps,
+            RateConfig::Adaptive {
+                bounds,
+                warmup,
                 constraints,
                 ..
             } => {
-                assert_eq!(initial_rps, 1000.0);
-                assert_eq!(constraints.len(), 2);
-                assert_eq!(constraints[0].limit, 500.0);
-                assert_eq!(constraints[1].limit, 2.0);
+                assert_eq!(bounds.min_rps, 10.0);
+                assert_eq!(bounds.max_rps, 50000.0);
+                assert!(warmup.is_some());
+                assert_eq!(constraints.len(), 4); // timeout, inflight, latency, error_rate
             }
-            _ => panic!("expected CompositePid"),
+            _ => panic!("expected Adaptive"),
         }
     }
 
@@ -1441,7 +1441,10 @@ mod tests {
     #[test]
     fn parse_pid_constraint_external() {
         let c = parse_pid_constraint("external:load < 80").unwrap();
-        assert!(matches!(c.metric, TargetMetric::External { name } if name == "load"));
+        match &c.metric {
+            TargetMetric::External { name } => assert_eq!(name, "load"),
+            _ => panic!("expected External"),
+        }
         assert_eq!(c.limit, 80.0);
     }
 

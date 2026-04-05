@@ -128,30 +128,29 @@ pub fn run(
     let rate_desc = match &config.rate {
         RateConfig::Static { rps } => format!("{rps} RPS (static)"),
         RateConfig::Step { steps } => format!("{} steps", steps.len()),
-        RateConfig::Pid {
-            initial_rps,
-            target,
-        } => {
-            let mode = match &target.gains {
-                netanvil_types::PidGains::Auto { .. } => "PID/autotune",
-                netanvil_types::PidGains::Manual { .. } => "PID",
-            };
-            format!("{initial_rps} RPS initial ({mode})")
-        }
-        RateConfig::CompositePid {
-            initial_rps,
+        RateConfig::Adaptive {
+            bounds,
             constraints,
-            ..
-        } => format!(
-            "{initial_rps} RPS initial (composite PID, {} constraints)",
-            constraints.len()
-        ),
-        RateConfig::Ramp {
-            warmup_rps,
-            latency_multiplier,
-            ..
+            warmup,
+            initial_rps,
         } => {
-            format!("{warmup_rps} RPS warmup (ramp, {latency_multiplier}x baseline)")
+            if let Some(w) = warmup {
+                format!(
+                    "{:.0} RPS warmup (adaptive, {:.0}-{:.0} RPS, {} constraints)",
+                    w.rps,
+                    bounds.min_rps,
+                    bounds.max_rps,
+                    constraints.len()
+                )
+            } else {
+                format!(
+                    "{:.0} RPS initial (adaptive, {:.0}-{:.0} RPS, {} constraints)",
+                    initial_rps.unwrap_or(bounds.min_rps),
+                    bounds.min_rps,
+                    bounds.max_rps,
+                    constraints.len()
+                )
+            }
         }
     };
 

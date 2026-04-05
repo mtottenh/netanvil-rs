@@ -58,7 +58,7 @@ enum Commands {
         #[arg(long, default_value = "10s")]
         duration: String,
 
-        /// Rate control mode: "static", "step", or "pid"
+        /// Rate control mode: "static", "step", "pid", "ramp", or "adaptive"
         #[arg(long, default_value = "static")]
         rate_mode: String,
 
@@ -335,7 +335,7 @@ enum Commands {
         #[arg(long, default_value = "10s")]
         duration: String,
 
-        /// Rate control mode: "static", "step", or "pid"
+        /// Rate control mode: "static", "step", "pid", "ramp", or "adaptive"
         #[arg(long, default_value = "static")]
         rate_mode: String,
 

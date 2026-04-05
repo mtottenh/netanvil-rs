@@ -10,8 +10,9 @@
 use std::time::{Duration, SystemTime};
 
 use netanvil_types::{
-    ConnectionConfig, ConnectionPolicy, HttpVersion, PluginConfig, ProtocolConfig, RateConfig,
-    SchedulerConfig, TestConfig,
+    BoundsConfig, ConnectionConfig, ConnectionPolicy, ConstraintConfig, GainsConfig, HttpVersion,
+    PluginConfig, ProtocolConfig, RateConfig, SchedulerConfig, SetpointConstraintConfig,
+    TestConfig, WarmupConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -197,43 +198,81 @@ pub enum RateSpecConfig {
         /// Vec of ("offset_string", rps).
         steps: Vec<(String, f64)>,
     },
-    Ramp {
-        warmup_rps: f64,
-        #[serde(default = "default_ramp_warmup")]
-        warmup_duration: String,
-        #[serde(default = "default_ramp_multiplier")]
-        latency_multiplier: f64,
-        #[serde(default = "default_ramp_max_errors")]
-        max_error_rate: f64,
-        #[serde(default = "default_min_rps")]
-        min_rps: f64,
-        max_rps: f64,
+    Adaptive {
+        bounds: BoundsConfig,
         #[serde(default)]
-        external_constraints: Vec<netanvil_types::ExternalConstraintConfig>,
-    },
-    Pid {
-        initial_rps: f64,
-        target: netanvil_types::PidTarget,
-    },
-    CompositePid {
-        initial_rps: f64,
-        constraints: Vec<netanvil_types::PidConstraint>,
-        min_rps: f64,
-        max_rps: f64,
+        warmup: Option<WarmupSpecConfig>,
+        #[serde(default)]
+        initial_rps: Option<f64>,
+        constraints: Vec<ConstraintSpecConfig>,
     },
 }
 
-fn default_ramp_warmup() -> String {
-    "10s".into()
+/// Warmup configuration with human-readable duration string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WarmupSpecConfig {
+    pub rps: f64,
+    pub duration: String,
 }
-fn default_ramp_multiplier() -> f64 {
-    3.0
+
+/// Gains configuration with human-readable duration string for auto-tune.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GainsSpecConfig {
+    Auto {
+        #[serde(default = "default_autotune_duration_str")]
+        autotune_duration: String,
+        #[serde(default = "default_smoothing")]
+        smoothing: f64,
+    },
+    Manual {
+        kp: f64,
+        ki: f64,
+        kd: f64,
+    },
 }
-fn default_ramp_max_errors() -> f64 {
-    5.0
+
+impl Default for GainsSpecConfig {
+    fn default() -> Self {
+        GainsSpecConfig::Auto {
+            autotune_duration: default_autotune_duration_str(),
+            smoothing: default_smoothing(),
+        }
+    }
 }
-fn default_min_rps() -> f64 {
-    10.0
+
+fn default_autotune_duration_str() -> String {
+    "3s".into()
+}
+
+fn default_smoothing() -> f64 {
+    0.3
+}
+
+fn default_tracking_gain() -> f64 {
+    0.5
+}
+
+/// Setpoint constraint config with string-based durations for the spec layer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetpointSpecConstraintConfig {
+    pub id: String,
+    pub metric: netanvil_types::MetricRef,
+    #[serde(default)]
+    pub smoother: Option<netanvil_types::SmootherConfig>,
+    pub target: f64,
+    #[serde(default)]
+    pub gains: GainsSpecConfig,
+    #[serde(default = "default_tracking_gain")]
+    pub tracking_gain: f64,
+}
+
+/// Constraint config for the spec layer, with string-based durations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ConstraintSpecConfig {
+    Threshold(netanvil_types::ThresholdConstraintConfig),
+    Setpoint(SetpointSpecConstraintConfig),
 }
 
 // ---------------------------------------------------------------------------
@@ -307,18 +346,14 @@ impl TestSpec {
         let rate_desc = match &self.rate {
             RateSpecConfig::Static { rps } => format!("Static {rps:.0} RPS"),
             RateSpecConfig::Step { steps } => format!("Step ({} phases)", steps.len()),
-            RateSpecConfig::Ramp {
-                warmup_rps,
-                max_rps,
-                ..
-            } => format!("Ramp {warmup_rps:.0}→{max_rps:.0} RPS"),
-            RateSpecConfig::Pid { initial_rps, .. } => format!("PID from {initial_rps:.0} RPS"),
-            RateSpecConfig::CompositePid {
-                initial_rps,
+            RateSpecConfig::Adaptive {
+                bounds,
                 constraints,
                 ..
             } => format!(
-                "CompositePID {initial_rps:.0} RPS, {} constraints",
+                "Adaptive {:.0}-{:.0} RPS, {} constraints",
+                bounds.min_rps,
+                bounds.max_rps,
                 constraints.len()
             ),
         };
@@ -339,46 +374,75 @@ fn convert_rate(spec: RateSpecConfig) -> Result<RateConfig, SpecError> {
             }
             Ok(RateConfig::Step { steps: parsed })
         }
-        RateSpecConfig::Ramp {
-            warmup_rps,
-            warmup_duration,
-            latency_multiplier,
-            max_error_rate,
-            min_rps,
-            max_rps,
-            external_constraints,
+        RateSpecConfig::Adaptive {
+            bounds,
+            warmup,
+            initial_rps,
+            constraints,
         } => {
-            let wd = parse_duration(&warmup_duration).map_err(|e| {
-                SpecError(format!("invalid warmup_duration '{warmup_duration}': {e}"))
-            })?;
-            Ok(RateConfig::Ramp {
-                warmup_rps,
-                warmup_duration: wd,
-                latency_multiplier,
-                max_error_rate,
-                min_rps,
-                max_rps,
-                external_constraints,
+            let warmup = match warmup {
+                Some(w) => {
+                    let d = parse_duration(&w.duration).map_err(|e| {
+                        SpecError(format!(
+                            "invalid warmup duration '{}': {e}",
+                            w.duration
+                        ))
+                    })?;
+                    Some(WarmupConfig { rps: w.rps, duration: d })
+                }
+                None => None,
+            };
+            let constraints = constraints
+                .into_iter()
+                .map(|c| convert_constraint_spec(c))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(RateConfig::Adaptive {
+                bounds,
+                warmup,
+                initial_rps,
+                constraints,
             })
         }
-        RateSpecConfig::Pid {
-            initial_rps,
-            target,
-        } => Ok(RateConfig::Pid {
-            initial_rps,
-            target,
-        }),
-        RateSpecConfig::CompositePid {
-            initial_rps,
-            constraints,
-            min_rps,
-            max_rps,
-        } => Ok(RateConfig::CompositePid {
-            initial_rps,
-            constraints,
-            min_rps,
-            max_rps,
-        }),
+    }
+}
+
+/// Convert a `ConstraintSpecConfig` to a `ConstraintConfig`, parsing
+/// string durations in `GainsSpecConfig::Auto`.
+fn convert_constraint_spec(spec: ConstraintSpecConfig) -> Result<ConstraintConfig, SpecError> {
+    match spec {
+        ConstraintSpecConfig::Threshold(tc) => Ok(ConstraintConfig::Threshold(tc)),
+        ConstraintSpecConfig::Setpoint(sc) => {
+            let gains = convert_gains_spec(sc.gains)?;
+            Ok(ConstraintConfig::Setpoint(SetpointConstraintConfig {
+                id: sc.id,
+                metric: sc.metric,
+                smoother: sc.smoother,
+                target: sc.target,
+                gains,
+                tracking_gain: sc.tracking_gain,
+            }))
+        }
+    }
+}
+
+/// Convert a `GainsSpecConfig` to a `GainsConfig`, parsing autotune_duration.
+fn convert_gains_spec(spec: GainsSpecConfig) -> Result<GainsConfig, SpecError> {
+    match spec {
+        GainsSpecConfig::Auto {
+            autotune_duration,
+            smoothing,
+        } => {
+            let d = parse_duration(&autotune_duration).map_err(|e| {
+                SpecError(format!(
+                    "invalid autotune_duration '{autotune_duration}': {e}"
+                ))
+            })?;
+            Ok(GainsConfig::Auto {
+                autotune_duration: d,
+                smoothing,
+            })
+        }
+        GainsSpecConfig::Manual { kp, ki, kd } => Ok(GainsConfig::Manual { kp, ki, kd }),
     }
 }
 
@@ -499,14 +563,17 @@ mod tests {
             targets: vec!["http://localhost".into()],
             method: "GET".into(),
             duration: "60s".into(),
-            rate: RateSpecConfig::Ramp {
-                warmup_rps: 10.0,
-                warmup_duration: "10s".into(),
-                latency_multiplier: 3.0,
-                max_error_rate: 5.0,
-                min_rps: 10.0,
-                max_rps: 50000.0,
-                external_constraints: vec![],
+            rate: RateSpecConfig::Adaptive {
+                bounds: BoundsConfig {
+                    min_rps: 10.0,
+                    max_rps: 50000.0,
+                },
+                warmup: Some(WarmupSpecConfig {
+                    rps: 10.0,
+                    duration: "10s".into(),
+                }),
+                initial_rps: None,
+                constraints: vec![],
             },
             headers: vec![],
             num_cores: 0,
@@ -524,7 +591,7 @@ mod tests {
             health_sample_rate: 0.0,
         };
         let summary = spec.summary();
-        assert!(summary.contains("Ramp"), "got: {summary}");
+        assert!(summary.contains("Adaptive"), "got: {summary}");
         assert!(summary.contains("50000"), "got: {summary}");
     }
 

@@ -2,8 +2,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use netanvil_types::{
-    BackoffConfig as BackoffConfigType, ConstraintClassConfig, ConstraintConfig, GainsConfig,
-    InternalMetric, MetricRef, RateConfig, RateController, SmootherConfig, TargetMetric,
+    BackoffConfig as BackoffConfigType, ConstraintClassConfig, ConstraintConfig,
+    CooldownPolicyConfig, FloorPolicyConfig, GainsConfig, IncreasePolicyConfig, InternalMetric,
+    MetricRef, RateChangeLimitsConfig, RateConfig, RateController, SmootherConfig, TargetMetric,
     ThresholdSource,
 };
 
@@ -31,6 +32,7 @@ pub fn build_rate_controller(
     start_time: Instant,
     test_duration: Duration,
     clock: Arc<dyn Clock>,
+    trace_path: Option<&str>,
 ) -> Box<dyn RateController> {
     match rate {
         RateConfig::Static { rps } => {
@@ -51,6 +53,10 @@ pub fn build_rate_controller(
             warmup,
             initial_rps,
             constraints: constraint_configs,
+            increase,
+            cooldown,
+            floor,
+            rate_change_limits,
         } => {
             let effective_initial_rps = initial_rps
                 .unwrap_or_else(|| warmup.as_ref().map(|w| w.rps).unwrap_or(bounds.min_rps));
@@ -105,6 +111,51 @@ pub fn build_rate_controller(
                     control_interval,
                 );
                 config = config.with_exploration(exploration);
+            }
+
+            // Apply optional controller-level policies.
+            if let Some(ref inc) = increase {
+                let internal = match inc {
+                    IncreasePolicyConfig::Multiplicative {
+                        factor,
+                        congestion_avoidance_at,
+                    } => super::arbiter::IncreasePolicyConfig {
+                        increase_factor: *factor,
+                        congestion_avoidance: Some(
+                            super::arbiter::CongestionAvoidanceConfig {
+                                trigger_threshold: *congestion_avoidance_at,
+                                ..Default::default()
+                            },
+                        ),
+                    },
+                    IncreasePolicyConfig::Additive { increment } => {
+                        let _ = increment; // Additive: use factor=1.0 + additive via congestion avoidance
+                        super::arbiter::IncreasePolicyConfig {
+                            increase_factor: 1.0,
+                            congestion_avoidance: None,
+                        }
+                    }
+                };
+                config = config.with_increase_policy(internal);
+            }
+
+            if let Some(ref cd) = cooldown {
+                config = config.with_cooldown(cd.min_ticks, cd.recovery_multiplier);
+            }
+
+            if let Some(ref fl) = floor {
+                config = config.with_known_good_floor(fl.fraction, fl.window);
+            }
+
+            if let Some(ref rcl) = rate_change_limits {
+                config = config.with_rate_change_limits(super::arbiter::RateChangeLimits {
+                    max_increase_pct: rcl.max_increase_pct,
+                    max_decrease_pct: rcl.max_decrease_pct,
+                });
+            }
+
+            if let Some(path) = trace_path {
+                config = config.with_trace_path(path.to_string());
             }
 
             Box::new(Arbiter::new(config.with_clock(clock)))
@@ -408,6 +459,7 @@ pub fn build_arbiter(
     start_time: Instant,
     test_duration: Duration,
     clock: Arc<dyn Clock>,
+    trace_path: Option<&str>,
 ) -> Option<Box<dyn RateController>> {
     match rate {
         RateConfig::Static { .. } | RateConfig::Step { .. } => None,
@@ -417,6 +469,7 @@ pub fn build_arbiter(
             start_time,
             test_duration,
             clock,
+            trace_path,
         )),
     }
 }

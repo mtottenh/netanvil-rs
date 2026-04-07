@@ -735,6 +735,7 @@ where
             start_time,
             config.duration,
             crate::clock::system_clock(),
+            config.control_trace.as_deref(),
         );
 
     let mut coordinator = Coordinator::new(

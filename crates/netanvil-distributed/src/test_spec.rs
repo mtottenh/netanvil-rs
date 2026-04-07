@@ -171,6 +171,10 @@ pub struct TestSpec {
     /// Fraction of TCP reads to sample for health observation (0.0–1.0).
     #[serde(default)]
     pub health_sample_rate: f64,
+
+    /// Path for control-plane trace recording (JSONL).
+    #[serde(default)]
+    pub control_trace: Option<String>,
 }
 
 fn default_method() -> String {
@@ -338,6 +342,7 @@ impl TestSpec {
             response_signal_headers: Vec::new(),
             event_log: None,
             health_sample_rate: self.health_sample_rate,
+            control_trace: self.control_trace,
         })
     }
 

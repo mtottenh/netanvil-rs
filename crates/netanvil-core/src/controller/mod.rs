@@ -12,6 +12,7 @@ pub mod smoothing;
 mod static_rate;
 mod step_rate;
 pub mod threshold;
+pub mod trace;
 
 pub use arbiter::{
     Arbiter, ArbiterConfig, CongestionAvoidanceConfig, IncreasePolicyConfig, RateChangeLimits,

@@ -15,8 +15,11 @@ use super::autotune::ExplorationManager;
 use super::ceiling::ProgressiveCeiling;
 use super::clock::{Clock, SystemClock};
 use super::composition::{CompositionStrategy, ConstraintEval, MinSelector};
-use super::constraint::{Constraint, ConstraintIntent, EvalContext, WarmupBaseline};
+use super::constraint::{Constraint, ConstraintIntent, ConstraintOutput, EvalContext, WarmupBaseline};
 use super::constraints::ConstraintClass;
+use super::trace::{
+    ArbiterRecord, EvaluationRecord, Participation, TickRecord, TraceRecorder,
+};
 
 // ---------------------------------------------------------------------------
 // Sub-components
@@ -292,6 +295,7 @@ pub struct ArbiterConfig {
     warmup: Option<(f64, Duration)>,
     clock: Option<Arc<dyn Clock>>,
     exploration_manager: Option<ExplorationManager>,
+    trace_path: Option<String>,
 }
 
 impl ArbiterConfig {
@@ -321,6 +325,7 @@ impl ArbiterConfig {
             warmup: None,
             clock: None,
             exploration_manager: None,
+            trace_path: None,
         }
     }
 
@@ -375,6 +380,15 @@ impl ArbiterConfig {
         self.exploration_manager = Some(manager);
         self
     }
+
+    /// Enable per-tick control-plane trace recording. The recorder captures
+    /// the full decision context at each tick (input metrics, per-constraint
+    /// evaluations, arbiter policies, output rate) for post-test analysis
+    /// and replay. Default: no recording (zero overhead).
+    pub fn with_trace_path(mut self, path: String) -> Self {
+        self.trace_path = Some(path);
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -418,6 +432,9 @@ pub struct Arbiter {
 
     // Initial RPS from config, needed for post-exploration phase setup.
     initial_rps: f64,
+
+    // Per-tick control-plane trace recorder (Noop when disabled).
+    trace_recorder: TraceRecorder,
 }
 
 impl Arbiter {
@@ -493,6 +510,16 @@ impl Arbiter {
             clock,
             warmup_config,
             initial_rps: config.initial_rps,
+            trace_recorder: match config.trace_path {
+                Some(ref path) => match TraceRecorder::from_path(path) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(path, "failed to create control trace recorder: {e}");
+                        TraceRecorder::Noop
+                    }
+                },
+                None => TraceRecorder::Noop,
+            },
         }
     }
 
@@ -708,9 +735,16 @@ impl Arbiter {
         // 3. Evaluate all constraints.
         let mut evals = Vec::new();
         let mut abstainers = 0usize;
+        let trace_enabled = self.trace_recorder.is_enabled();
+        let mut eval_outputs: Vec<Option<ConstraintOutput>> = if trace_enabled {
+            Vec::with_capacity(self.constraints.len())
+        } else {
+            Vec::new()
+        };
         for (i, constraint) in self.constraints.iter_mut().enumerate() {
-            if let Some(output) = constraint.evaluate(&ctx) {
-                match output.intent {
+            let output = constraint.evaluate(&ctx);
+            if let Some(ref o) = output {
+                match o.intent {
                     ConstraintIntent::NoObjection => {
                         abstainers += 1;
                     }
@@ -718,11 +752,14 @@ impl Arbiter {
                         evals.push(ConstraintEval {
                             constraint_index: i,
                             desired_rate: rate,
-                            severity: output.severity,
+                            severity: o.severity,
                             class: constraint.class(),
                         });
                     }
                 }
+            }
+            if trace_enabled {
+                eval_outputs.push(output);
             }
         }
 
@@ -829,6 +866,61 @@ impl Arbiter {
                 in_cooldown = self.cooldown.is_active(),
                 "arbiter tick"
             );
+        }
+
+        // 9. Record control trace (skipped entirely when recorder is Noop).
+        if trace_enabled {
+            let evaluations: Vec<EvaluationRecord> = self
+                .constraints
+                .iter()
+                .enumerate()
+                .map(|(i, constraint)| {
+                    let participation = match &eval_outputs[i] {
+                        None => Participation::Inactive,
+                        Some(output) => match output.intent {
+                            ConstraintIntent::NoObjection => Participation::Abstained {
+                                severity: output.severity,
+                            },
+                            ConstraintIntent::Hold(r) | ConstraintIntent::DesireRate(r) => {
+                                Participation::Active {
+                                    severity: output.severity,
+                                    desired_rate: r,
+                                    is_binding: result.binding == Some(i),
+                                }
+                            }
+                        },
+                    };
+                    EvaluationRecord {
+                        id: constraint.id().to_string(),
+                        class: constraint.class().into(),
+                        participation,
+                        state: constraint.constraint_state(),
+                    }
+                })
+                .collect();
+
+            let metrics = serde_json::to_value(summary).unwrap_or_default();
+
+            self.trace_recorder.record(&TickRecord {
+                tick: self.ramping_ticks,
+                metrics,
+                evaluations,
+                abstainer_count: abstainers as u32,
+                arbiter: ArbiterRecord {
+                    composition_rate: result.rate,
+                    binding: self.last_binding.clone(),
+                    ceiling,
+                    floor,
+                    cooldown_active: self.cooldown.is_active(),
+                    cooldown_remaining: self.cooldown.remaining,
+                    backoff_engaged: constraint_driven_backoff,
+                    ticks_since_increase: self.ticks_since_increase,
+                    failure_rate_ema: self.increase.failure_rate_ema,
+                    backoff_count: self.increase.backoff_count,
+                },
+                previous_rps: self.current_rps,
+                target_rps: rate,
+            });
         }
 
         self.current_rps = rate;

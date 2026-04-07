@@ -114,6 +114,11 @@ pub struct TestConfig {
     /// Default: 0.0 (disabled).
     #[serde(default)]
     pub health_sample_rate: f64,
+    /// Path for control-plane trace recording. When set, records per-tick
+    /// controller decisions to a structured file for post-test analysis.
+    /// Extension determines format: `.jsonl` (default), `.arrow` (future).
+    #[serde(default)]
+    pub control_trace: Option<String>,
 }
 
 /// Per-request event log output configuration.
@@ -271,6 +276,7 @@ impl Default for TestConfig {
             response_signal_headers: Vec::new(),
             event_log: None,
             health_sample_rate: 0.0,
+            control_trace: None,
         }
     }
 }

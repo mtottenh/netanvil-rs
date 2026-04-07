@@ -231,7 +231,7 @@ pub struct HealthCounters {
 /// This type lives in netanvil-types so RateController doesn't depend on
 /// hdrhistogram. The coordinator computes this from AggregateMetrics
 /// (which lives in netanvil-metrics).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct MetricsSummary {
     pub total_requests: u64,
     pub total_errors: u64,
@@ -240,6 +240,8 @@ pub struct MetricsSummary {
     pub latency_p50_ns: u64,
     pub latency_p90_ns: u64,
     pub latency_p99_ns: u64,
+    /// Window duration in milliseconds (serialized from `Duration`).
+    #[serde(serialize_with = "serialize_duration_ms")]
     pub window_duration: Duration,
     /// Total bytes sent during this window.
     pub bytes_sent: u64,
@@ -258,6 +260,10 @@ pub struct MetricsSummary {
     pub timeout_count: u64,
     /// Requests declined by the per-core in-flight limit this window.
     pub in_flight_drops: u64,
+}
+
+fn serialize_duration_ms<S: serde::Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_f64(d.as_secs_f64() * 1000.0)
 }
 
 /// Output of a RateController: new target rate.

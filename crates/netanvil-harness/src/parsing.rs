@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use netanvil_core::{GeneratorFactory, GenericGeneratorFactory};
 use netanvil_types::{
     BaselineMultiplier, BoundsConfig, ConnectionPolicy, ConstraintClassConfig, ConstraintConfig,
-    CountDistribution, HttpVersion, InternalMetric, MetricRef, PluginType, RateConfig,
-    ResponseSignalConfig, SchedulerConfig, SignalAggregation,
+    CountDistribution, GainsConfig, HttpVersion, InternalMetric, MetricRef, PluginType, RateConfig,
+    ResponseSignalConfig, SchedulerConfig, SetpointConstraintConfig, SignalAggregation,
     TargetMetric, ThresholdConstraintConfig, ThresholdSource, ValueDistribution, WarmupConfig,
     WeightedValue,
 };
@@ -897,12 +897,28 @@ pub struct RampArgs {
     pub max_error_rate: f64,
 }
 
+/// Adaptive-mode shortcut arguments for common use cases.
+#[derive(Default)]
+pub struct AdaptiveShortcutArgs {
+    /// --latency-limit: Threshold constraint on p99 latency (milliseconds).
+    /// Creates a Threshold constraint that backs off when latency exceeds this value.
+    pub latency_limit_ms: Option<f64>,
+    /// --error-rate-limit: Threshold constraint on error rate (percentage).
+    pub error_rate_limit_pct: Option<f64>,
+    /// --latency-setpoint: PID setpoint tracking for p99 latency (milliseconds).
+    /// Adjusts rate to maintain latency at this target.
+    pub latency_setpoint_ms: Option<f64>,
+    /// --rate-config: Load full Adaptive config from a JSON/TOML file.
+    pub config_file: Option<String>,
+}
+
 pub fn build_rate_config(
     rate_mode: &str,
     rps: f64,
     steps: Option<&str>,
     pid: &PidArgs<'_>,
     ramp: &RampArgs,
+    adaptive: &AdaptiveShortcutArgs,
 ) -> Result<RateConfig> {
     match rate_mode.to_lowercase().as_str() {
         "static" | "const" => Ok(RateConfig::Static { rps }),
@@ -924,9 +940,101 @@ pub fn build_rate_config(
             )
         }
         "adaptive" => {
-            // Direct Adaptive mode: same as ramp for now but users can
-            // further customize via config files in the future.
+            // If --rate-config is specified, load the full Adaptive config from file.
+            if let Some(ref path) = adaptive.config_file {
+                let contents = std::fs::read_to_string(path)
+                    .with_context(|| format!("failed to read rate config file '{path}'"))?;
+                let config: RateConfig = serde_json::from_str(&contents)
+                    .with_context(|| format!("failed to parse JSON rate config from '{path}'"))?;
+                return Ok(config);
+            }
+
+            // Build from shortcut flags + defaults.
             let warmup_rps = rps.clamp(1.0, 100.0);
+            let mut constraints: Vec<ConstraintConfig> = Vec::new();
+
+            // Safety constraints (always present).
+            constraints.push(ConstraintConfig::Threshold(ThresholdConstraintConfig {
+                id: "timeout".into(),
+                metric: MetricRef::Internal(InternalMetric::TimeoutFraction),
+                smoother: None,
+                class_override: Some(ConstraintClassConfig::Catastrophic),
+                threshold_source: ThresholdSource::Absolute { threshold: 0.01 },
+                persistence: 1,
+                self_caused_cap: None,
+                backoff: None,
+            }));
+            constraints.push(ConstraintConfig::Threshold(ThresholdConstraintConfig {
+                id: "inflight".into(),
+                metric: MetricRef::Internal(InternalMetric::InFlightDropFraction),
+                smoother: None,
+                class_override: Some(ConstraintClassConfig::Catastrophic),
+                threshold_source: ThresholdSource::Absolute { threshold: 0.01 },
+                persistence: 1,
+                self_caused_cap: None,
+                backoff: None,
+            }));
+
+            // --latency-limit: absolute p99 threshold (don't exceed this).
+            if let Some(limit_ms) = adaptive.latency_limit_ms {
+                constraints.push(ConstraintConfig::Threshold(ThresholdConstraintConfig {
+                    id: "latency".into(),
+                    metric: MetricRef::Internal(InternalMetric::LatencyP99),
+                    smoother: None,
+                    class_override: None,
+                    threshold_source: ThresholdSource::Absolute { threshold: limit_ms },
+                    persistence: 2,
+                    self_caused_cap: Some(1.5),
+                    backoff: None,
+                }));
+            } else if adaptive.latency_setpoint_ms.is_none() {
+                // Default: latency from baseline (like old ramp mode).
+                constraints.push(ConstraintConfig::Threshold(ThresholdConstraintConfig {
+                    id: "latency".into(),
+                    metric: MetricRef::Internal(InternalMetric::LatencyP99),
+                    smoother: None,
+                    class_override: None,
+                    threshold_source: ThresholdSource::FromBaseline {
+                        threshold_from_baseline: BaselineMultiplier {
+                            multiplier: ramp.latency_multiplier,
+                        },
+                    },
+                    persistence: 2,
+                    self_caused_cap: Some(1.5),
+                    backoff: None,
+                }));
+            }
+
+            // --latency-setpoint: PID tracking (maintain this latency precisely).
+            if let Some(setpoint_ms) = adaptive.latency_setpoint_ms {
+                constraints.push(ConstraintConfig::Setpoint(SetpointConstraintConfig {
+                    id: "latency_setpoint".into(),
+                    metric: MetricRef::Internal(InternalMetric::LatencyP99),
+                    smoother: None,
+                    target: setpoint_ms,
+                    gains: GainsConfig::Auto {
+                        autotune_duration: pid.autotune_duration,
+                        smoothing: 0.3,
+                    },
+                    tracking_gain: 0.5,
+                }));
+            }
+
+            // --error-rate-limit: error rate threshold (percentage).
+            let error_threshold = adaptive.error_rate_limit_pct.unwrap_or(ramp.max_error_rate);
+            constraints.push(ConstraintConfig::Threshold(ThresholdConstraintConfig {
+                id: "error_rate".into(),
+                metric: MetricRef::Internal(InternalMetric::ErrorRate),
+                smoother: None,
+                class_override: None,
+                threshold_source: ThresholdSource::Absolute {
+                    threshold: error_threshold,
+                },
+                persistence: 1,
+                self_caused_cap: None,
+                backoff: None,
+            }));
+
             Ok(RateConfig::Adaptive {
                 bounds: BoundsConfig {
                     min_rps: pid.min_rps,
@@ -937,54 +1045,11 @@ pub fn build_rate_config(
                     duration: ramp.warmup_duration,
                 }),
                 initial_rps: None,
-                constraints: vec![
-                    ConstraintConfig::Threshold(ThresholdConstraintConfig {
-                        id: "timeout".into(),
-                        metric: MetricRef::Internal(InternalMetric::TimeoutFraction),
-                        smoother: None,
-                        class_override: Some(ConstraintClassConfig::Catastrophic),
-                        threshold_source: ThresholdSource::Absolute { threshold: 0.01 },
-                        persistence: 1,
-                        self_caused_cap: None,
-                        backoff: None,
-                    }),
-                    ConstraintConfig::Threshold(ThresholdConstraintConfig {
-                        id: "inflight".into(),
-                        metric: MetricRef::Internal(InternalMetric::InFlightDropFraction),
-                        smoother: None,
-                        class_override: Some(ConstraintClassConfig::Catastrophic),
-                        threshold_source: ThresholdSource::Absolute { threshold: 0.01 },
-                        persistence: 1,
-                        self_caused_cap: None,
-                        backoff: None,
-                    }),
-                    ConstraintConfig::Threshold(ThresholdConstraintConfig {
-                        id: "latency".into(),
-                        metric: MetricRef::Internal(InternalMetric::LatencyP99),
-                        smoother: None,
-                        class_override: None,
-                        threshold_source: ThresholdSource::FromBaseline {
-                            threshold_from_baseline: BaselineMultiplier {
-                                multiplier: ramp.latency_multiplier,
-                            },
-                        },
-                        persistence: 3,
-                        self_caused_cap: None,
-                        backoff: None,
-                    }),
-                    ConstraintConfig::Threshold(ThresholdConstraintConfig {
-                        id: "error_rate".into(),
-                        metric: MetricRef::Internal(InternalMetric::ErrorRate),
-                        smoother: None,
-                        class_override: None,
-                        threshold_source: ThresholdSource::Absolute {
-                            threshold: ramp.max_error_rate,
-                        },
-                        persistence: 1,
-                        self_caused_cap: None,
-                        backoff: None,
-                    }),
-                ],
+                constraints,
+                increase: None,
+                cooldown: None,
+                floor: None,
+                rate_change_limits: None,
             })
         }
         other => {
@@ -1271,6 +1336,7 @@ mod tests {
                 latency_multiplier: 3.0,
                 max_error_rate: 5.0,
             },
+            &AdaptiveShortcutArgs::default(),
         )
         .unwrap();
         assert!(matches!(rate, RateConfig::Static { rps } if rps == 500.0));
@@ -1298,6 +1364,7 @@ mod tests {
                 latency_multiplier: 3.0,
                 max_error_rate: 5.0,
             },
+            &AdaptiveShortcutArgs::default(),
         )
         .unwrap();
         assert!(matches!(rate, RateConfig::Step { steps } if steps.len() == 2));
@@ -1325,6 +1392,7 @@ mod tests {
                 latency_multiplier: 3.0,
                 max_error_rate: 5.0,
             },
+            &AdaptiveShortcutArgs::default(),
         );
         assert!(result.is_err());
     }
@@ -1351,6 +1419,7 @@ mod tests {
                 latency_multiplier: 3.0,
                 max_error_rate: 5.0,
             },
+            &AdaptiveShortcutArgs::default(),
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1382,6 +1451,7 @@ mod tests {
                 latency_multiplier: 3.0,
                 max_error_rate: 5.0,
             },
+            &AdaptiveShortcutArgs::default(),
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1413,6 +1483,7 @@ mod tests {
                 latency_multiplier: 3.0,
                 max_error_rate: 5.0,
             },
+            &AdaptiveShortcutArgs::default(),
         )
         .unwrap();
         match rate {

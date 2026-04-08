@@ -53,9 +53,14 @@ pub fn run(
     ramp_warmup: String,
     ramp_multiplier: f64,
     ramp_max_errors: f64,
+    latency_limit: Option<f64>,
+    error_rate_limit: Option<f64>,
+    latency_setpoint: Option<f64>,
+    rate_config: Option<String>,
     metrics_port: Option<u16>,
     output: String,
     health_sample_rate: f64,
+    control_trace: Option<String>,
 ) -> Result<()> {
     let output_format =
         crate::output::OutputFormat::parse(&output).map_err(|e| anyhow::anyhow!(e))?;
@@ -88,6 +93,12 @@ pub fn run(
             warmup_duration: ramp_warmup_dur,
             latency_multiplier: ramp_multiplier,
             max_error_rate: ramp_max_errors,
+        },
+        &AdaptiveShortcutArgs {
+            latency_limit_ms: latency_limit,
+            error_rate_limit_pct: error_rate_limit,
+            latency_setpoint_ms: latency_setpoint,
+            config_file: rate_config.clone(),
         },
     )?;
 
@@ -131,6 +142,7 @@ pub fn run(
         plugin: plugin_config,
         response_signal_headers: parse_response_signals(&response_signals)?,
         health_sample_rate,
+        control_trace,
         ..Default::default()
     };
 

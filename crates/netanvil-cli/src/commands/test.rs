@@ -56,9 +56,14 @@ pub fn run(
     ramp_warmup: String,
     ramp_multiplier: f64,
     ramp_max_errors: f64,
+    latency_limit: Option<f64>,
+    error_rate_limit: Option<f64>,
+    latency_setpoint: Option<f64>,
+    rate_config: Option<String>,
     event_log_dir: Option<String>,
     event_sample_rate: f64,
     health_sample_rate: f64,
+    control_trace: Option<String>,
 ) -> Result<()> {
     let duration = parse_duration(&duration).context("invalid --duration")?;
     let timeout = parse_duration(&timeout).context("invalid --timeout")?;
@@ -95,6 +100,12 @@ pub fn run(
             warmup_duration: ramp_warmup_dur,
             latency_multiplier: ramp_multiplier,
             max_error_rate: ramp_max_errors,
+        },
+        &AdaptiveShortcutArgs {
+            latency_limit_ms: latency_limit,
+            error_rate_limit_pct: error_rate_limit,
+            latency_setpoint_ms: latency_setpoint,
+            config_file: rate_config.clone(),
         },
     )?;
 
@@ -133,6 +144,7 @@ pub fn run(
             constraints,
             warmup,
             initial_rps,
+            ..
         } => {
             if let Some(w) = warmup {
                 format!(
@@ -188,6 +200,11 @@ pub fn run(
         } else {
             None
         };
+
+    if let Some(ref path) = control_trace {
+        eprintln!("  control trace: {path}");
+    }
+    config.control_trace = control_trace;
 
     let protocol = detect_protocol(&config.targets);
 

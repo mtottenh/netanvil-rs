@@ -236,6 +236,27 @@ enum Commands {
         #[arg(long, default_value = "5.0")]
         ramp_max_errors: f64,
 
+        // ── Adaptive mode shortcut flags ──
+        /// Latency limit: back off when p99 exceeds this value (ms).
+        /// Creates a Threshold constraint. Use with --rate-mode adaptive.
+        #[arg(long)]
+        latency_limit: Option<f64>,
+
+        /// Error rate limit: back off when error rate exceeds this (%).
+        /// Overrides --ramp-max-errors for adaptive mode.
+        #[arg(long)]
+        error_rate_limit: Option<f64>,
+
+        /// Latency setpoint: PID tracks this p99 value (ms).
+        /// Creates a Setpoint constraint with auto-tuned gains.
+        #[arg(long)]
+        latency_setpoint: Option<f64>,
+
+        /// Load full rate config from a JSON file.
+        /// The file should contain a RateConfig::Adaptive JSON object.
+        #[arg(long)]
+        rate_config: Option<String>,
+
         // ── Event logging flags ──
         /// Directory for per-request Arrow IPC event logs. Each I/O worker core
         /// writes an events_core_N.arrow file for post-test statistical analysis.
@@ -253,6 +274,13 @@ enum Commands {
         /// Requires kernel >= 6.7. Default: 0.0 (disabled).
         #[arg(long, default_value = "0.0")]
         health_sample_rate: f64,
+
+        // ── Control trace flags ──
+        /// Record per-tick controller decisions to a structured JSONL file.
+        /// Enables post-test analysis and replay through alternate configs.
+        /// Only active with adaptive rate control.
+        #[arg(long)]
+        control_trace: Option<String>,
     },
 
     /// Run as a remotely controllable agent node
@@ -492,6 +520,23 @@ enum Commands {
         #[arg(long, default_value = "5.0")]
         ramp_max_errors: f64,
 
+        // ── Adaptive mode shortcut flags ──
+        /// Latency limit: back off when p99 exceeds this value (ms).
+        #[arg(long)]
+        latency_limit: Option<f64>,
+
+        /// Error rate limit: back off when error rate exceeds this (%).
+        #[arg(long)]
+        error_rate_limit: Option<f64>,
+
+        /// Latency setpoint: PID tracks this p99 value (ms).
+        #[arg(long)]
+        latency_setpoint: Option<f64>,
+
+        /// Load full rate config from a JSON file.
+        #[arg(long)]
+        rate_config: Option<String>,
+
         /// Port for the leader's Prometheus metrics endpoint.
         /// Exposes aggregated metrics at /metrics/prometheus for single-target scraping.
         #[arg(long)]
@@ -506,6 +551,10 @@ enum Commands {
         /// Requires kernel >= 6.7 on agents. Default: 0.0 (disabled).
         #[arg(long, default_value = "0.0")]
         health_sample_rate: f64,
+
+        /// Record per-tick controller decisions to a structured JSONL file.
+        #[arg(long)]
+        control_trace: Option<String>,
     },
 
     /// Run as a persistent leader daemon with HTTP API and test queue
@@ -621,9 +670,14 @@ fn main() -> Result<()> {
             ramp_warmup,
             ramp_multiplier,
             ramp_max_errors,
+            latency_limit,
+            error_rate_limit,
+            latency_setpoint,
+            rate_config,
             event_log_dir,
             event_sample_rate,
             health_sample_rate,
+            control_trace,
         } => commands::test::run(
             url,
             plugin,
@@ -669,9 +723,14 @@ fn main() -> Result<()> {
             ramp_warmup,
             ramp_multiplier,
             ramp_max_errors,
+            latency_limit,
+            error_rate_limit,
+            latency_setpoint,
+            rate_config,
             event_log_dir,
             event_sample_rate,
             health_sample_rate,
+            control_trace,
         )?,
 
         Commands::Agent {
@@ -741,9 +800,14 @@ fn main() -> Result<()> {
             ramp_warmup,
             ramp_multiplier,
             ramp_max_errors,
+            latency_limit,
+            error_rate_limit,
+            latency_setpoint,
+            rate_config,
             metrics_port,
             output,
             health_sample_rate,
+            control_trace,
         } => commands::leader::run(
             workers,
             url,
@@ -787,9 +851,14 @@ fn main() -> Result<()> {
             ramp_warmup,
             ramp_multiplier,
             ramp_max_errors,
+            latency_limit,
+            error_rate_limit,
+            latency_setpoint,
+            rate_config,
             metrics_port,
             output,
             health_sample_rate,
+            control_trace,
         )?,
 
         Commands::LeaderServer {

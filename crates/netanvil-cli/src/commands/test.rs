@@ -56,6 +56,7 @@ pub fn run(
     ramp_warmup: String,
     ramp_multiplier: f64,
     ramp_max_errors: f64,
+    baseline_floor: f64,
     latency_limit: Option<f64>,
     error_rate_limit: Option<f64>,
     latency_setpoint: Option<f64>,
@@ -100,6 +101,7 @@ pub fn run(
             warmup_duration: ramp_warmup_dur,
             latency_multiplier: ramp_multiplier,
             max_error_rate: ramp_max_errors,
+            baseline_floor_ms: baseline_floor,
         },
         &AdaptiveShortcutArgs {
             latency_limit_ms: latency_limit,

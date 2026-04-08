@@ -236,6 +236,12 @@ enum Commands {
         #[arg(long, default_value = "5.0")]
         ramp_max_errors: f64,
 
+        /// Floor applied to warmup baseline before multiplying (ms).
+        /// Prevents sub-ms services from getting thresholds below the OS
+        /// jitter envelope (default 4ms suits 100Hz-tick kernels).
+        #[arg(long, default_value = "4.0")]
+        baseline_floor: f64,
+
         // ── Adaptive mode shortcut flags ──
         /// Latency limit: back off when p99 exceeds this value (ms).
         /// Creates a Threshold constraint. Use with --rate-mode adaptive.
@@ -520,6 +526,12 @@ enum Commands {
         #[arg(long, default_value = "5.0")]
         ramp_max_errors: f64,
 
+        /// Floor applied to warmup baseline before multiplying (ms).
+        /// Prevents sub-ms services from getting thresholds below the OS
+        /// jitter envelope (default 4ms suits 100Hz-tick kernels).
+        #[arg(long, default_value = "4.0")]
+        baseline_floor: f64,
+
         // ── Adaptive mode shortcut flags ──
         /// Latency limit: back off when p99 exceeds this value (ms).
         #[arg(long)]
@@ -670,6 +682,7 @@ fn main() -> Result<()> {
             ramp_warmup,
             ramp_multiplier,
             ramp_max_errors,
+            baseline_floor,
             latency_limit,
             error_rate_limit,
             latency_setpoint,
@@ -723,6 +736,7 @@ fn main() -> Result<()> {
             ramp_warmup,
             ramp_multiplier,
             ramp_max_errors,
+            baseline_floor,
             latency_limit,
             error_rate_limit,
             latency_setpoint,
@@ -800,6 +814,7 @@ fn main() -> Result<()> {
             ramp_warmup,
             ramp_multiplier,
             ramp_max_errors,
+            baseline_floor,
             latency_limit,
             error_rate_limit,
             latency_setpoint,
@@ -851,6 +866,7 @@ fn main() -> Result<()> {
             ramp_warmup,
             ramp_multiplier,
             ramp_max_errors,
+            baseline_floor,
             latency_limit,
             error_rate_limit,
             latency_setpoint,

@@ -188,6 +188,10 @@ pub struct ThresholdConfig {
     /// If set, derive threshold from warmup baseline: `baseline × multiplier`.
     /// Used by latency constraints with `ThresholdSource::FromBaseline`.
     pub baseline_multiplier: Option<f64>,
+    /// Floor applied to the observed baseline before multiplying. Prevents
+    /// sub-millisecond baselines from producing thresholds tighter than the
+    /// OS jitter envelope (default: 4.0ms for 100Hz tick kernels).
+    pub baseline_floor_ms: Option<f64>,
 }
 
 impl ThresholdConfig {
@@ -208,6 +212,7 @@ impl ThresholdConfig {
             self_caused_cap: None,
             direction: SignalDirection::HigherIsWorse,
             baseline_multiplier: None,
+            baseline_floor_ms: None,
         }
     }
 
@@ -227,6 +232,7 @@ impl ThresholdConfig {
             self_caused_cap: None,
             direction: SignalDirection::HigherIsWorse,
             baseline_multiplier: None,
+            baseline_floor_ms: None,
         }
     }
 
@@ -247,6 +253,7 @@ impl ThresholdConfig {
             self_caused_cap: Some(1.5),
             direction: SignalDirection::HigherIsWorse,
             baseline_multiplier: None,
+            baseline_floor_ms: None,
         }
     }
 
@@ -266,6 +273,7 @@ impl ThresholdConfig {
             self_caused_cap: None,
             direction: SignalDirection::HigherIsWorse,
             baseline_multiplier: None,
+            baseline_floor_ms: None,
         }
     }
 
@@ -292,6 +300,7 @@ impl ThresholdConfig {
             self_caused_cap: None,
             direction,
             baseline_multiplier: None,
+            baseline_floor_ms: None,
         }
     }
 }
@@ -329,8 +338,9 @@ pub struct ThresholdConstraint {
     last_smoothed_value: f64,
 
     // Baseline-derived threshold: if set, on_warmup_complete sets
-    // threshold = baseline × multiplier.
+    // threshold = max(baseline, floor) × multiplier.
     baseline_multiplier: Option<f64>,
+    baseline_floor_ms: Option<f64>,
 }
 
 impl ThresholdConstraint {
@@ -356,6 +366,7 @@ impl ThresholdConstraint {
             last_severity: 0.0,
             last_smoothed_value: 0.0,
             baseline_multiplier: config.baseline_multiplier,
+            baseline_floor_ms: config.baseline_floor_ms,
         }
     }
 
@@ -640,15 +651,34 @@ impl Constraint for ThresholdConstraint {
             );
             return;
         }
-        let target = baseline.baseline_p99_ms * multiplier;
+
+        // Apply the baseline floor: use max(observed, floor) so that
+        // sub-millisecond services get a threshold above the OS jitter envelope.
+        let floor = self.baseline_floor_ms.unwrap_or(0.0);
+        let effective_baseline = baseline.baseline_p99_ms.max(floor);
+        let target = effective_baseline * multiplier;
+
+        if effective_baseline > baseline.baseline_p99_ms {
+            tracing::info!(
+                constraint = %self.id,
+                observed_baseline_ms = format!("{:.2}", baseline.baseline_p99_ms),
+                floor_ms = format!("{:.2}", floor),
+                effective_baseline_ms = format!("{:.2}", effective_baseline),
+                multiplier,
+                target_ms = format!("{:.2}", target),
+                "baseline floored (observed < floor) — threshold set from floor"
+            );
+        } else {
+            tracing::info!(
+                constraint = %self.id,
+                baseline_p99_ms = format!("{:.2}", baseline.baseline_p99_ms),
+                multiplier,
+                target_ms = format!("{:.2}", target),
+                "threshold set from warmup baseline"
+            );
+        }
+
         self.set_threshold(target);
-        tracing::info!(
-            constraint = %self.id,
-            baseline_p99_ms = format!("{:.2}", baseline.baseline_p99_ms),
-            multiplier,
-            target_ms = format!("{:.2}", target),
-            "threshold set from warmup baseline"
-        );
     }
 }
 

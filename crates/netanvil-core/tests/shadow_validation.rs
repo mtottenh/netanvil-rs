@@ -374,6 +374,7 @@ fn run_shadow(
         start_time,
         test_duration,
         clock_dyn.clone(),
+        None,
     );
     let mut new = build_arbiter(
         rate_config,
@@ -381,6 +382,7 @@ fn run_shadow(
         start_time,
         test_duration,
         clock_dyn,
+        None,
     )
     .expect("config should produce an arbiter");
 
@@ -491,7 +493,7 @@ fn ramp_shadow_config(warmup_ticks: usize, control_interval: Duration) -> RateCo
                 smoother: None,
                 class_override: None,
                 threshold_source: ThresholdSource::FromBaseline {
-                    threshold_from_baseline: BaselineMultiplier { multiplier: 3.0 },
+                    threshold_from_baseline: BaselineMultiplier { multiplier: 3.0, baseline_floor_ms: 0.0 },
                 },
                 persistence: 3,
                 self_caused_cap: None,
@@ -508,6 +510,10 @@ fn ramp_shadow_config(warmup_ticks: usize, control_interval: Duration) -> RateCo
                 backoff: None,
             }),
         ],
+        increase: None,
+        cooldown: None,
+        floor: None,
+        rate_change_limits: None,
     }
 }
 
@@ -537,6 +543,10 @@ fn pid_shadow_config(target_p99_ms: f64) -> RateConfig {
             },
             tracking_gain: 0.5,
         })],
+        increase: None,
+        cooldown: None,
+        floor: None,
+        rate_change_limits: None,
     }
 }
 
@@ -574,6 +584,10 @@ fn composite_pid_shadow_config() -> RateConfig {
                 tracking_gain: 0.5,
             }),
         ],
+        increase: None,
+        cooldown: None,
+        floor: None,
+        rate_change_limits: None,
     }
 }
 
@@ -1173,6 +1187,10 @@ fn pid_auto_shadow_config(target_p99_ms: f64) -> RateConfig {
             },
             tracking_gain: 0.5,
         })],
+        increase: None,
+        cooldown: None,
+        floor: None,
+        rate_change_limits: None,
     }
 }
 

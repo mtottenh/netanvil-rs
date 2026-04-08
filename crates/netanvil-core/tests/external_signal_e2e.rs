@@ -126,6 +126,10 @@ fn pid_controller_adapts_rate_based_on_external_server_load() {
                 },
                 tracking_gain: 0.5,
             })],
+            increase: None,
+            cooldown: None,
+            floor: None,
+            rate_change_limits: None,
         },
         num_cores: 1,
         connections: ConnectionConfig {
@@ -194,6 +198,10 @@ fn pid_without_external_signal_generates_requests() {
                 },
                 tracking_gain: 0.5,
             })],
+            increase: None,
+            cooldown: None,
+            floor: None,
+            rate_change_limits: None,
         },
         num_cores: 1,
         connections: ConnectionConfig {

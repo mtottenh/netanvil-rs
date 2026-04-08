@@ -895,6 +895,10 @@ pub struct RampArgs {
     pub warmup_duration: Duration,
     pub latency_multiplier: f64,
     pub max_error_rate: f64,
+    /// Floor applied to the observed baseline before multiplying (milliseconds).
+    /// Prevents sub-millisecond services from getting thresholds tighter than
+    /// the OS jitter envelope. Default: 2.0ms.
+    pub baseline_floor_ms: f64,
 }
 
 /// Adaptive-mode shortcut arguments for common use cases.
@@ -997,6 +1001,7 @@ pub fn build_rate_config(
                     threshold_source: ThresholdSource::FromBaseline {
                         threshold_from_baseline: BaselineMultiplier {
                             multiplier: ramp.latency_multiplier,
+                            baseline_floor_ms: ramp.baseline_floor_ms,
                         },
                     },
                     persistence: 2,
@@ -1335,6 +1340,7 @@ mod tests {
                 warmup_duration: Duration::from_secs(10),
                 latency_multiplier: 3.0,
                 max_error_rate: 5.0,
+                baseline_floor_ms: 4.0,
             },
             &AdaptiveShortcutArgs::default(),
         )
@@ -1363,6 +1369,7 @@ mod tests {
                 warmup_duration: Duration::from_secs(10),
                 latency_multiplier: 3.0,
                 max_error_rate: 5.0,
+                baseline_floor_ms: 4.0,
             },
             &AdaptiveShortcutArgs::default(),
         )
@@ -1391,6 +1398,7 @@ mod tests {
                 warmup_duration: Duration::from_secs(10),
                 latency_multiplier: 3.0,
                 max_error_rate: 5.0,
+                baseline_floor_ms: 4.0,
             },
             &AdaptiveShortcutArgs::default(),
         );
@@ -1418,6 +1426,7 @@ mod tests {
                 warmup_duration: Duration::from_secs(10),
                 latency_multiplier: 3.0,
                 max_error_rate: 5.0,
+                baseline_floor_ms: 4.0,
             },
             &AdaptiveShortcutArgs::default(),
         );
@@ -1450,6 +1459,7 @@ mod tests {
                 warmup_duration: Duration::from_secs(10),
                 latency_multiplier: 3.0,
                 max_error_rate: 5.0,
+                baseline_floor_ms: 4.0,
             },
             &AdaptiveShortcutArgs::default(),
         );
@@ -1482,6 +1492,7 @@ mod tests {
                 warmup_duration: Duration::from_secs(10),
                 latency_multiplier: 3.0,
                 max_error_rate: 5.0,
+                baseline_floor_ms: 4.0,
             },
             &AdaptiveShortcutArgs::default(),
         )

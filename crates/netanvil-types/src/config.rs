@@ -664,9 +664,25 @@ pub enum ThresholdSource {
 }
 
 /// Multiplier applied to the warmup baseline to derive a threshold.
+///
+/// The effective baseline used is `max(observed_baseline, baseline_floor_ms)`,
+/// which prevents sub-millisecond services from getting thresholds too tight
+/// to absorb normal OS scheduling jitter (timer ticks, softirq deferral, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaselineMultiplier {
     pub multiplier: f64,
+    /// Floor applied to the observed baseline before multiplying.
+    /// Default: 4.0ms — on a 100Hz tick kernel the p99 jitter envelope
+    /// reaches 4-5ms due to ksoftirqd scheduling deferral (up to one
+    /// 10ms tick) and softirq budget exhaustion. A 4ms floor with a
+    /// typical 1.2x multiplier gives a 4.8ms threshold, just above the
+    /// observed jitter ceiling while still detecting genuine saturation.
+    #[serde(default = "default_baseline_floor_ms")]
+    pub baseline_floor_ms: f64,
+}
+
+fn default_baseline_floor_ms() -> f64 {
+    4.0
 }
 
 /// Configuration for a setpoint-tracking (PID) constraint.
@@ -764,18 +780,52 @@ pub enum ConstraintClassConfig {
 // Controller-level policy configs (optional fields on Adaptive)
 // ---------------------------------------------------------------------------
 
+/// Congestion avoidance settings for the increase policy.
+///
+/// Near the last known failure rate, the controller switches from
+/// multiplicative increase to additive increase (like TCP's congestion
+/// avoidance phase). These parameters control that transition.
+///
+/// Omit or set to `null` in JSON to disable congestion avoidance entirely
+/// (the controller will always use multiplicative increase).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CongestionAvoidanceConfig {
+    /// Switch from multiplicative to additive increase when `current_rate`
+    /// exceeds this fraction of the last failure rate. Default: 0.85.
+    #[serde(default = "default_ca_trigger_threshold")]
+    pub trigger_threshold: f64,
+    /// Additive increase = `failure_rate × this`. Default: 0.01.
+    #[serde(default = "default_ca_additive_fraction")]
+    pub additive_fraction: f64,
+    /// EMA smoothing on the failure-rate estimate. Default: 0.3.
+    #[serde(default = "default_ca_failure_rate_alpha")]
+    pub failure_rate_alpha: f64,
+}
+
+fn default_ca_trigger_threshold() -> f64 {
+    0.85
+}
+fn default_ca_additive_fraction() -> f64 {
+    0.01
+}
+fn default_ca_failure_rate_alpha() -> f64 {
+    0.3
+}
+
 /// How rate increases when no constraints object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum IncreasePolicyConfig {
     /// Rate grows by `factor` per clean tick (e.g., 1.10 = +10%/tick).
-    /// Near a known failure rate, switches to additive increase.
+    /// Optionally, near a known failure rate, switches to additive increase
+    /// when congestion avoidance is configured.
     Multiplicative {
         #[serde(default = "default_increase_factor")]
         factor: f64,
-        /// Switch to additive when current > failure_rate × this value.
-        #[serde(default = "default_congestion_avoidance_at")]
-        congestion_avoidance_at: f64,
+        /// Congestion avoidance settings. Omit or set to `null` to disable
+        /// (always use multiplicative increase).
+        #[serde(default)]
+        congestion_avoidance: Option<CongestionAvoidanceConfig>,
     },
     /// Fixed increment per clean tick.
     Additive { increment: f64 },
@@ -785,16 +835,13 @@ impl Default for IncreasePolicyConfig {
     fn default() -> Self {
         Self::Multiplicative {
             factor: default_increase_factor(),
-            congestion_avoidance_at: default_congestion_avoidance_at(),
+            congestion_avoidance: None,
         }
     }
 }
 
 fn default_increase_factor() -> f64 {
     1.10
-}
-fn default_congestion_avoidance_at() -> f64 {
-    0.85
 }
 
 /// Post-backoff increase suppression.

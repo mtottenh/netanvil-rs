@@ -119,6 +119,7 @@ impl KnownGoodTracker {
 /// Near the last known failure rate, the controller switches from
 /// multiplicative increase to additive increase (like TCP's congestion
 /// avoidance phase). These parameters control that transition.
+#[derive(Debug)]
 pub struct CongestionAvoidanceConfig {
     /// Switch from multiplicative to additive increase when `current_rate`
     /// exceeds this fraction of the last failure rate. Default: 0.85.
@@ -140,6 +141,7 @@ impl Default for CongestionAvoidanceConfig {
 }
 
 /// Configuration for the increase policy (how rate grows when no constraint objects).
+#[derive(Debug)]
 pub struct IncreasePolicyConfig {
     /// Multiplicative increase factor per clean tick. Default: 1.10 (10%/tick).
     pub increase_factor: f64,
@@ -152,7 +154,7 @@ impl Default for IncreasePolicyConfig {
     fn default() -> Self {
         Self {
             increase_factor: 1.10,
-            congestion_avoidance: Some(CongestionAvoidanceConfig::default()),
+            congestion_avoidance: None,
         }
     }
 }

@@ -118,15 +118,16 @@ pub fn build_rate_controller(
                 let internal = match inc {
                     IncreasePolicyConfig::Multiplicative {
                         factor,
-                        congestion_avoidance_at,
+                        congestion_avoidance,
                     } => super::arbiter::IncreasePolicyConfig {
                         increase_factor: *factor,
-                        congestion_avoidance: Some(
+                        congestion_avoidance: congestion_avoidance.as_ref().map(|ca| {
                             super::arbiter::CongestionAvoidanceConfig {
-                                trigger_threshold: *congestion_avoidance_at,
-                                ..Default::default()
-                            },
-                        ),
+                                trigger_threshold: ca.trigger_threshold,
+                                additive_fraction: ca.additive_fraction,
+                                failure_rate_alpha: ca.failure_rate_alpha,
+                            }
+                        }),
                     },
                     IncreasePolicyConfig::Additive { increment } => {
                         let _ = increment; // Additive: use factor=1.0 + additive via congestion avoidance
@@ -136,6 +137,10 @@ pub fn build_rate_controller(
                         }
                     }
                 };
+                tracing::info!(
+                    increase_policy = ?internal,
+                    "arbiter: final increase policy"
+                );
                 config = config.with_increase_policy(internal);
             }
 
@@ -183,8 +188,8 @@ fn build_adaptive_constraint(
             let direction = map_metric_direction(&tc.metric);
             let backoff = map_backoff_config(&tc.backoff);
 
-            let (threshold, baseline_multiplier) = match &tc.threshold_source {
-                ThresholdSource::Absolute { threshold } => (*threshold, None),
+            let (threshold, baseline_multiplier, baseline_floor_ms) = match &tc.threshold_source {
+                ThresholdSource::Absolute { threshold } => (*threshold, None, None),
                 ThresholdSource::FromBaseline {
                     threshold_from_baseline,
                 } => {
@@ -195,7 +200,7 @@ fn build_adaptive_constraint(
                             tc.id
                         );
                     }
-                    (0.0, Some(threshold_from_baseline.multiplier))
+                    (0.0, Some(threshold_from_baseline.multiplier), Some(threshold_from_baseline.baseline_floor_ms))
                 }
             };
 
@@ -215,6 +220,7 @@ fn build_adaptive_constraint(
                 self_caused_cap: tc.self_caused_cap,
                 direction,
                 baseline_multiplier,
+                baseline_floor_ms,
             }))
         }
         ConstraintConfig::Setpoint(sc) => {

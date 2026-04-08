@@ -45,7 +45,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.30"
+version = "0.1.35"
 edition = "2021"
 authors = ["NetAnvil-RS Contributors"]
 license = "MIT OR Apache-2.0"

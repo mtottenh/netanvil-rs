@@ -142,7 +142,7 @@ impl EventSchemaBuilder {
         self
     }
 
-    /// Include coordinated omission columns: intended_us, scheduling_delay_us.
+    /// Include coordinated omission columns: intended_us, timer_lag_us, channel_transit_us, dispatch_gap_us.
     pub fn with_coordinated_omission(mut self) -> Self {
         self.include_co = true;
         self
@@ -218,7 +218,9 @@ impl EventSchemaBuilder {
         // Coordinated omission
         if self.include_co {
             fields.push(Field::new("intended_us", DataType::UInt64, false));
-            fields.push(Field::new("scheduling_delay_us", DataType::UInt64, false));
+            fields.push(Field::new("timer_lag_us", DataType::UInt64, false));
+            fields.push(Field::new("channel_transit_us", DataType::UInt64, false));
+            fields.push(Field::new("dispatch_gap_us", DataType::UInt64, false));
         }
 
         // Timing breakdown
@@ -306,7 +308,9 @@ mod tests {
         assert!(fields.contains(&"bytes_sent"));
         assert!(fields.contains(&"is_error"));
         assert!(fields.contains(&"intended_us"));
-        assert!(fields.contains(&"scheduling_delay_us"));
+        assert!(fields.contains(&"timer_lag_us"));
+        assert!(fields.contains(&"channel_transit_us"));
+        assert!(fields.contains(&"dispatch_gap_us"));
         assert!(fields.contains(&"cache_tier"));
         assert!(fields.contains(&"test"));
     }

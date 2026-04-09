@@ -95,6 +95,8 @@ impl RequestExecutor for UdpExecutor {
                     request_id: context.request_id,
                     intended_time: context.intended_time,
                     actual_time: context.actual_time,
+                    sent_time: context.sent_time,
+                    dispatch_time: context.dispatch_time,
                     timing,
                     status: None,
                     bytes_sent,
@@ -108,6 +110,8 @@ impl RequestExecutor for UdpExecutor {
                 request_id: context.request_id,
                 intended_time: context.intended_time,
                 actual_time: context.actual_time,
+                sent_time: context.sent_time,
+                dispatch_time: context.dispatch_time,
                 timing: TimingBreakdown {
                     total: start.elapsed(),
                     ..Default::default()
@@ -123,6 +127,8 @@ impl RequestExecutor for UdpExecutor {
                 request_id: context.request_id,
                 intended_time: context.intended_time,
                 actual_time: context.actual_time,
+                sent_time: context.sent_time,
+                dispatch_time: context.dispatch_time,
                 timing: TimingBreakdown {
                     total: start.elapsed(),
                     ..Default::default()

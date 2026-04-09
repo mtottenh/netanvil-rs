@@ -37,7 +37,9 @@ impl RequestExecutor for MockExecutor {
         ExecutionResult {
             request_id: context.request_id,
             intended_time: context.intended_time,
+            sent_time: context.sent_time,
             actual_time: context.actual_time,
+            dispatch_time: context.dispatch_time,
             timing: TimingBreakdown {
                 total: Duration::from_micros(100),
                 ..Default::default()
@@ -135,7 +137,7 @@ fn response_callbacks_receive_statuses() {
     std::thread::spawn(move || {
         let now = Instant::now();
         for _ in 0..10 {
-            fire_tx.send(ScheduledRequest::Fire(now)).unwrap();
+            fire_tx.send(ScheduledRequest::Fire { intended_time: now, sent_time: now }).unwrap();
         }
         // Give async tasks time to execute before sending Stop
         std::thread::sleep(Duration::from_millis(100));
@@ -229,7 +231,7 @@ fn no_response_generator_has_zero_overhead() {
 
     let now = Instant::now();
     for _ in 0..5 {
-        fire_tx.send(ScheduledRequest::Fire(now)).unwrap();
+        fire_tx.send(ScheduledRequest::Fire { intended_time: now, sent_time: now }).unwrap();
     }
     fire_tx.send(ScheduledRequest::Stop).unwrap();
 

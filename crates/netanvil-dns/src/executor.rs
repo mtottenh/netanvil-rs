@@ -58,6 +58,8 @@ impl RequestExecutor for DnsExecutor {
                     request_id: ctx.request_id,
                     intended_time: ctx.intended_time,
                     actual_time: ctx.actual_time,
+                    sent_time: ctx.sent_time,
+                    dispatch_time: ctx.dispatch_time,
                     timing: TimingBreakdown {
                         total: start.elapsed(),
                         ..Default::default()
@@ -79,6 +81,8 @@ impl RequestExecutor for DnsExecutor {
                 request_id: ctx.request_id,
                 intended_time: ctx.intended_time,
                 actual_time: ctx.actual_time,
+                sent_time: ctx.sent_time,
+                dispatch_time: ctx.dispatch_time,
                 timing: TimingBreakdown {
                     total: start.elapsed(),
                     ..Default::default()
@@ -106,6 +110,8 @@ impl RequestExecutor for DnsExecutor {
                     request_id: ctx.request_id,
                     intended_time: ctx.intended_time,
                     actual_time: ctx.actual_time,
+                    sent_time: ctx.sent_time,
+                    dispatch_time: ctx.dispatch_time,
                     timing: TimingBreakdown {
                         total: ttfb,
                         time_to_first_byte: ttfb,
@@ -123,6 +129,8 @@ impl RequestExecutor for DnsExecutor {
                 request_id: ctx.request_id,
                 intended_time: ctx.intended_time,
                 actual_time: ctx.actual_time,
+                sent_time: ctx.sent_time,
+                dispatch_time: ctx.dispatch_time,
                 timing: TimingBreakdown {
                     total: start.elapsed(),
                     ..Default::default()
@@ -138,6 +146,8 @@ impl RequestExecutor for DnsExecutor {
                 request_id: ctx.request_id,
                 intended_time: ctx.intended_time,
                 actual_time: ctx.actual_time,
+                sent_time: ctx.sent_time,
+                dispatch_time: ctx.dispatch_time,
                 timing: TimingBreakdown {
                     total: start.elapsed(),
                     ..Default::default()

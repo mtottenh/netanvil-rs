@@ -130,7 +130,9 @@ fn simple_generator_round_robins_urls() {
     let ctx = RequestContext {
         request_id: 0,
         intended_time: now,
+        sent_time: now,
         actual_time: now,
+        dispatch_time: now,
         core_id: 0,
         is_sampled: false,
         session_id: None,
@@ -163,7 +165,9 @@ fn header_transformer_appends_headers() {
     let ctx = RequestContext {
         request_id: 0,
         intended_time: now,
+        sent_time: now,
         actual_time: now,
+        dispatch_time: now,
         core_id: 0,
         is_sampled: false,
         session_id: None,
@@ -408,6 +412,7 @@ fn build_ramp_arbiter(
                 threshold_source: ThresholdSource::FromBaseline {
                     threshold_from_baseline: BaselineMultiplier {
                         multiplier: latency_multiplier,
+                        baseline_floor_ms: 0.0,
                     },
                 },
                 persistence: 3,
@@ -427,6 +432,10 @@ fn build_ramp_arbiter(
                 backoff: None,
             }),
         ],
+        increase: None,
+        cooldown: None,
+        floor: None,
+        rate_change_limits: None,
     };
     let start_time = clock.now();
     build_arbiter(
@@ -435,6 +444,7 @@ fn build_ramp_arbiter(
         start_time,
         test_duration,
         clock,
+        None,
     )
     .expect("adaptive config should produce an arbiter")
 }

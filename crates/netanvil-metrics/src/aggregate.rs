@@ -21,10 +21,16 @@ pub struct AggregateMetrics {
     window_start: Option<Instant>,
     window_end: Option<Instant>,
     source_count: usize,
-    // Scheduling delay aggregates (composable: sum/max/sum)
-    scheduling_delay_sum_ns: u64,
-    scheduling_delay_max_ns: u64,
-    scheduling_delay_count_over_1ms: u64,
+    // Decomposed scheduling delay aggregates (composable: sum/max)
+    timer_lag_sum_ns: u64,
+    timer_lag_max_ns: u64,
+    channel_transit_sum_ns: u64,
+    channel_transit_max_ns: u64,
+    dispatch_gap_sum_ns: u64,
+    dispatch_gap_max_ns: u64,
+    total_delay_sum_ns: u64,
+    total_delay_max_ns: u64,
+    total_delay_count_over_1ms: u64,
     // Response header value distribution (composable: sum per key/value pair)
     header_value_counts: HashMap<String, HashMap<String, u64>>,
     // MD5 mismatch count (composable: sum)
@@ -69,9 +75,15 @@ impl AggregateMetrics {
             window_start: None,
             window_end: None,
             source_count: 0,
-            scheduling_delay_sum_ns: 0,
-            scheduling_delay_max_ns: 0,
-            scheduling_delay_count_over_1ms: 0,
+            timer_lag_sum_ns: 0,
+            timer_lag_max_ns: 0,
+            channel_transit_sum_ns: 0,
+            channel_transit_max_ns: 0,
+            dispatch_gap_sum_ns: 0,
+            dispatch_gap_max_ns: 0,
+            total_delay_sum_ns: 0,
+            total_delay_max_ns: 0,
+            total_delay_count_over_1ms: 0,
             header_value_counts: HashMap::new(),
             md5_mismatches: 0,
             response_signals: HashMap::new(),
@@ -130,12 +142,16 @@ impl AggregateMetrics {
 
         self.source_count += 1;
 
-        // Scheduling delay: sum sums, max maxes, count sums
-        self.scheduling_delay_sum_ns += snapshot.scheduling_delay_sum_ns;
-        self.scheduling_delay_max_ns = self
-            .scheduling_delay_max_ns
-            .max(snapshot.scheduling_delay_max_ns);
-        self.scheduling_delay_count_over_1ms += snapshot.scheduling_delay_count_over_1ms;
+        // Decomposed scheduling delay: sum sums, max maxes
+        self.timer_lag_sum_ns += snapshot.timer_lag_sum_ns;
+        self.timer_lag_max_ns = self.timer_lag_max_ns.max(snapshot.timer_lag_max_ns);
+        self.channel_transit_sum_ns += snapshot.channel_transit_sum_ns;
+        self.channel_transit_max_ns = self.channel_transit_max_ns.max(snapshot.channel_transit_max_ns);
+        self.dispatch_gap_sum_ns += snapshot.dispatch_gap_sum_ns;
+        self.dispatch_gap_max_ns = self.dispatch_gap_max_ns.max(snapshot.dispatch_gap_max_ns);
+        self.total_delay_sum_ns += snapshot.total_delay_sum_ns;
+        self.total_delay_max_ns = self.total_delay_max_ns.max(snapshot.total_delay_max_ns);
+        self.total_delay_count_over_1ms += snapshot.total_delay_count_over_1ms;
 
         // Merge response size histogram
         let _ = self.size_histogram.add(&snapshot.response_size_histogram);
@@ -199,9 +215,15 @@ impl AggregateMetrics {
         self.window_start = None;
         self.window_end = None;
         self.source_count = 0;
-        self.scheduling_delay_sum_ns = 0;
-        self.scheduling_delay_max_ns = 0;
-        self.scheduling_delay_count_over_1ms = 0;
+        self.timer_lag_sum_ns = 0;
+        self.timer_lag_max_ns = 0;
+        self.channel_transit_sum_ns = 0;
+        self.channel_transit_max_ns = 0;
+        self.dispatch_gap_sum_ns = 0;
+        self.dispatch_gap_max_ns = 0;
+        self.total_delay_sum_ns = 0;
+        self.total_delay_max_ns = 0;
+        self.total_delay_count_over_1ms = 0;
         self.header_value_counts.clear();
         self.md5_mismatches = 0;
         self.response_signals.clear();
@@ -296,16 +318,40 @@ impl AggregateMetrics {
         self.source_count
     }
 
-    pub fn scheduling_delay_sum_ns(&self) -> u64 {
-        self.scheduling_delay_sum_ns
+    pub fn timer_lag_sum_ns(&self) -> u64 {
+        self.timer_lag_sum_ns
     }
 
-    pub fn scheduling_delay_max_ns(&self) -> u64 {
-        self.scheduling_delay_max_ns
+    pub fn timer_lag_max_ns(&self) -> u64 {
+        self.timer_lag_max_ns
     }
 
-    pub fn scheduling_delay_count_over_1ms(&self) -> u64 {
-        self.scheduling_delay_count_over_1ms
+    pub fn channel_transit_sum_ns(&self) -> u64 {
+        self.channel_transit_sum_ns
+    }
+
+    pub fn channel_transit_max_ns(&self) -> u64 {
+        self.channel_transit_max_ns
+    }
+
+    pub fn dispatch_gap_sum_ns(&self) -> u64 {
+        self.dispatch_gap_sum_ns
+    }
+
+    pub fn dispatch_gap_max_ns(&self) -> u64 {
+        self.dispatch_gap_max_ns
+    }
+
+    pub fn total_delay_sum_ns(&self) -> u64 {
+        self.total_delay_sum_ns
+    }
+
+    pub fn total_delay_max_ns(&self) -> u64 {
+        self.total_delay_max_ns
+    }
+
+    pub fn total_delay_count_over_1ms(&self) -> u64 {
+        self.total_delay_count_over_1ms
     }
 
     pub fn bytes_sent(&self) -> u64 {
@@ -410,9 +456,15 @@ mod tests {
             bytes_received: latencies_ms.len() as u64 * 1024,
             window_start: now,
             window_end: now + Duration::from_secs(1),
-            scheduling_delay_sum_ns: 0,
-            scheduling_delay_max_ns: 0,
-            scheduling_delay_count_over_1ms: 0,
+            timer_lag_sum_ns: 0,
+            timer_lag_max_ns: 0,
+            channel_transit_sum_ns: 0,
+            channel_transit_max_ns: 0,
+            dispatch_gap_sum_ns: 0,
+            dispatch_gap_max_ns: 0,
+            total_delay_sum_ns: 0,
+            total_delay_max_ns: 0,
+            total_delay_count_over_1ms: 0,
             header_value_counts: std::collections::HashMap::new(),
             response_size_histogram: Histogram::<u64>::new_with_bounds(1, 1_073_741_824, 3)
                 .unwrap(),

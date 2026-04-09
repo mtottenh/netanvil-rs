@@ -41,7 +41,9 @@ impl RequestExecutor for MockExecutor {
         ExecutionResult {
             request_id: context.request_id,
             intended_time: context.intended_time,
+            sent_time: context.sent_time,
             actual_time: context.actual_time,
+            dispatch_time: context.dispatch_time,
             timing: TimingBreakdown {
                 total: Duration::from_micros(100),
                 ..Default::default()
@@ -85,7 +87,9 @@ impl RequestExecutor for CapturingExecutor {
         ExecutionResult {
             request_id: context.request_id,
             intended_time: context.intended_time,
+            sent_time: context.sent_time,
             actual_time: context.actual_time,
+            dispatch_time: context.dispatch_time,
             timing: TimingBreakdown {
                 total: Duration::from_micros(50),
                 ..Default::default()
@@ -118,7 +122,7 @@ fn io_worker_fires_requests_from_channel() {
         let now = Instant::now();
         for i in 0..n {
             fire_tx
-                .send(ScheduledRequest::Fire(now + Duration::from_millis(i)))
+                .send(ScheduledRequest::Fire { intended_time: now + Duration::from_millis(i), sent_time: now + Duration::from_millis(i) })
                 .unwrap();
             // Small sleep to let the worker process between messages
             if i % 10 == 9 {
@@ -176,7 +180,7 @@ fn io_worker_stops_on_stop_message() {
     // Send a few fires then stop
     let now = Instant::now();
     for _ in 0..5 {
-        fire_tx.send(ScheduledRequest::Fire(now)).unwrap();
+        fire_tx.send(ScheduledRequest::Fire { intended_time: now, sent_time: now }).unwrap();
     }
     fire_tx.send(ScheduledRequest::Stop).unwrap();
 
@@ -222,7 +226,7 @@ fn io_worker_exits_on_channel_disconnect() {
     // Send a few fires then drop the sender
     let now = Instant::now();
     for _ in 0..3 {
-        fire_tx.send(ScheduledRequest::Fire(now)).unwrap();
+        fire_tx.send(ScheduledRequest::Fire { intended_time: now, sent_time: now }).unwrap();
     }
     drop(fire_tx);
 
@@ -269,7 +273,7 @@ fn io_worker_handles_target_update() {
 
     // Fire some requests to the original target
     for _ in 0..20 {
-        fire_tx.send(ScheduledRequest::Fire(now)).unwrap();
+        fire_tx.send(ScheduledRequest::Fire { intended_time: now, sent_time: now }).unwrap();
     }
 
     // Update targets
@@ -282,7 +286,7 @@ fn io_worker_handles_target_update() {
 
     // Fire more requests to the new targets
     for _ in 0..20 {
-        fire_tx.send(ScheduledRequest::Fire(now)).unwrap();
+        fire_tx.send(ScheduledRequest::Fire { intended_time: now, sent_time: now }).unwrap();
     }
 
     fire_tx.send(ScheduledRequest::Stop).unwrap();
@@ -358,7 +362,7 @@ fn io_worker_handles_header_update() {
 
     // Fire some requests with original headers
     for _ in 0..20 {
-        fire_tx.send(ScheduledRequest::Fire(now)).unwrap();
+        fire_tx.send(ScheduledRequest::Fire { intended_time: now, sent_time: now }).unwrap();
     }
 
     // Update headers
@@ -371,7 +375,7 @@ fn io_worker_handles_header_update() {
 
     // Fire more requests with new headers
     for _ in 0..20 {
-        fire_tx.send(ScheduledRequest::Fire(now)).unwrap();
+        fire_tx.send(ScheduledRequest::Fire { intended_time: now, sent_time: now }).unwrap();
     }
 
     fire_tx.send(ScheduledRequest::Stop).unwrap();
@@ -449,7 +453,7 @@ fn io_worker_sends_periodic_metrics_snapshots() {
         let mut next = start;
         while start.elapsed() < duration {
             if Instant::now() >= next {
-                let _ = fire_tx.send(ScheduledRequest::Fire(next));
+                let _ = fire_tx.send(ScheduledRequest::Fire { intended_time: next, sent_time: next });
                 next += interval;
             }
             std::thread::sleep(Duration::from_millis(1));

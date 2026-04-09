@@ -33,7 +33,9 @@ struct CommonBuilders {
 struct OptionalBuilders {
     // Coordinated omission
     intended_us: Option<UInt64Builder>,
-    scheduling_delay_us: Option<UInt64Builder>,
+    timer_lag_us: Option<UInt64Builder>,
+    channel_transit_us: Option<UInt64Builder>,
+    dispatch_gap_us: Option<UInt64Builder>,
     // Timing
     dns_us: Option<UInt64Builder>,
     tcp_us: Option<UInt64Builder>,
@@ -110,7 +112,9 @@ impl ArrowEventRecorder {
 
         let optional = OptionalBuilders {
             intended_us: schema.include_co.then(|| UInt64Builder::with_capacity(bs)),
-            scheduling_delay_us: schema.include_co.then(|| UInt64Builder::with_capacity(bs)),
+            timer_lag_us: schema.include_co.then(|| UInt64Builder::with_capacity(bs)),
+            channel_transit_us: schema.include_co.then(|| UInt64Builder::with_capacity(bs)),
+            dispatch_gap_us: schema.include_co.then(|| UInt64Builder::with_capacity(bs)),
             dns_us: schema
                 .include_timing
                 .then(|| UInt64Builder::with_capacity(bs)),
@@ -220,7 +224,13 @@ impl ArrowEventRecorder {
         if let Some(ref mut b) = optional.intended_us {
             columns.push(Arc::new(b.finish()));
         }
-        if let Some(ref mut b) = optional.scheduling_delay_us {
+        if let Some(ref mut b) = optional.timer_lag_us {
+            columns.push(Arc::new(b.finish()));
+        }
+        if let Some(ref mut b) = optional.channel_transit_us {
+            columns.push(Arc::new(b.finish()));
+        }
+        if let Some(ref mut b) = optional.dispatch_gap_us {
             columns.push(Arc::new(b.finish()));
         }
 
@@ -314,11 +324,21 @@ impl EventRecorder for ArrowEventRecorder {
 
             if self.include_co {
                 let intended_us = self.anchor.to_epoch_us(result.intended_time);
+                let sent_us = self.anchor.to_epoch_us(result.sent_time);
+                let dispatch_us = self.anchor.to_epoch_us(result.dispatch_time);
                 o.intended_us.as_mut().unwrap().append_value(intended_us);
-                o.scheduling_delay_us
+                o.timer_lag_us
                     .as_mut()
                     .unwrap()
-                    .append_value(timestamp_us.saturating_sub(intended_us));
+                    .append_value(sent_us.saturating_sub(intended_us));
+                o.channel_transit_us
+                    .as_mut()
+                    .unwrap()
+                    .append_value(timestamp_us.saturating_sub(sent_us));
+                o.dispatch_gap_us
+                    .as_mut()
+                    .unwrap()
+                    .append_value(dispatch_us.saturating_sub(timestamp_us));
             }
 
             if self.include_timing {

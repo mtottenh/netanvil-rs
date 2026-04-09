@@ -143,6 +143,8 @@ impl RequestExecutor for RedisExecutor {
                 request_id: ctx.request_id,
                 intended_time: ctx.intended_time,
                 actual_time: ctx.actual_time,
+                sent_time: ctx.sent_time,
+                dispatch_time: ctx.dispatch_time,
                 timing,
                 status,
                 bytes_sent: resp::encode_command(&spec.command, &spec.args).len() as u64,
@@ -155,6 +157,8 @@ impl RequestExecutor for RedisExecutor {
                 request_id: ctx.request_id,
                 intended_time: ctx.intended_time,
                 actual_time: ctx.actual_time,
+                sent_time: ctx.sent_time,
+                dispatch_time: ctx.dispatch_time,
                 timing: TimingBreakdown {
                     total: start.elapsed(),
                     ..Default::default()
@@ -170,6 +174,8 @@ impl RequestExecutor for RedisExecutor {
                 request_id: ctx.request_id,
                 intended_time: ctx.intended_time,
                 actual_time: ctx.actual_time,
+                sent_time: ctx.sent_time,
+                dispatch_time: ctx.dispatch_time,
                 timing: TimingBreakdown {
                     total: start.elapsed(),
                     ..Default::default()

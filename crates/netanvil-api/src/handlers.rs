@@ -94,26 +94,26 @@ pub fn build_prometheus_body(state: &SharedState) -> String {
     ));
 
     // Latency histogram
-    out.push_str("# HELP netanvil_latency_seconds Request latency distribution.\n");
-    out.push_str("# TYPE netanvil_latency_seconds histogram\n");
+    out.push_str("# HELP netanvil_latency_nanoseconds Request latency distribution.\n");
+    out.push_str("# TYPE netanvil_latency_nanoseconds histogram\n");
     for &(le, count) in &m.latency_buckets {
         if le.is_infinite() {
             out.push_str(&format!(
-                "netanvil_latency_seconds_bucket{bucket_prefix}\"+Inf\"}} {count}\n"
+                "netanvil_latency_nanoseconds_bucket{bucket_prefix}\"+Inf\"}} {count}\n"
             ));
         } else {
             out.push_str(&format!(
-                "netanvil_latency_seconds_bucket{bucket_prefix}\"{le}\"}} {count}\n"
+                "netanvil_latency_nanoseconds_bucket{bucket_prefix}\"{le}\"}} {count}\n"
             ));
         }
     }
     out.push_str(&format!(
-        "netanvil_latency_seconds_count{label} {}\n",
+        "netanvil_latency_nanoseconds_count{label} {}\n",
         m.total_requests
     ));
     let approx_sum = m.latency_p50_ms / 1000.0 * m.total_requests as f64;
     out.push_str(&format!(
-        "netanvil_latency_seconds_sum{label} {:.3}\n",
+        "netanvil_latency_nanoseconds_sum{label} {:.3}\n",
         approx_sum
     ));
 
@@ -129,21 +129,38 @@ pub fn build_prometheus_body(state: &SharedState) -> String {
         s.backpressure_drops
     ));
 
-    out.push_str("# HELP netanvil_scheduling_delay_mean_seconds Mean scheduling delay (intended vs actual).\n");
-    out.push_str("# TYPE netanvil_scheduling_delay_mean_seconds gauge\n");
-    out.push_str(&format!(
-        "netanvil_scheduling_delay_mean_seconds{label} {:.6}\n",
-        s.scheduling_delay_mean_ms / 1000.0
-    ));
+    // Decomposed scheduling delay components
+    out.push_str("# HELP netanvil_timer_lag_mean_nanoseconds Mean timer thread lag (intended to sent).\n");
+    out.push_str("# TYPE netanvil_timer_lag_mean_nanoseconds gauge\n");
+    out.push_str(&format!("netanvil_timer_lag_mean_nanoseconds{label} {}\n", s.timer_lag_mean_ns));
 
-    out.push_str(
-        "# HELP netanvil_scheduling_delay_max_seconds Max scheduling delay this window.\n",
-    );
-    out.push_str("# TYPE netanvil_scheduling_delay_max_seconds gauge\n");
-    out.push_str(&format!(
-        "netanvil_scheduling_delay_max_seconds{label} {:.6}\n",
-        s.scheduling_delay_max_ms / 1000.0
-    ));
+    out.push_str("# HELP netanvil_timer_lag_max_nanoseconds Max timer thread lag this window.\n");
+    out.push_str("# TYPE netanvil_timer_lag_max_nanoseconds gauge\n");
+    out.push_str(&format!("netanvil_timer_lag_max_nanoseconds{label} {}\n", s.timer_lag_max_ns));
+
+    out.push_str("# HELP netanvil_channel_transit_mean_nanoseconds Mean fire channel transit time (sent to dequeue).\n");
+    out.push_str("# TYPE netanvil_channel_transit_mean_nanoseconds gauge\n");
+    out.push_str(&format!("netanvil_channel_transit_mean_nanoseconds{label} {}\n", s.channel_transit_mean_ns));
+
+    out.push_str("# HELP netanvil_channel_transit_max_nanoseconds Max fire channel transit time this window.\n");
+    out.push_str("# TYPE netanvil_channel_transit_max_nanoseconds gauge\n");
+    out.push_str(&format!("netanvil_channel_transit_max_nanoseconds{label} {}\n", s.channel_transit_max_ns));
+
+    out.push_str("# HELP netanvil_dispatch_gap_mean_nanoseconds Mean dispatch gap (dequeue to exec start).\n");
+    out.push_str("# TYPE netanvil_dispatch_gap_mean_nanoseconds gauge\n");
+    out.push_str(&format!("netanvil_dispatch_gap_mean_nanoseconds{label} {}\n", s.dispatch_gap_mean_ns));
+
+    out.push_str("# HELP netanvil_dispatch_gap_max_nanoseconds Max dispatch gap this window.\n");
+    out.push_str("# TYPE netanvil_dispatch_gap_max_nanoseconds gauge\n");
+    out.push_str(&format!("netanvil_dispatch_gap_max_nanoseconds{label} {}\n", s.dispatch_gap_max_ns));
+
+    out.push_str("# HELP netanvil_scheduling_delay_mean_nanoseconds Mean total scheduling delay (intended to dispatch).\n");
+    out.push_str("# TYPE netanvil_scheduling_delay_mean_nanoseconds gauge\n");
+    out.push_str(&format!("netanvil_scheduling_delay_mean_nanoseconds{label} {}\n", s.scheduling_delay_mean_ns));
+
+    out.push_str("# HELP netanvil_scheduling_delay_max_nanoseconds Max total scheduling delay this window.\n");
+    out.push_str("# TYPE netanvil_scheduling_delay_max_nanoseconds gauge\n");
+    out.push_str(&format!("netanvil_scheduling_delay_max_nanoseconds{label} {}\n", s.scheduling_delay_max_ns));
 
     out.push_str(
         "# HELP netanvil_rate_achievement Ratio of achieved to target RPS (1.0 = on target).\n",

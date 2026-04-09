@@ -27,6 +27,8 @@ fn make_context(request_id: u64) -> RequestContext {
         request_id,
         intended_time: now,
         actual_time: now,
+        sent_time: now,
+        dispatch_time: now,
         core_id: 0,
         is_sampled: false,
         session_id: None,
@@ -38,7 +40,9 @@ fn make_result(request_id: u64, with_headers: bool) -> ExecutionResult {
     ExecutionResult {
         request_id,
         intended_time: now,
+        sent_time: now,
         actual_time: now,
+        dispatch_time: now,
         timing: TimingBreakdown {
             total: Duration::from_micros(500),
             time_to_first_byte: Duration::from_micros(400),

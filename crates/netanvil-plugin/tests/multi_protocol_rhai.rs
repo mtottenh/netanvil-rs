@@ -11,6 +11,8 @@ fn mock_ctx(request_id: u64, core_id: usize) -> RequestContext {
         request_id,
         intended_time: now,
         actual_time: now,
+        sent_time: now,
+        dispatch_time: now,
         core_id,
         is_sampled: false,
         session_id: None,

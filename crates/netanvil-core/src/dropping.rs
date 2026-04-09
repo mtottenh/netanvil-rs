@@ -72,6 +72,8 @@ impl<E: RequestExecutor> RequestExecutor for DroppingExecutor<E> {
                         request_id: context.request_id,
                         intended_time: context.intended_time,
                         actual_time: context.actual_time,
+                        sent_time: context.sent_time,
+                        dispatch_time: context.dispatch_time,
                         timing: TimingBreakdown::default(),
                         status: None,
                         bytes_sent: 0,

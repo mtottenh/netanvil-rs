@@ -148,9 +148,10 @@ pub fn timer_loop(
 
         // High-precision sleep
         precision_sleep_sync(intended_time);
+        let sent_time = Instant::now();
 
         // Dispatch to worker via bounded channel
-        match fire_txs[worker_id].try_send(ScheduledRequest::Fire(intended_time)) {
+        match fire_txs[worker_id].try_send(ScheduledRequest::Fire { intended_time, sent_time }) {
             Ok(()) => {
                 let count = stats.dispatched.fetch_add(1, Ordering::Relaxed) + 1;
                 if count % 1000 == 0 {

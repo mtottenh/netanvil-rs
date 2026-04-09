@@ -79,7 +79,9 @@ fn collector_tracks_scheduling_delay() {
     collector.record(&ExecutionResult {
         request_id: 0,
         intended_time: now,
+        sent_time: now,
         actual_time: now,
+        dispatch_time: now,
         timing: TimingBreakdown {
             total: Duration::from_millis(5),
             ..Default::default()
@@ -92,11 +94,14 @@ fn collector_tracks_scheduling_delay() {
         response_body: None,
     });
 
-    // Request with 10ms delay (above 1ms threshold)
+    // Request with 10ms total delay (above 1ms threshold)
+    // Distribute: 2ms timer lag, 5ms channel transit, 3ms dispatch gap = 10ms total
     collector.record(&ExecutionResult {
         request_id: 1,
         intended_time: now,
-        actual_time: now + Duration::from_millis(10),
+        sent_time: now + Duration::from_millis(2),
+        actual_time: now + Duration::from_millis(7),
+        dispatch_time: now + Duration::from_millis(10),
         timing: TimingBreakdown {
             total: Duration::from_millis(5),
             ..Default::default()
@@ -109,11 +114,13 @@ fn collector_tracks_scheduling_delay() {
         response_body: None,
     });
 
-    // Request with 0.5ms delay (below 1ms threshold)
+    // Request with 0.5ms total delay (below 1ms threshold)
     collector.record(&ExecutionResult {
         request_id: 2,
         intended_time: now,
-        actual_time: now + Duration::from_micros(500),
+        sent_time: now + Duration::from_micros(100),
+        actual_time: now + Duration::from_micros(300),
+        dispatch_time: now + Duration::from_micros(500),
         timing: TimingBreakdown {
             total: Duration::from_millis(5),
             ..Default::default()
@@ -129,23 +136,35 @@ fn collector_tracks_scheduling_delay() {
     let snapshot = collector.snapshot();
 
     assert_eq!(snapshot.total_requests, 3);
-    // Sum should be ~10.5ms in nanoseconds
+    // Total delay sum should be ~10.5ms in nanoseconds
     assert!(
-        snapshot.scheduling_delay_sum_ns > 10_000_000,
+        snapshot.total_delay_sum_ns > 10_000_000,
         "sum should include 10ms + 0.5ms delays: {}",
-        snapshot.scheduling_delay_sum_ns
+        snapshot.total_delay_sum_ns
     );
-    // Max should be ~10ms
+    // Max total delay should be ~10ms
     assert!(
-        snapshot.scheduling_delay_max_ns >= 9_000_000
-            && snapshot.scheduling_delay_max_ns <= 11_000_000,
+        snapshot.total_delay_max_ns >= 9_000_000
+            && snapshot.total_delay_max_ns <= 11_000_000,
         "max should be ~10ms: {}ns",
-        snapshot.scheduling_delay_max_ns
+        snapshot.total_delay_max_ns
     );
     // Only the 10ms request exceeds 1ms threshold
     assert_eq!(
-        snapshot.scheduling_delay_count_over_1ms, 1,
+        snapshot.total_delay_count_over_1ms, 1,
         "only 1 request should exceed 1ms threshold"
+    );
+    // Verify decomposed components: timer_lag max should be ~2ms (from request 1)
+    assert!(
+        snapshot.timer_lag_max_ns >= 1_500_000 && snapshot.timer_lag_max_ns <= 2_500_000,
+        "timer_lag max should be ~2ms: {}ns",
+        snapshot.timer_lag_max_ns
+    );
+    // Channel transit max should be ~5ms (from request 1)
+    assert!(
+        snapshot.channel_transit_max_ns >= 4_500_000 && snapshot.channel_transit_max_ns <= 5_500_000,
+        "channel_transit max should be ~5ms: {}ns",
+        snapshot.channel_transit_max_ns
     );
 }
 
@@ -156,11 +175,13 @@ fn collector_resets_delay_stats_on_snapshot() {
     let collector = HdrMetricsCollector::new(0, vec![], false);
     let now = Instant::now();
 
-    // Record a delayed request
+    // Record a delayed request (5ms total: 1ms timer lag, 2ms channel, 2ms dispatch gap)
     collector.record(&ExecutionResult {
         request_id: 0,
         intended_time: now,
-        actual_time: now + Duration::from_millis(5),
+        sent_time: now + Duration::from_millis(1),
+        actual_time: now + Duration::from_millis(3),
+        dispatch_time: now + Duration::from_millis(5),
         timing: TimingBreakdown {
             total: Duration::from_millis(1),
             ..Default::default()
@@ -174,15 +195,15 @@ fn collector_resets_delay_stats_on_snapshot() {
     });
 
     let snap1 = collector.snapshot();
-    assert!(snap1.scheduling_delay_sum_ns > 0);
-    assert!(snap1.scheduling_delay_max_ns > 0);
-    assert_eq!(snap1.scheduling_delay_count_over_1ms, 1);
+    assert!(snap1.total_delay_sum_ns > 0);
+    assert!(snap1.total_delay_max_ns > 0);
+    assert_eq!(snap1.total_delay_count_over_1ms, 1);
 
     // Second snapshot should be clean
     let snap2 = collector.snapshot();
-    assert_eq!(snap2.scheduling_delay_sum_ns, 0);
-    assert_eq!(snap2.scheduling_delay_max_ns, 0);
-    assert_eq!(snap2.scheduling_delay_count_over_1ms, 0);
+    assert_eq!(snap2.total_delay_sum_ns, 0);
+    assert_eq!(snap2.total_delay_max_ns, 0);
+    assert_eq!(snap2.total_delay_count_over_1ms, 0);
 }
 
 // ===========================================================================
@@ -206,9 +227,15 @@ fn aggregate_merges_scheduling_delay_fields() {
         bytes_received: 0,
         window_start: now,
         window_end: now + Duration::from_secs(1),
-        scheduling_delay_sum_ns: 5_000_000, // 5ms total
-        scheduling_delay_max_ns: 2_000_000, // 2ms max
-        scheduling_delay_count_over_1ms: 3,
+        timer_lag_sum_ns: 0,
+        timer_lag_max_ns: 0,
+        channel_transit_sum_ns: 0,
+        channel_transit_max_ns: 0,
+        dispatch_gap_sum_ns: 0,
+        dispatch_gap_max_ns: 0,
+        total_delay_sum_ns: 5_000_000, // 5ms total
+        total_delay_max_ns: 2_000_000, // 2ms max
+        total_delay_count_over_1ms: 3,
         header_value_counts: std::collections::HashMap::new(),
         response_size_histogram: empty_size_hist(),
         md5_mismatches: 0,
@@ -238,9 +265,15 @@ fn aggregate_merges_scheduling_delay_fields() {
         bytes_received: 0,
         window_start: now,
         window_end: now + Duration::from_secs(1),
-        scheduling_delay_sum_ns: 10_000_000, // 10ms total
-        scheduling_delay_max_ns: 8_000_000,  // 8ms max
-        scheduling_delay_count_over_1ms: 7,
+        timer_lag_sum_ns: 0,
+        timer_lag_max_ns: 0,
+        channel_transit_sum_ns: 0,
+        channel_transit_max_ns: 0,
+        dispatch_gap_sum_ns: 0,
+        dispatch_gap_max_ns: 0,
+        total_delay_sum_ns: 10_000_000, // 10ms total
+        total_delay_max_ns: 8_000_000,  // 8ms max
+        total_delay_count_over_1ms: 7,
         header_value_counts: std::collections::HashMap::new(),
         response_size_histogram: empty_size_hist(),
         md5_mismatches: 0,
@@ -266,9 +299,9 @@ fn aggregate_merges_scheduling_delay_fields() {
     agg.merge(&snap_a);
     agg.merge(&snap_b);
 
-    assert_eq!(agg.scheduling_delay_sum_ns(), 15_000_000); // sum of sums
-    assert_eq!(agg.scheduling_delay_max_ns(), 8_000_000); // max of maxes
-    assert_eq!(agg.scheduling_delay_count_over_1ms(), 10); // sum of counts
+    assert_eq!(agg.total_delay_sum_ns(), 15_000_000); // sum of sums
+    assert_eq!(agg.total_delay_max_ns(), 8_000_000); // max of maxes
+    assert_eq!(agg.total_delay_count_over_1ms(), 10); // sum of counts
     assert_eq!(agg.total_requests(), 150);
 }
 
@@ -281,8 +314,14 @@ fn saturation_healthy_when_no_signals() {
     let info = SaturationInfo {
         backpressure_drops: 0,
         backpressure_ratio: 0.0,
-        scheduling_delay_mean_ms: 0.1,
-        scheduling_delay_max_ms: 0.5,
+        timer_lag_mean_ns: 0,
+        timer_lag_max_ns: 0,
+        channel_transit_mean_ns: 0,
+        channel_transit_max_ns: 0,
+        dispatch_gap_mean_ns: 0,
+        dispatch_gap_max_ns: 0,
+        scheduling_delay_mean_ns: 100_000,  // 0.1ms
+        scheduling_delay_max_ns: 500_000,   // 0.5ms
         delayed_request_ratio: 0.0,
         rate_achievement: 1.0,
         cpu_affinity_ratio: 0.0,
@@ -303,8 +342,14 @@ fn saturation_client_when_backpressure() {
     let info = SaturationInfo {
         backpressure_drops: 50,
         backpressure_ratio: 0.05, // 5% dropped
-        scheduling_delay_mean_ms: 0.1,
-        scheduling_delay_max_ms: 0.5,
+        timer_lag_mean_ns: 0,
+        timer_lag_max_ns: 0,
+        channel_transit_mean_ns: 0,
+        channel_transit_max_ns: 0,
+        dispatch_gap_mean_ns: 0,
+        dispatch_gap_max_ns: 0,
+        scheduling_delay_mean_ns: 100_000,  // 0.1ms
+        scheduling_delay_max_ns: 500_000,   // 0.5ms
         delayed_request_ratio: 0.0,
         rate_achievement: 0.95,
         cpu_affinity_ratio: 0.0,
@@ -324,8 +369,14 @@ fn saturation_info_serializes_to_json() {
     let info = SaturationInfo {
         backpressure_drops: 10,
         backpressure_ratio: 0.02,
-        scheduling_delay_mean_ms: 5.0,
-        scheduling_delay_max_ms: 50.0,
+        timer_lag_mean_ns: 0,
+        timer_lag_max_ns: 0,
+        channel_transit_mean_ns: 0,
+        channel_transit_max_ns: 0,
+        dispatch_gap_mean_ns: 0,
+        dispatch_gap_max_ns: 0,
+        scheduling_delay_mean_ns: 5_000_000,   // 5.0ms
+        scheduling_delay_max_ns: 50_000_000,   // 50.0ms
         delayed_request_ratio: 0.15,
         rate_achievement: 0.88,
         cpu_affinity_ratio: 0.0,

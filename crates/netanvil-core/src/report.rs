@@ -62,7 +62,7 @@ impl fmt::Display for Report<'_> {
         // Show saturation info if any signals were detected
         let s = &r.saturation;
         if s.backpressure_drops > 0
-            || s.scheduling_delay_mean_ms > 1.0
+            || s.scheduling_delay_mean_ns > 1_000_000
             || s.delayed_request_ratio > 0.01
         {
             writeln!(f)?;
@@ -77,8 +77,27 @@ impl fmt::Display for Report<'_> {
             }
             writeln!(
                 f,
-                "    Sched delay:   {:>10.2}ms mean, {:.2}ms max",
-                s.scheduling_delay_mean_ms, s.scheduling_delay_max_ms
+                "    Timer lag:     {:>10} mean, {} max",
+                format_ns(s.timer_lag_mean_ns),
+                format_ns(s.timer_lag_max_ns)
+            )?;
+            writeln!(
+                f,
+                "    Chan transit:  {:>10} mean, {} max",
+                format_ns(s.channel_transit_mean_ns),
+                format_ns(s.channel_transit_max_ns)
+            )?;
+            writeln!(
+                f,
+                "    Dispatch gap:  {:>10} mean, {} max",
+                format_ns(s.dispatch_gap_mean_ns),
+                format_ns(s.dispatch_gap_max_ns)
+            )?;
+            writeln!(
+                f,
+                "    Total delay:   {:>10} mean, {} max",
+                format_ns(s.scheduling_delay_mean_ns),
+                format_ns(s.scheduling_delay_max_ns)
             )?;
             writeln!(
                 f,
@@ -156,6 +175,18 @@ impl fmt::Display for ProgressLine<'_> {
             SaturationAssessment::Healthy => {}
         }
         Ok(())
+    }
+}
+
+fn format_ns(ns: u64) -> String {
+    if ns >= 1_000_000_000 {
+        format!("{:.2}s", ns as f64 / 1_000_000_000.0)
+    } else if ns >= 1_000_000 {
+        format!("{:.2}ms", ns as f64 / 1_000_000.0)
+    } else if ns >= 1_000 {
+        format!("{:.2}\u{03bc}s", ns as f64 / 1_000.0)
+    } else {
+        format!("{}ns", ns)
     }
 }
 

@@ -28,11 +28,16 @@ pub struct HdrMetricsCollector<P: PacketCounterSource = NoopPacketSource> {
     /// HTTP status codes >= this threshold count as errors.
     /// 0 means only transport errors count (error field set).
     error_status_threshold: u16,
-    // Scheduling delay tracking for saturation detection.
-    // These are per-window, reset on snapshot().
-    scheduling_delay_sum_ns: Cell<u64>,
-    scheduling_delay_max_ns: Cell<u64>,
-    scheduling_delay_count_over_1ms: Cell<u64>,
+    // Decomposed scheduling delay tracking (per-window, reset on snapshot).
+    timer_lag_sum_ns: Cell<u64>,
+    timer_lag_max_ns: Cell<u64>,
+    channel_transit_sum_ns: Cell<u64>,
+    channel_transit_max_ns: Cell<u64>,
+    dispatch_gap_sum_ns: Cell<u64>,
+    dispatch_gap_max_ns: Cell<u64>,
+    total_delay_sum_ns: Cell<u64>,
+    total_delay_max_ns: Cell<u64>,
+    total_delay_count_over_1ms: Cell<u64>,
     /// Response header names to track value distributions for.
     tracked_headers: Vec<String>,
     /// Per-header value counts: header_name -> (header_value -> count).
@@ -115,9 +120,15 @@ impl<P: PacketCounterSource> HdrMetricsCollector<P> {
             bytes_received: Cell::new(0),
             window_start: Cell::new(Instant::now()),
             error_status_threshold,
-            scheduling_delay_sum_ns: Cell::new(0),
-            scheduling_delay_max_ns: Cell::new(0),
-            scheduling_delay_count_over_1ms: Cell::new(0),
+            timer_lag_sum_ns: Cell::new(0),
+            timer_lag_max_ns: Cell::new(0),
+            channel_transit_sum_ns: Cell::new(0),
+            channel_transit_max_ns: Cell::new(0),
+            dispatch_gap_sum_ns: Cell::new(0),
+            dispatch_gap_max_ns: Cell::new(0),
+            total_delay_sum_ns: Cell::new(0),
+            total_delay_max_ns: Cell::new(0),
+            total_delay_count_over_1ms: Cell::new(0),
             tracked_headers,
             header_counts: RefCell::new(HashMap::new()),
             md5_check_enabled,
@@ -188,29 +199,42 @@ impl<P: PacketCounterSource> MetricsCollector for HdrMetricsCollector<P> {
         let latency_ns = result.timing.total.as_nanos() as u64;
         let _ = self.histogram.borrow_mut().record(latency_ns.max(1));
 
-        // Track scheduling delay for saturation detection.
-        let queue_delay = result
-            .actual_time
-            .saturating_duration_since(result.intended_time);
-        let delay_ns = queue_delay.as_nanos() as u64;
+        // Track decomposed scheduling delay for saturation detection.
+        let timer_lag_ns = result.sent_time.saturating_duration_since(result.intended_time).as_nanos() as u64;
+        let channel_transit_ns = result.actual_time.saturating_duration_since(result.sent_time).as_nanos() as u64;
+        let dispatch_gap_ns = result.dispatch_time.saturating_duration_since(result.actual_time).as_nanos() as u64;
+        let total_delay_ns = result.dispatch_time.saturating_duration_since(result.intended_time).as_nanos() as u64;
 
-        self.scheduling_delay_sum_ns
-            .set(self.scheduling_delay_sum_ns.get() + delay_ns);
-        if delay_ns > self.scheduling_delay_max_ns.get() {
-            self.scheduling_delay_max_ns.set(delay_ns);
+        self.timer_lag_sum_ns.set(self.timer_lag_sum_ns.get() + timer_lag_ns);
+        if timer_lag_ns > self.timer_lag_max_ns.get() {
+            self.timer_lag_max_ns.set(timer_lag_ns);
         }
-        if delay_ns > 1_000_000 {
+        self.channel_transit_sum_ns.set(self.channel_transit_sum_ns.get() + channel_transit_ns);
+        if channel_transit_ns > self.channel_transit_max_ns.get() {
+            self.channel_transit_max_ns.set(channel_transit_ns);
+        }
+        self.dispatch_gap_sum_ns.set(self.dispatch_gap_sum_ns.get() + dispatch_gap_ns);
+        if dispatch_gap_ns > self.dispatch_gap_max_ns.get() {
+            self.dispatch_gap_max_ns.set(dispatch_gap_ns);
+        }
+        self.total_delay_sum_ns.set(self.total_delay_sum_ns.get() + total_delay_ns);
+        if total_delay_ns > self.total_delay_max_ns.get() {
+            self.total_delay_max_ns.set(total_delay_ns);
+        }
+        if total_delay_ns > 1_000_000 {
             // > 1ms
-            self.scheduling_delay_count_over_1ms
-                .set(self.scheduling_delay_count_over_1ms.get() + 1);
+            self.total_delay_count_over_1ms
+                .set(self.total_delay_count_over_1ms.get() + 1);
         }
 
         // Coordinated omission correction: if the request was delayed
-        // (actual_time significantly after intended_time), also record
+        // (dispatch_time significantly after intended_time), also record
         // the corrected latency so the histogram reflects what a user
         // at the intended time would have experienced.
-        if queue_delay.as_micros() > 100 {
-            let corrected_ns = latency_ns + delay_ns;
+        // Uses total_delay (intent-to-dispatch) not partial (intent-to-dequeue).
+        if total_delay_ns > 100_000 {
+            // > 100μs
+            let corrected_ns = latency_ns + total_delay_ns;
             let _ = self.histogram.borrow_mut().record(corrected_ns.max(1));
         }
 
@@ -328,9 +352,15 @@ impl<P: PacketCounterSource> MetricsCollector for HdrMetricsCollector<P> {
             bytes_received: self.bytes_received.get(),
             window_start: self.window_start.get(),
             window_end: now,
-            scheduling_delay_sum_ns: self.scheduling_delay_sum_ns.get(),
-            scheduling_delay_max_ns: self.scheduling_delay_max_ns.get(),
-            scheduling_delay_count_over_1ms: self.scheduling_delay_count_over_1ms.get(),
+            timer_lag_sum_ns: self.timer_lag_sum_ns.get(),
+            timer_lag_max_ns: self.timer_lag_max_ns.get(),
+            channel_transit_sum_ns: self.channel_transit_sum_ns.get(),
+            channel_transit_max_ns: self.channel_transit_max_ns.get(),
+            dispatch_gap_sum_ns: self.dispatch_gap_sum_ns.get(),
+            dispatch_gap_max_ns: self.dispatch_gap_max_ns.get(),
+            total_delay_sum_ns: self.total_delay_sum_ns.get(),
+            total_delay_max_ns: self.total_delay_max_ns.get(),
+            total_delay_count_over_1ms: self.total_delay_count_over_1ms.get(),
             header_value_counts: header_counts,
             response_size_histogram: size_hist,
             md5_mismatches: self.md5_mismatches.get(),
@@ -365,9 +395,15 @@ impl<P: PacketCounterSource> MetricsCollector for HdrMetricsCollector<P> {
         self.bytes_sent.set(0);
         self.bytes_received.set(0);
         self.window_start.set(now);
-        self.scheduling_delay_sum_ns.set(0);
-        self.scheduling_delay_max_ns.set(0);
-        self.scheduling_delay_count_over_1ms.set(0);
+        self.timer_lag_sum_ns.set(0);
+        self.timer_lag_max_ns.set(0);
+        self.channel_transit_sum_ns.set(0);
+        self.channel_transit_max_ns.set(0);
+        self.dispatch_gap_sum_ns.set(0);
+        self.dispatch_gap_max_ns.set(0);
+        self.total_delay_sum_ns.set(0);
+        self.total_delay_max_ns.set(0);
+        self.total_delay_count_over_1ms.set(0);
         self.md5_mismatches.set(0);
         self.timeout_count.set(0);
 
@@ -387,6 +423,8 @@ mod tests {
             request_id: 0,
             intended_time: now,
             actual_time: now,
+            sent_time: now,
+            dispatch_time: now,
             timing: TimingBreakdown {
                 total: latency,
                 ..Default::default()
@@ -449,6 +487,8 @@ mod tests {
             request_id: 0,
             intended_time: now,
             actual_time: now,
+            sent_time: now,
+            dispatch_time: now,
             timing: TimingBreakdown {
                 total: Duration::from_millis(5),
                 ..Default::default()
@@ -468,6 +508,8 @@ mod tests {
             request_id: 1,
             intended_time: intended,
             actual_time: actual,
+            sent_time: actual,
+            dispatch_time: actual,
             timing: TimingBreakdown {
                 total: Duration::from_millis(5),
                 ..Default::default()

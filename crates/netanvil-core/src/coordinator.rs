@@ -135,7 +135,7 @@ fn histogram_to_prometheus_buckets(hist: &hdrhistogram::Histogram<u64>) -> Vec<(
     let mut buckets = Vec::with_capacity(PROMETHEUS_BUCKET_BOUNDS_NS.len() + 1);
     for &bound_ns in PROMETHEUS_BUCKET_BOUNDS_NS {
         let count = hist.count_between(0, bound_ns);
-        buckets.push((bound_ns as f64 / 1_000_000_000.0, count));
+        buckets.push((bound_ns as f64, count));
     }
     // +Inf bucket = total count
     buckets.push((f64::INFINITY, hist.len()));
@@ -240,7 +240,7 @@ impl Coordinator {
             warmup_duration: None,
             warmup_complete: false,
             target_bytes: None,
-            sliding_window: SlidingWindow::new(Duration::from_secs(2)),
+            sliding_window: SlidingWindow::new(control_interval * 3),
             last_assessment: SaturationAssessment::Healthy,
         }
     }
@@ -576,22 +576,18 @@ impl Coordinator {
             0.0
         };
 
-        // Scheduling delay from the tick aggregate
-        let delay_sum = self.tick_aggregate.scheduling_delay_sum_ns();
-        let delay_max = self.tick_aggregate.scheduling_delay_max_ns();
-        let delay_over_1ms = self.tick_aggregate.scheduling_delay_count_over_1ms();
-
-        let scheduling_delay_mean_ms = if summary.total_requests > 0 {
-            (delay_sum as f64 / summary.total_requests as f64) / 1_000_000.0
-        } else {
-            0.0
-        };
-        let scheduling_delay_max_ms = delay_max as f64 / 1_000_000.0;
-        let delayed_request_ratio = if summary.total_requests > 0 {
-            delay_over_1ms as f64 / summary.total_requests as f64
-        } else {
-            0.0
-        };
+        // Decomposed scheduling delay from the tick aggregate
+        let total_requests = summary.total_requests;
+        let timer_lag_mean_ns = if total_requests > 0 { self.tick_aggregate.timer_lag_sum_ns() / total_requests } else { 0 };
+        let timer_lag_max_ns = self.tick_aggregate.timer_lag_max_ns();
+        let channel_transit_mean_ns = if total_requests > 0 { self.tick_aggregate.channel_transit_sum_ns() / total_requests } else { 0 };
+        let channel_transit_max_ns = self.tick_aggregate.channel_transit_max_ns();
+        let dispatch_gap_mean_ns = if total_requests > 0 { self.tick_aggregate.dispatch_gap_sum_ns() / total_requests } else { 0 };
+        let dispatch_gap_max_ns = self.tick_aggregate.dispatch_gap_max_ns();
+        let scheduling_delay_mean_ns = if total_requests > 0 { self.tick_aggregate.total_delay_sum_ns() / total_requests } else { 0 };
+        let scheduling_delay_max_ns = self.tick_aggregate.total_delay_max_ns();
+        let delay_over_1ms = self.tick_aggregate.total_delay_count_over_1ms();
+        let delayed_request_ratio = if total_requests > 0 { delay_over_1ms as f64 / total_requests as f64 } else { 0.0 };
 
         let rate_achievement = if target_rps > 0.0 {
             (smoothed_rps / target_rps).min(2.0)
@@ -604,7 +600,7 @@ impl Coordinator {
         let rate_underachieving = summary.total_requests > 0 && rate_achievement < 0.90;
 
         let client_signals = backpressure_ratio > 0.01
-            || scheduling_delay_mean_ms > 5.0
+            || scheduling_delay_mean_ns > 5_000_000
             || delayed_request_ratio > 0.10
             || rate_underachieving;
 
@@ -630,7 +626,7 @@ impl Coordinator {
                     ?assessment,
                     previous = ?self.last_assessment,
                     backpressure_ratio,
-                    scheduling_delay_mean_ms,
+                    scheduling_delay_mean_ns,
                     rate_achievement,
                     error_rate = summary.error_rate,
                     latency_p99_ms,
@@ -643,8 +639,14 @@ impl Coordinator {
         SaturationInfo {
             backpressure_drops: tick_dropped,
             backpressure_ratio,
-            scheduling_delay_mean_ms,
-            scheduling_delay_max_ms,
+            timer_lag_mean_ns,
+            timer_lag_max_ns,
+            channel_transit_mean_ns,
+            channel_transit_max_ns,
+            dispatch_gap_mean_ns,
+            dispatch_gap_max_ns,
+            scheduling_delay_mean_ns,
+            scheduling_delay_max_ns,
             delayed_request_ratio,
             rate_achievement,
             cpu_affinity_ratio: self.tick_aggregate.cpu_affinity_ratio(),
@@ -742,6 +744,17 @@ impl Coordinator {
         let total_attempted = total_dispatched + total_dropped;
         let total_requests = self.total_aggregate.total_requests();
 
+        let timer_lag_mean_ns = if total_requests > 0 { self.total_aggregate.timer_lag_sum_ns() / total_requests } else { 0 };
+        let timer_lag_max_ns = self.total_aggregate.timer_lag_max_ns();
+        let channel_transit_mean_ns = if total_requests > 0 { self.total_aggregate.channel_transit_sum_ns() / total_requests } else { 0 };
+        let channel_transit_max_ns = self.total_aggregate.channel_transit_max_ns();
+        let dispatch_gap_mean_ns = if total_requests > 0 { self.total_aggregate.dispatch_gap_sum_ns() / total_requests } else { 0 };
+        let dispatch_gap_max_ns = self.total_aggregate.dispatch_gap_max_ns();
+        let scheduling_delay_mean_ns = if total_requests > 0 { self.total_aggregate.total_delay_sum_ns() / total_requests } else { 0 };
+        let scheduling_delay_max_ns = self.total_aggregate.total_delay_max_ns();
+        let delay_over_1ms = self.total_aggregate.total_delay_count_over_1ms();
+        let delayed_request_ratio = if total_requests > 0 { delay_over_1ms as f64 / total_requests as f64 } else { 0.0 };
+
         let saturation = SaturationInfo {
             backpressure_drops: total_dropped,
             backpressure_ratio: if total_attempted > 0 {
@@ -749,27 +762,22 @@ impl Coordinator {
             } else {
                 0.0
             },
-            scheduling_delay_mean_ms: if total_requests > 0 {
-                (self.total_aggregate.scheduling_delay_sum_ns() as f64 / total_requests as f64)
-                    / 1_000_000.0
-            } else {
-                0.0
-            },
-            scheduling_delay_max_ms: self.total_aggregate.scheduling_delay_max_ns() as f64
-                / 1_000_000.0,
-            delayed_request_ratio: if total_requests > 0 {
-                self.total_aggregate.scheduling_delay_count_over_1ms() as f64
-                    / total_requests as f64
-            } else {
-                0.0
-            },
+            timer_lag_mean_ns,
+            timer_lag_max_ns,
+            channel_transit_mean_ns,
+            channel_transit_max_ns,
+            dispatch_gap_mean_ns,
+            dispatch_gap_max_ns,
+            scheduling_delay_mean_ns,
+            scheduling_delay_max_ns,
+            delayed_request_ratio,
             cpu_affinity_ratio: self.total_aggregate.cpu_affinity_ratio(),
             tcp_rtt_mean_ms: self.total_aggregate.tcp_rtt_mean_us() / 1000.0,
             tcp_rtt_max_ms: self.total_aggregate.tcp_rtt_max_us() as f64 / 1000.0,
             tcp_retransmit_ratio: self.total_aggregate.tcp_retransmit_ratio(),
             rate_achievement: 1.0, // not meaningful for final result
             assessment: if total_dropped > 0
-                || self.total_aggregate.scheduling_delay_count_over_1ms() as f64
+                || delay_over_1ms as f64
                     / total_requests.max(1) as f64
                     > 0.10
             {

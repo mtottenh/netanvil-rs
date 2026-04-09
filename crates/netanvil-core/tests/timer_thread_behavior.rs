@@ -62,7 +62,7 @@ fn timer_dispatches_at_correct_rate() {
 
     let mut count = 0u64;
     while let Ok(msg) = fire_rxs[0].try_recv() {
-        if matches!(msg, ScheduledRequest::Fire(_)) {
+        if matches!(msg, ScheduledRequest::Fire { .. }) {
             count += 1;
         }
     }
@@ -96,7 +96,7 @@ fn timer_dispatches_at_high_rate() {
         let mut count = 0u64;
         loop {
             match rx.recv_timeout(Duration::from_secs(5)) {
-                Ok(ScheduledRequest::Fire(_)) => count += 1,
+                Ok(ScheduledRequest::Fire { .. }) => count += 1,
                 Ok(ScheduledRequest::Stop) => break,
                 Ok(_) => {}
                 Err(_) => break,
@@ -140,7 +140,7 @@ fn timer_rate_update_propagates_to_schedulers() {
 
     let mut count = 0u64;
     while let Ok(msg) = fire_rxs[0].try_recv() {
-        if matches!(msg, ScheduledRequest::Fire(_)) {
+        if matches!(msg, ScheduledRequest::Fire { .. }) {
             count += 1;
         }
     }
@@ -310,7 +310,7 @@ fn timer_backpressure_detection() {
     // because the channel was full most of the time.
     let mut count = 0u64;
     while let Ok(msg) = fire_rxs[0].try_recv() {
-        if matches!(msg, ScheduledRequest::Fire(_) | ScheduledRequest::Stop) {
+        if matches!(msg, ScheduledRequest::Fire { .. } | ScheduledRequest::Stop) {
             count += 1;
         }
     }
@@ -346,7 +346,7 @@ fn timer_round_robin_distribution() {
     let mut counts = [0u64; 4];
     for (i, rx) in fire_rxs.iter().enumerate() {
         while let Ok(msg) = rx.try_recv() {
-            if matches!(msg, ScheduledRequest::Fire(_)) {
+            if matches!(msg, ScheduledRequest::Fire { .. }) {
                 counts[i] += 1;
             }
         }
@@ -387,7 +387,7 @@ fn timer_precision_intended_times_are_accurate() {
 
     let mut times = Vec::new();
     while let Ok(msg) = fire_rxs[0].try_recv() {
-        if let ScheduledRequest::Fire(t) = msg {
+        if let ScheduledRequest::Fire { intended_time: t, .. } = msg {
             times.push(t);
         }
     }
@@ -437,7 +437,7 @@ fn timer_with_poisson_scheduler_produces_correct_count() {
 
     let mut count = 0u64;
     while let Ok(msg) = fire_rxs[0].try_recv() {
-        if matches!(msg, ScheduledRequest::Fire(_)) {
+        if matches!(msg, ScheduledRequest::Fire { .. }) {
             count += 1;
         }
     }

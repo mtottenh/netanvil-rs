@@ -21,8 +21,12 @@ pub struct RequestContext {
     pub request_id: u64,
     /// When this request SHOULD have been sent (for coordinated omission tracking)
     pub intended_time: Instant,
-    /// When it was actually dispatched
+    /// When the timer thread sent the Fire event (after precision_sleep_sync).
+    pub sent_time: Instant,
+    /// When the I/O worker dequeued the fire event from the channel.
     pub actual_time: Instant,
+    /// When generate+transform completed, just before the async task was spawned.
+    pub dispatch_time: Instant,
     /// Which core is executing this request
     pub core_id: usize,
     /// Whether this request is selected for detailed sampling
@@ -46,7 +50,9 @@ pub struct HttpRequestSpec {
 pub struct ExecutionResult {
     pub request_id: u64,
     pub intended_time: Instant,
+    pub sent_time: Instant,
     pub actual_time: Instant,
+    pub dispatch_time: Instant,
     pub timing: TimingBreakdown,
     pub status: Option<u16>,
     /// Bytes sent to the target (request payload size).

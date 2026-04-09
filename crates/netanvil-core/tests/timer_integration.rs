@@ -44,7 +44,9 @@ impl RequestExecutor for MockExecutor {
         ExecutionResult {
             request_id: context.request_id,
             intended_time: context.intended_time,
+            sent_time: context.sent_time,
             actual_time: context.actual_time,
+            dispatch_time: context.dispatch_time,
             timing: TimingBreakdown {
                 total: Duration::from_micros(100),
                 ..Default::default()
@@ -355,7 +357,7 @@ fn timer_plus_workers_coordinated_omission_tracking() {
 
     // Send from another thread so the worker can process between messages
     std::thread::spawn(move || {
-        fire_tx.send(ScheduledRequest::Fire(intended_time)).unwrap();
+        fire_tx.send(ScheduledRequest::Fire { intended_time, sent_time: intended_time }).unwrap();
         // Give the worker time to process and spawn the task
         std::thread::sleep(Duration::from_millis(200));
         fire_tx.send(ScheduledRequest::Stop).unwrap();
@@ -381,7 +383,9 @@ fn timer_plus_workers_coordinated_omission_tracking() {
             ExecutionResult {
                 request_id: context.request_id,
                 intended_time: context.intended_time,
+                sent_time: context.sent_time,
                 actual_time: context.actual_time,
+                dispatch_time: context.dispatch_time,
                 timing: TimingBreakdown {
                     total: Duration::from_micros(50),
                     ..Default::default()

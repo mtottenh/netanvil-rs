@@ -24,14 +24,21 @@ pub struct MetricsSnapshot {
     pub window_start: Instant,
     /// Window end time
     pub window_end: Instant,
-    /// Sum of scheduling delays (intended→actual gap) in nanoseconds.
-    /// Used to compute mean delay for saturation detection.
-    pub scheduling_delay_sum_ns: u64,
-    /// Maximum scheduling delay in this window (nanoseconds).
-    pub scheduling_delay_max_ns: u64,
-    /// Number of requests with scheduling delay > 1ms.
-    /// Indicates systematic client-side backlog.
-    pub scheduling_delay_count_over_1ms: u64,
+    // Decomposed scheduling delay components (all nanoseconds).
+    // timer_lag = T_send - T_intended (timer thread spin-loop overshoot)
+    pub timer_lag_sum_ns: u64,
+    pub timer_lag_max_ns: u64,
+    // channel_transit = T_dequeue - T_send (message sitting in flume channel)
+    pub channel_transit_sum_ns: u64,
+    pub channel_transit_max_ns: u64,
+    // dispatch_gap = T_exec_start - T_dequeue (generate+transform+compio spawn)
+    pub dispatch_gap_sum_ns: u64,
+    pub dispatch_gap_max_ns: u64,
+    // Total delay = T_dispatch - T_intended (sum of all three components per request)
+    pub total_delay_sum_ns: u64,
+    pub total_delay_max_ns: u64,
+    /// Number of requests with total scheduling delay > 1ms.
+    pub total_delay_count_over_1ms: u64,
     /// Response header value distribution. Maps (header_name, header_value) -> count.
     /// Used for tracking response header distributions (e.g., X-Cache hit/miss).
     pub header_value_counts:
@@ -282,11 +289,23 @@ pub struct SaturationInfo {
     pub backpressure_drops: u64,
     /// Fraction of total attempted dispatches that were dropped (0.0-1.0).
     pub backpressure_ratio: f64,
-    /// Mean scheduling delay in milliseconds (intended_time → actual_time gap).
-    pub scheduling_delay_mean_ms: f64,
-    /// Max scheduling delay in milliseconds this window.
-    pub scheduling_delay_max_ms: f64,
-    /// Fraction of requests with scheduling delay > 1ms.
+    /// Mean timer lag in nanoseconds (T_send - T_intended).
+    pub timer_lag_mean_ns: u64,
+    /// Max timer lag in nanoseconds.
+    pub timer_lag_max_ns: u64,
+    /// Mean channel transit time in nanoseconds (T_dequeue - T_send).
+    pub channel_transit_mean_ns: u64,
+    /// Max channel transit time in nanoseconds.
+    pub channel_transit_max_ns: u64,
+    /// Mean dispatch gap in nanoseconds (T_exec_start - T_dequeue).
+    pub dispatch_gap_mean_ns: u64,
+    /// Max dispatch gap in nanoseconds.
+    pub dispatch_gap_max_ns: u64,
+    /// Mean total scheduling delay in nanoseconds (T_dispatch - T_intended).
+    pub scheduling_delay_mean_ns: u64,
+    /// Max total scheduling delay in nanoseconds.
+    pub scheduling_delay_max_ns: u64,
+    /// Fraction of requests with total scheduling delay > 1ms.
     pub delayed_request_ratio: f64,
     /// Ratio of achieved RPS to target RPS (1.0 = hitting target exactly).
     pub rate_achievement: f64,

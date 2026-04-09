@@ -636,12 +636,15 @@ mod tests {
         let targets = vec!["http://localhost:8080".to_string()];
         let mut gen =
             V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &targets).unwrap();
+        let now = std::time::Instant::now();
         let ctx = netanvil_types::RequestContext {
             request_id: 42,
             core_id: 1,
             is_sampled: false,
-            intended_time: std::time::Instant::now(),
-            actual_time: std::time::Instant::now(),
+            intended_time: now,
+            actual_time: now,
+            sent_time: now,
+            dispatch_time: now,
             session_id: None,
         };
         let spec = gen.generate(&ctx);
@@ -664,12 +667,15 @@ mod tests {
             }
         "#;
         let mut gen = V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &[]).unwrap();
+        let now = std::time::Instant::now();
         let ctx = netanvil_types::RequestContext {
             request_id: 7,
             core_id: 0,
             is_sampled: false,
-            intended_time: std::time::Instant::now(),
-            actual_time: std::time::Instant::now(),
+            intended_time: now,
+            actual_time: now,
+            sent_time: now,
+            dispatch_time: now,
             session_id: None,
         };
         let spec = gen.generate(&ctx);
@@ -730,12 +736,15 @@ mod tests {
         let mut gen =
             V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &["http://old.com".into()])
                 .unwrap();
+        let now = std::time::Instant::now();
         let ctx = netanvil_types::RequestContext {
             request_id: 0,
             core_id: 0,
             is_sampled: false,
-            intended_time: std::time::Instant::now(),
-            actual_time: std::time::Instant::now(),
+            intended_time: now,
+            actual_time: now,
+            sent_time: now,
+            dispatch_time: now,
             session_id: None,
         };
         assert_eq!(gen.generate(&ctx).url, "http://old.com");
@@ -749,12 +758,15 @@ mod tests {
             function generate(ctx) { return "not an object"; }
         "#;
         let mut gen = V8Generator::<netanvil_types::HttpRequestSpec>::new(script, &[]).unwrap();
+        let now = std::time::Instant::now();
         let ctx = netanvil_types::RequestContext {
             request_id: 0,
             core_id: 0,
             is_sampled: false,
-            intended_time: std::time::Instant::now(),
-            actual_time: std::time::Instant::now(),
+            intended_time: now,
+            actual_time: now,
+            sent_time: now,
+            dispatch_time: now,
             session_id: None,
         };
         assert_eq!(gen.generate(&ctx).url, "http://error.invalid");
@@ -780,12 +792,15 @@ mod tests {
                 return { method: "GET", url: "http://" + state, headers: [], body: null };
             }
         "#;
+        let now = std::time::Instant::now();
         let ctx = netanvil_types::RequestContext {
             request_id: 0,
             core_id: 0,
             is_sampled: false,
-            intended_time: std::time::Instant::now(),
-            actual_time: std::time::Instant::now(),
+            intended_time: now,
+            actual_time: now,
+            sent_time: now,
+            dispatch_time: now,
             session_id: None,
         };
         let mut gen_a = V8Generator::<netanvil_types::HttpRequestSpec>::new(script_a, &[]).unwrap();

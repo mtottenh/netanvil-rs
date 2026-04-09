@@ -37,7 +37,9 @@ impl RequestExecutor for MockExecutor {
         ExecutionResult {
             request_id: context.request_id,
             intended_time: context.intended_time,
+            sent_time: context.sent_time,
             actual_time: context.actual_time,
+            dispatch_time: context.dispatch_time,
             timing: TimingBreakdown {
                 total: self.latency,
                 ..Default::default()
@@ -66,7 +68,9 @@ impl RequestExecutor for ErrorExecutor {
         ExecutionResult {
             request_id: context.request_id,
             intended_time: context.intended_time,
+            sent_time: context.sent_time,
             actual_time: context.actual_time,
+            dispatch_time: context.dispatch_time,
             timing: TimingBreakdown {
                 total: Duration::from_micros(50),
                 ..Default::default()

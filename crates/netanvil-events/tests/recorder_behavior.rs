@@ -39,6 +39,8 @@ fn make_result(
         request_id,
         intended_time: now,
         actual_time: now,
+        sent_time: now,
+        dispatch_time: now,
         timing: TimingBreakdown {
             dns_lookup: Duration::from_micros(100),
             tcp_connect: Duration::from_micros(200),

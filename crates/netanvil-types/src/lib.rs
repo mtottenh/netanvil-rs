@@ -20,10 +20,11 @@ pub mod udp_spec;
 
 pub use command::{ScheduledRequest, TimerCommand, WorkerCommand};
 pub use config::{
-    BackoffConfig, BaselineMultiplier, BoundsConfig, ConnectionConfig, ConnectionPolicy,
-    ConstraintClassConfig, ConstraintConfig, CooldownPolicyConfig, EventLogOutput,
-    ExternalConstraintConfig, ExternalMetricRef, FloorPolicyConfig, GainsConfig, HttpVersion,
-    IncreasePolicyConfig, InternalMetric, MetricRef, MissingSignalBehavior, PluginConfig,
+    BackoffConfig, BaselineMultiplier, BoundsConfig, CongestionAvoidanceConfig, ConnectionConfig,
+    ConnectionPolicy, ConstraintClassConfig, ConstraintConfig, CooldownPolicyConfig,
+    EventLogOutput, ExternalConstraintConfig, ExternalMetricRef, FloorPolicyConfig, GainsConfig,
+    HttpVersion, IncreasePolicyConfig, InternalMetric, MetricRef, MissingSignalBehavior,
+    PluginConfig,
     PluginType, ProtocolConfig, RateConfig, RateChangeLimitsConfig, ResponseSignalConfig,
     SchedulerConfig, SetpointConstraintConfig, SignalAggregation, SignalDirection, SmootherConfig,
     TargetMetric, TestConfig, ThresholdConstraintConfig, ThresholdSource, TlsConfig, WarmupConfig,
@@ -63,6 +64,8 @@ mod tests {
             request_id: 42,
             intended_time: now,
             actual_time: now,
+            sent_time: now,
+            dispatch_time: now,
             core_id: 0,
             is_sampled: false,
             session_id: None,

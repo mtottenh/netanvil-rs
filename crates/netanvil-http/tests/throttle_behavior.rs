@@ -216,7 +216,9 @@ fn make_context() -> RequestContext {
     RequestContext {
         request_id: 1,
         intended_time: now,
+        sent_time: now,
         actual_time: now,
+        dispatch_time: now,
         core_id: 0,
         is_sampled: false,
         session_id: None,

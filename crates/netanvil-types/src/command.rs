@@ -49,7 +49,10 @@ pub enum TimerCommand {
 #[derive(Debug, Clone)]
 pub enum ScheduledRequest {
     /// Fire a request at the given intended send time.
-    Fire(std::time::Instant),
+    Fire {
+        intended_time: std::time::Instant,
+        sent_time: std::time::Instant,
+    },
     /// Replace the target URL list.
     UpdateTargets(Vec<String>),
     /// Replace the header list.

@@ -2,12 +2,17 @@
 //!
 //! Responds to any query with NOERROR and a synthetic A record (127.0.0.1).
 //! Runs on a background compio thread, binding to a random UDP port.
+//!
+//! When connected UDP is enabled (idle_timeout > 0), creates per-client
+//! connected sockets for kernel-level demuxing, same as the UDP echo server.
 
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use compio::net::{SocketOpts, UdpSocket};
 use compio::BufResult;
@@ -34,11 +39,13 @@ impl Drop for DnsEchoHandle {
 }
 
 /// Start a DNS echo server on a random port.
+/// Uses unconnected mode (backward compat).
 pub fn start_dns_echo() -> DnsEchoHandle {
     start_dns_echo_on("127.0.0.1:0")
 }
 
 /// Start a DNS echo server on the specified address.
+/// Uses unconnected mode (backward compat).
 pub fn start_dns_echo_on(addr: &str) -> DnsEchoHandle {
     start_dns_echo_with_config(ServerConfig {
         addr: addr.to_string(),
@@ -65,10 +72,19 @@ pub fn start_dns_echo_with_config(config: ServerConfig) -> DnsEchoHandle {
                 let sock = UdpSocket::bind_with_options(&config.addr, &socket_opts)
                     .await
                     .unwrap();
-                addr_tx.send(sock.local_addr().unwrap()).unwrap();
+                let local_addr = sock.local_addr().unwrap();
+                let local_port = local_addr.port();
+                addr_tx.send(local_addr).unwrap();
 
                 let pool = Rc::new(make_pool(&config, 4096, 32));
-                dns_echo_loop(sock, &shutdown_clone, &pool).await;
+                dns_echo_loop(
+                    sock,
+                    &shutdown_clone,
+                    &pool,
+                    config.udp_idle_timeout_secs,
+                    local_port,
+                )
+                .await;
             });
         })
         .unwrap();
@@ -88,13 +104,29 @@ pub fn start_dns_echo_with_config(config: ServerConfig) -> DnsEchoHandle {
 ///
 /// Used by both `start_dns_echo_with_config` (single-worker) and
 /// `TestServer` (multi-worker with SO_REUSEPORT).
-pub(crate) async fn dns_echo_loop(sock: UdpSocket, shutdown: &AtomicBool, pool: &BufPool) {
+///
+/// When `idle_timeout_secs > 0`, enables connected UDP mode for DNS.
+pub(crate) async fn dns_echo_loop(
+    sock: UdpSocket,
+    shutdown: &AtomicBool,
+    pool: &BufPool,
+    idle_timeout_secs: u32,
+    local_port: u16,
+) {
+    if idle_timeout_secs > 0 {
+        dns_echo_loop_connected(sock, shutdown, pool, idle_timeout_secs, local_port).await;
+    } else {
+        dns_echo_loop_unconnected(sock, shutdown, pool).await;
+    }
+}
+
+/// Unconnected DNS echo loop — original behavior.
+async fn dns_echo_loop_unconnected(sock: UdpSocket, shutdown: &AtomicBool, pool: &BufPool) {
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
 
-        // Take buffer at full size for recv (compio reads into 0..len).
         let buf = pool.take();
         let recv = compio::time::timeout(Duration::from_millis(100), sock.recv_from(buf)).await;
 
@@ -110,6 +142,143 @@ pub(crate) async fn dns_echo_loop(sock: UdpSocket, shutdown: &AtomicBool, pool: 
             }
             Ok(BufResult(Err(_), recv_buf)) => {
                 pool.give(recv_buf);
+            }
+            Err(_timeout) => {
+                continue;
+            }
+        }
+    }
+}
+
+/// Connected DNS echo loop — per-client connected sockets with idle cleanup.
+async fn dns_echo_loop_connected(
+    sock: UdpSocket,
+    shutdown: &AtomicBool,
+    pool: &BufPool,
+    idle_timeout_secs: u32,
+    local_port: u16,
+) {
+    let idle_timeout = Duration::from_secs(idle_timeout_secs as u64);
+    let active_clients: Rc<RefCell<HashSet<SocketAddr>>> = Rc::new(RefCell::new(HashSet::new()));
+
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let buf = pool.take();
+        let recv = compio::time::timeout(Duration::from_millis(100), sock.recv_from(buf)).await;
+
+        match recv {
+            Ok(BufResult(Ok((n, peer)), recv_buf)) => {
+                let is_known = active_clients.borrow().contains(&peer);
+
+                if is_known {
+                    // Race window fallback: respond on listener.
+                    if n >= 12 {
+                        let response = build_response(&recv_buf[..n]);
+                        pool.give(recv_buf);
+                        let BufResult(_, _) = sock.send_to(response, peer).await;
+                    } else {
+                        pool.give(recv_buf);
+                    }
+                } else {
+                    // New peer: respond on listener, then spawn connected handler.
+                    if n >= 12 {
+                        let response = build_response(&recv_buf[..n]);
+                        pool.give(recv_buf);
+                        let BufResult(_, _) = sock.send_to(response, peer).await;
+                    } else {
+                        pool.give(recv_buf);
+                    }
+
+                    match crate::create_connected_udp(local_port, peer, 4 * 1024 * 1024) {
+                        Ok(std_socket) => match UdpSocket::from_std(std_socket) {
+                            Ok(connected) => {
+                                active_clients.borrow_mut().insert(peer);
+                                let clients = Rc::clone(&active_clients);
+                                let sd_flag = shutdown as *const AtomicBool;
+                                let sd_ref = unsafe { &*sd_flag };
+                                let handler_pool = pool as *const BufPool;
+                                let handler_pool_ref = unsafe { &*handler_pool };
+                                compio::runtime::spawn(async move {
+                                    handle_connected_dns_client(
+                                        connected,
+                                        sd_ref,
+                                        handler_pool_ref,
+                                        idle_timeout,
+                                    )
+                                    .await;
+                                    clients.borrow_mut().remove(&peer);
+                                })
+                                .detach();
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "failed to convert connected DNS socket for {}: {}",
+                                    peer,
+                                    e
+                                );
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!(
+                                "failed to create connected DNS socket for {}: {} (falling back to listener)",
+                                peer,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(BufResult(Err(_), recv_buf)) => {
+                pool.give(recv_buf);
+            }
+            Err(_timeout) => {
+                continue;
+            }
+        }
+    }
+}
+
+/// Handler for a single connected DNS client.
+async fn handle_connected_dns_client(
+    socket: UdpSocket,
+    shutdown: &AtomicBool,
+    pool: &BufPool,
+    idle_timeout: Duration,
+) {
+    let mut last_activity = Instant::now();
+
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+        if last_activity.elapsed() > idle_timeout {
+            break;
+        }
+
+        let buf = pool.take();
+        let recv_result = compio::time::timeout(Duration::from_millis(500), socket.recv(buf)).await;
+
+        match recv_result {
+            Ok(BufResult(Ok(n), recv_buf)) => {
+                if n == 0 {
+                    pool.give(recv_buf);
+                    break;
+                }
+                last_activity = Instant::now();
+                if n >= 12 {
+                    let response = build_response(&recv_buf[..n]);
+                    pool.give(recv_buf);
+                    let BufResult(_, _) = socket.send(response).await;
+                } else {
+                    pool.give(recv_buf);
+                }
+            }
+            Ok(BufResult(Err(_), recv_buf)) => {
+                pool.give(recv_buf);
+                continue;
             }
             Err(_timeout) => {
                 continue;

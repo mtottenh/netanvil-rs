@@ -2,12 +2,20 @@
 //!
 //! Spawns a background thread running a compio runtime that receives UDP
 //! datagrams and echoes them back to the sender.
+//!
+//! When connected UDP is enabled (idle_timeout > 0), the listener creates
+//! per-client connected sockets via SO_REUSEPORT + connect(). The kernel
+//! routes subsequent packets from that peer to the connected socket (4-tuple
+//! match wins over 2-tuple in `__udp4_lib_lookup`), providing kernel-level
+//! demuxing, route caching, and simpler io_uring ops (send/recv vs sendmsg/recvmsg).
 
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use compio::buf::BufResult;
 use compio::net::SocketOpts;
@@ -38,6 +46,7 @@ impl Drop for UdpEchoHandle {
 /// Start a UDP echo server on a random port (127.0.0.1:0).
 ///
 /// Returns a handle that stops the server when dropped.
+/// Uses unconnected mode (backward compat).
 pub fn start_udp_echo() -> UdpEchoHandle {
     start_udp_echo_on("127.0.0.1:0")
 }
@@ -46,6 +55,7 @@ pub fn start_udp_echo() -> UdpEchoHandle {
 ///
 /// Use `"127.0.0.1:0"` for a random port or `"127.0.0.1:9000"` for a fixed one.
 /// Returns a handle that stops the server when dropped.
+/// Uses unconnected mode (backward compat).
 pub fn start_udp_echo_on(addr: &str) -> UdpEchoHandle {
     start_udp_echo_with_config(ServerConfig {
         addr: addr.to_string(),
@@ -73,12 +83,20 @@ pub fn start_udp_echo_with_config(config: ServerConfig) -> UdpEchoHandle {
                     .await
                     .unwrap();
                 let local_addr = socket.local_addr().unwrap();
+                let local_port = local_addr.port();
                 addr_tx.send(local_addr).unwrap();
 
                 tracing::info!("UDP echo server listening on {}", local_addr);
 
                 let pool = Rc::new(make_pool(&config, 65536, 64));
-                udp_echo_loop(socket, &shutdown_clone, &pool).await;
+                udp_echo_loop(
+                    socket,
+                    &shutdown_clone,
+                    &pool,
+                    config.udp_idle_timeout_secs,
+                    local_port,
+                )
+                .await;
             });
         })
         .expect("failed to spawn UDP echo server thread");
@@ -101,7 +119,26 @@ const MAX_LOGGED_ERRORS: u64 = 10;
 ///
 /// Used by both `start_udp_echo_with_config` (single-worker) and
 /// `TestServer` (multi-worker with SO_REUSEPORT).
+///
+/// When `idle_timeout_secs > 0`, enables connected UDP mode: new peers get
+/// a dedicated connected socket for kernel-level demuxing. When 0, uses the
+/// classic unconnected recvfrom/sendto path.
 pub(crate) async fn udp_echo_loop(
+    socket: compio::net::UdpSocket,
+    shutdown: &AtomicBool,
+    pool: &BufPool,
+    idle_timeout_secs: u32,
+    local_port: u16,
+) {
+    if idle_timeout_secs > 0 {
+        udp_echo_loop_connected(socket, shutdown, pool, idle_timeout_secs, local_port).await;
+    } else {
+        udp_echo_loop_unconnected(socket, shutdown, pool).await;
+    }
+}
+
+/// Unconnected UDP echo loop — original behavior.
+async fn udp_echo_loop_unconnected(
     socket: compio::net::UdpSocket,
     shutdown: &AtomicBool,
     pool: &BufPool,
@@ -114,14 +151,12 @@ pub(crate) async fn udp_echo_loop(
             break;
         }
 
-        // Take a buffer at full size for recv (compio reads into 0..len).
         let buf = pool.take();
         let recv_result =
             compio::time::timeout(Duration::from_millis(100), socket.recv_from(buf)).await;
 
         match recv_result {
             Ok(BufResult(Ok((n, peer)), recv_buf)) => {
-                // Take a send buffer, copy the received data, send it back.
                 let mut send_buf = pool.take();
                 send_buf.truncate(n);
                 if send_buf.len() < n {
@@ -149,6 +184,175 @@ pub(crate) async fn udp_echo_loop(
                         MAX_LOGGED_ERRORS
                     );
                 }
+                continue;
+            }
+            Err(_timeout) => {
+                continue;
+            }
+        }
+    }
+}
+
+/// Connected UDP echo loop — per-client connected sockets with idle cleanup.
+async fn udp_echo_loop_connected(
+    socket: compio::net::UdpSocket,
+    shutdown: &AtomicBool,
+    pool: &BufPool,
+    idle_timeout_secs: u32,
+    local_port: u16,
+) {
+    let idle_timeout = Duration::from_secs(idle_timeout_secs as u64);
+    let active_clients: Rc<RefCell<HashSet<SocketAddr>>> = Rc::new(RefCell::new(HashSet::new()));
+    let mut error_count: u64 = 0;
+
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            tracing::info!("UDP connected echo loop shutting down");
+            break;
+        }
+
+        let buf = pool.take();
+        let recv_result =
+            compio::time::timeout(Duration::from_millis(100), socket.recv_from(buf)).await;
+
+        match recv_result {
+            Ok(BufResult(Ok((n, peer)), recv_buf)) => {
+                let is_known = active_clients.borrow().contains(&peer);
+
+                if is_known {
+                    // Kernel should have routed to connected socket; this is a
+                    // brief race window. Echo on listener as fallback.
+                    let mut send_buf = pool.take();
+                    send_buf.truncate(n);
+                    if send_buf.len() < n {
+                        send_buf.resize(n, 0);
+                    }
+                    send_buf[..n].copy_from_slice(&recv_buf[..n]);
+                    pool.give(recv_buf);
+                    let BufResult(_, returned) = socket.send_to(send_buf, peer).await;
+                    pool.give(returned);
+                } else {
+                    // New peer: echo first packet on listener, then spawn connected handler.
+                    let mut send_buf = pool.take();
+                    send_buf.truncate(n);
+                    if send_buf.len() < n {
+                        send_buf.resize(n, 0);
+                    }
+                    send_buf[..n].copy_from_slice(&recv_buf[..n]);
+                    pool.give(recv_buf);
+                    let BufResult(_, returned) = socket.send_to(send_buf, peer).await;
+                    pool.give(returned);
+
+                    // Create connected socket
+                    match crate::create_connected_udp(local_port, peer, 4 * 1024 * 1024) {
+                        Ok(std_socket) => {
+                            match compio::net::UdpSocket::from_std(std_socket) {
+                                Ok(connected) => {
+                                    active_clients.borrow_mut().insert(peer);
+                                    let clients = Rc::clone(&active_clients);
+                                    let sd_flag = shutdown as *const AtomicBool;
+                                    // SAFETY: shutdown lives for the lifetime of the echo loop,
+                                    // and all spawned tasks are on the same single-threaded runtime.
+                                    let sd_ref = unsafe { &*sd_flag };
+                                    let handler_pool = pool as *const BufPool;
+                                    let handler_pool_ref = unsafe { &*handler_pool };
+                                    compio::runtime::spawn(async move {
+                                        handle_connected_udp_client(
+                                            connected,
+                                            sd_ref,
+                                            handler_pool_ref,
+                                            idle_timeout,
+                                        )
+                                        .await;
+                                        clients.borrow_mut().remove(&peer);
+                                    })
+                                    .detach();
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "failed to convert connected UDP socket for {}: {}",
+                                        peer,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "failed to create connected UDP socket for {}: {} (falling back to listener)",
+                                peer,
+                                e
+                            );
+                            // Already echoed on listener above — no additional action needed.
+                        }
+                    }
+                }
+            }
+            Ok(BufResult(Err(e), recv_buf)) => {
+                pool.give(recv_buf);
+                error_count += 1;
+                if error_count <= MAX_LOGGED_ERRORS {
+                    tracing::warn!(
+                        "UDP recv error ({}/{}): {}",
+                        error_count,
+                        MAX_LOGGED_ERRORS,
+                        e
+                    );
+                } else if error_count == MAX_LOGGED_ERRORS + 1 {
+                    tracing::warn!(
+                        "UDP recv error logging suppressed after {} errors",
+                        MAX_LOGGED_ERRORS
+                    );
+                }
+                continue;
+            }
+            Err(_timeout) => {
+                continue;
+            }
+        }
+    }
+}
+
+/// Handler for a single connected UDP client. Runs recv()/send() in a loop
+/// until idle timeout or shutdown.
+async fn handle_connected_udp_client(
+    socket: compio::net::UdpSocket,
+    shutdown: &AtomicBool,
+    pool: &BufPool,
+    idle_timeout: Duration,
+) {
+    let mut last_activity = Instant::now();
+
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+        if last_activity.elapsed() > idle_timeout {
+            break;
+        }
+
+        let buf = pool.take();
+        let recv_result = compio::time::timeout(Duration::from_millis(500), socket.recv(buf)).await;
+
+        match recv_result {
+            Ok(BufResult(Ok(n), recv_buf)) => {
+                if n == 0 {
+                    pool.give(recv_buf);
+                    break;
+                }
+                last_activity = Instant::now();
+                let mut send_buf = pool.take();
+                send_buf.truncate(n);
+                if send_buf.len() < n {
+                    send_buf.resize(n, 0);
+                }
+                send_buf[..n].copy_from_slice(&recv_buf[..n]);
+                pool.give(recv_buf);
+                let BufResult(_, returned) = socket.send(send_buf).await;
+                pool.give(returned);
+            }
+            Ok(BufResult(Err(_), recv_buf)) => {
+                pool.give(recv_buf);
                 continue;
             }
             Err(_timeout) => {

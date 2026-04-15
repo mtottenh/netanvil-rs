@@ -31,6 +31,12 @@ struct Args {
     /// Default: buffers filled with deterministic PRNG data.
     #[arg(long)]
     fill_data: Option<String>,
+
+    /// Connected UDP idle timeout in seconds.
+    /// 0 = disabled (use unconnected recvfrom/sendto). When > 0, creates
+    /// per-client connected sockets for kernel-level demuxing.
+    #[arg(long, default_value = "30")]
+    udp_idle_timeout: u32,
 }
 
 fn main() {
@@ -44,8 +50,11 @@ fn main() {
         })
     });
 
-    let mut config = netanvil_test_servers::ServerConfig::default();
-    config.fill_pattern = fill_pattern;
+    let config = netanvil_test_servers::ServerConfig {
+        fill_pattern,
+        udp_idle_timeout_secs: args.udp_idle_timeout,
+        ..Default::default()
+    };
 
     let mut builder = TestServer::builder()
         .workers(args.workers)

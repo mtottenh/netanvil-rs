@@ -37,6 +37,11 @@ pub struct ServerConfig {
     /// If None, buffers are filled with deterministic PRNG data.
     /// Loaded from `--fill-data /path/to/file` on the CLI.
     pub fill_pattern: Option<Vec<u8>>,
+    /// Idle timeout for connected UDP sockets (seconds).
+    /// 0 = disabled (use unconnected recvfrom/sendto echo — backward compat).
+    /// When > 0, the server creates per-client connected sockets for kernel-level
+    /// demuxing and route caching.
+    pub udp_idle_timeout_secs: u32,
 }
 
 impl Default for ServerConfig {
@@ -49,6 +54,7 @@ impl Default for ServerConfig {
             num_workers: 1,
             pin_cores: true,
             fill_pattern: None,
+            udp_idle_timeout_secs: 0,
         }
     }
 }
@@ -149,6 +155,14 @@ impl TestServerBuilder {
     /// Enable or disable CPU core pinning (default: true).
     pub fn pin_cores(mut self, pin: bool) -> Self {
         self.config.pin_cores = pin;
+        self
+    }
+
+    /// Set the idle timeout for connected UDP sockets (seconds).
+    /// 0 = disabled (unconnected mode). When > 0, the server creates per-client
+    /// connected sockets for kernel-level demuxing.
+    pub fn udp_idle_timeout(mut self, secs: u32) -> Self {
+        self.config.udp_idle_timeout_secs = secs;
         self
     }
 
@@ -273,8 +287,17 @@ impl TestServerBuilder {
                         if let Some(socket) = udp_socket {
                             let sd = shutdown.clone();
                             let pool = std::rc::Rc::new(crate::tcp::make_pool(&config, 65536, 64));
+                            let idle_timeout_secs = config.udp_idle_timeout_secs;
+                            let local_port = udp_port.unwrap();
                             compio::runtime::spawn(async move {
-                                crate::udp::udp_echo_loop(socket, &sd, &pool).await;
+                                crate::udp::udp_echo_loop(
+                                    socket,
+                                    &sd,
+                                    &pool,
+                                    idle_timeout_secs,
+                                    local_port,
+                                )
+                                .await;
                             })
                             .detach();
                         }
@@ -282,8 +305,17 @@ impl TestServerBuilder {
                         if let Some(socket) = dns_socket {
                             let sd = shutdown.clone();
                             let pool = std::rc::Rc::new(crate::tcp::make_pool(&config, 4096, 32));
+                            let idle_timeout_secs = config.udp_idle_timeout_secs;
+                            let local_port = dns_port.unwrap();
                             compio::runtime::spawn(async move {
-                                crate::dns::dns_echo_loop(socket, &sd, &pool).await;
+                                crate::dns::dns_echo_loop(
+                                    socket,
+                                    &sd,
+                                    &pool,
+                                    idle_timeout_secs,
+                                    local_port,
+                                )
+                                .await;
                             })
                             .detach();
                         }
@@ -354,5 +386,29 @@ fn bind_udp_reuse_port(addr: SocketAddr, buf_size: usize) -> std::io::Result<std
     socket.set_send_buffer_size(buf_size)?;
     socket.set_nonblocking(true)?;
     socket.bind(&addr.into())?;
+    Ok(socket.into())
+}
+
+/// Create a connected UDP socket bound to `local_port` and connected to `peer`.
+///
+/// Uses SO_REUSEPORT so the kernel routes packets from `peer` to this socket
+/// (4-tuple match wins over 2-tuple on the listener). The socket is created
+/// via socket2 with options set before bind, then connected before conversion
+/// to `std::net::UdpSocket`.
+pub(crate) fn create_connected_udp(
+    local_port: u16,
+    peer: SocketAddr,
+    buf_size: usize,
+) -> std::io::Result<std::net::UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_reuse_address(true)?;
+    socket.set_reuse_port(true)?;
+    socket.set_recv_buffer_size(buf_size)?;
+    socket.set_send_buffer_size(buf_size)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&SocketAddr::from(([0, 0, 0, 0], local_port)).into())?;
+    socket.connect(&peer.into())?;
     Ok(socket.into())
 }

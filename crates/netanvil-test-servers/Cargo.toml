@@ -30,6 +30,12 @@ path = "src/bin/dns_echo.rs"
 name = "netanvil-test-server"
 path = "src/bin/test_server.rs"
 
+[dev-dependencies]
+netanvil-core = { workspace = true }
+netanvil-types = { workspace = true }
+netanvil-tcp = { workspace = true }
+netanvil-udp = { workspace = true }
+
 [package.metadata.deb]
 maintainer = "NetAnvil-RS Contributors"
 copyright = "2024, NetAnvil-RS Contributors"

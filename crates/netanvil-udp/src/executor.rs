@@ -1,4 +1,5 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::net::SocketAddr;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -13,15 +14,21 @@ use crate::spec::UdpRequestSpec;
 /// 8-byte little-endian sequence number header prepended to each datagram.
 const SEQ_HEADER_LEN: usize = 8;
 
-/// UDP executor with lazy-initialized socket reuse and per-core loss tracking.
+/// UDP executor with lazy-initialized connected socket and per-core loss tracking.
 ///
 /// Each outbound datagram carries an 8-byte sequence number header (prepended
 /// by the generator).  When a response arrives, the executor extracts the
 /// echoed sequence number and feeds it to the [`LossTracker`] bitmap, which
 /// detects loss without waiting for the full request timeout.
+///
+/// The socket is connected to its target on first use. The kernel caches the
+/// route at connect() time, eliminating per-packet route lookup overhead.
+/// Connected sockets also use simpler io_uring ops (SEND/RECV instead of
+/// SENDMSG/RECVMSG — no sockaddr per packet).
 pub struct UdpExecutor {
     request_timeout: Duration,
     socket: RefCell<Option<compio::net::UdpSocket>>,
+    connected_to: Cell<Option<SocketAddr>>,
     tracker: Rc<RefCell<LossTracker>>,
 }
 
@@ -36,6 +43,7 @@ impl UdpExecutor {
         Self {
             request_timeout: Duration::from_secs(5),
             socket: RefCell::new(None),
+            connected_to: Cell::new(None),
             tracker: Rc::new(RefCell::new(LossTracker::new())),
         }
     }
@@ -44,6 +52,7 @@ impl UdpExecutor {
         Self {
             request_timeout: timeout,
             socket: RefCell::new(None),
+            connected_to: Cell::new(None),
             tracker: Rc::new(RefCell::new(LossTracker::new())),
         }
     }
@@ -150,13 +159,23 @@ impl UdpExecutor {
         spec: &UdpRequestSpec,
         start: Instant,
     ) -> Result<(u64, TimingBreakdown, Option<u64>), ExecutionError> {
-        // Lazily bind socket on first use.
-        let need_init = self.socket.borrow().is_none();
+        // Lazily bind and connect socket on first use, or reconnect on target change.
+        let need_init = {
+            let guard = self.socket.borrow();
+            guard.is_none() || self.connected_to.get() != Some(spec.target)
+        };
         if need_init {
+            // Drop old socket if target changed.
+            *self.socket.borrow_mut() = None;
+
             let sock = compio::net::UdpSocket::bind("0.0.0.0:0")
                 .await
                 .map_err(|e| ExecutionError::Connect(format!("UDP bind: {e}")))?;
+            sock.connect(spec.target)
+                .await
+                .map_err(|e| ExecutionError::Connect(format!("UDP connect: {e}")))?;
             *self.socket.borrow_mut() = Some(sock);
+            self.connected_to.set(Some(spec.target));
         }
 
         let sock = self
@@ -165,9 +184,8 @@ impl UdpExecutor {
             .take()
             .ok_or_else(|| ExecutionError::Connect("socket unavailable".into()))?;
 
-        // Send datagram.
-        let BufResult(result, _returned_buf) =
-            sock.send_to(spec.payload.clone(), spec.target).await;
+        // Send datagram on connected socket (no address needed).
+        let BufResult(result, _returned_buf) = sock.send(spec.payload.clone()).await;
         if let Err(e) = result {
             *self.socket.borrow_mut() = Some(sock);
             return Err(ExecutionError::Protocol(format!("send: {e}")));
@@ -180,9 +198,9 @@ impl UdpExecutor {
         if spec.expect_response {
             let recv_start = Instant::now();
             let buf = vec![0u8; spec.response_max_bytes];
-            let BufResult(result, returned_buf) = sock.recv_from(buf).await;
+            let BufResult(result, returned_buf) = sock.recv(buf).await;
             match result {
-                Ok((n, _addr)) => {
+                Ok(n) => {
                     ttfb = recv_start.elapsed();
                     response_size = n as u64;
                     // Extract echoed seq_no from the response header.

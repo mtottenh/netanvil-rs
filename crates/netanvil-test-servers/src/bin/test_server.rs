@@ -26,15 +26,31 @@ struct Args {
     /// Pin workers to CPU cores.
     #[arg(long, default_value = "true")]
     pin_cores: bool,
+
+    /// Path to a file whose contents are tiled across write buffers.
+    /// Default: buffers filled with deterministic PRNG data.
+    #[arg(long)]
+    fill_data: Option<String>,
 }
 
 fn main() {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
 
+    let fill_pattern = args.fill_data.map(|path| {
+        std::fs::read(&path).unwrap_or_else(|e| {
+            eprintln!("Failed to read fill-data file '{}': {}", path, e);
+            std::process::exit(1);
+        })
+    });
+
+    let mut config = netanvil_test_servers::ServerConfig::default();
+    config.fill_pattern = fill_pattern;
+
     let mut builder = TestServer::builder()
         .workers(args.workers)
-        .pin_cores(args.pin_cores);
+        .pin_cores(args.pin_cores)
+        .config(config);
 
     if let Some(port) = args.tcp_port {
         builder = builder.tcp(port);

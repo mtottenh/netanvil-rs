@@ -14,6 +14,7 @@ clap = { workspace = true }
 tracing-subscriber = { workspace = true }
 core_affinity = { workspace = true }
 socket2 = { workspace = true }
+rand = { workspace = true }
 
 [[bin]]
 name = "tcp-echo"
@@ -32,6 +33,7 @@ name = "netanvil-test-server"
 path = "src/bin/test_server.rs"
 
 [dev-dependencies]
+compio = { workspace = true }
 netanvil-core = { workspace = true }
 netanvil-types = { workspace = true }
 netanvil-tcp = { workspace = true }

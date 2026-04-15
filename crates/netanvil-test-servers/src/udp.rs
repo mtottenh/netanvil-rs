@@ -4,6 +4,7 @@
 //! datagrams and echoes them back to the sender.
 
 use std::net::SocketAddr;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,6 +12,8 @@ use std::time::Duration;
 use compio::buf::BufResult;
 use compio::net::SocketOpts;
 
+use crate::bufpool::BufPool;
+use crate::tcp::make_pool;
 use crate::ServerConfig;
 
 /// Handle to a running UDP echo server.
@@ -74,7 +77,8 @@ pub fn start_udp_echo_with_config(config: ServerConfig) -> UdpEchoHandle {
 
                 tracing::info!("UDP echo server listening on {}", local_addr);
 
-                udp_echo_loop(socket, &shutdown_clone).await;
+                let pool = Rc::new(make_pool(&config, 65536, 64));
+                udp_echo_loop(socket, &shutdown_clone, &pool).await;
             });
         })
         .expect("failed to spawn UDP echo server thread");
@@ -97,7 +101,11 @@ const MAX_LOGGED_ERRORS: u64 = 10;
 ///
 /// Used by both `start_udp_echo_with_config` (single-worker) and
 /// `TestServer` (multi-worker with SO_REUSEPORT).
-pub(crate) async fn udp_echo_loop(socket: compio::net::UdpSocket, shutdown: &AtomicBool) {
+pub(crate) async fn udp_echo_loop(
+    socket: compio::net::UdpSocket,
+    shutdown: &AtomicBool,
+    pool: &BufPool,
+) {
     let mut error_count: u64 = 0;
 
     loop {
@@ -106,16 +114,27 @@ pub(crate) async fn udp_echo_loop(socket: compio::net::UdpSocket, shutdown: &Ato
             break;
         }
 
-        let buf = vec![0u8; 65536];
+        // Take a buffer at full size for recv (compio reads into 0..len).
+        let buf = pool.take();
         let recv_result =
             compio::time::timeout(Duration::from_millis(100), socket.recv_from(buf)).await;
 
         match recv_result {
-            Ok(BufResult(Ok((n, peer)), buf)) => {
-                let response = buf[..n].to_vec();
-                let _ = socket.send_to(response, peer).await;
+            Ok(BufResult(Ok((n, peer)), recv_buf)) => {
+                // Take a send buffer, copy the received data, send it back.
+                let mut send_buf = pool.take();
+                send_buf.truncate(n);
+                if send_buf.len() < n {
+                    send_buf.resize(n, 0);
+                }
+                send_buf[..n].copy_from_slice(&recv_buf[..n]);
+                pool.give(recv_buf);
+
+                let BufResult(_, returned) = socket.send_to(send_buf, peer).await;
+                pool.give(returned);
             }
-            Ok(BufResult(Err(e), _)) => {
+            Ok(BufResult(Err(e), recv_buf)) => {
+                pool.give(recv_buf);
                 error_count += 1;
                 if error_count <= MAX_LOGGED_ERRORS {
                     tracing::warn!(

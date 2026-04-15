@@ -4,6 +4,7 @@
 //! Runs on a background compio thread, binding to a random UDP port.
 
 use std::net::SocketAddr;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,6 +12,8 @@ use std::time::Duration;
 use compio::net::{SocketOpts, UdpSocket};
 use compio::BufResult;
 
+use crate::bufpool::BufPool;
+use crate::tcp::make_pool;
 use crate::ServerConfig;
 
 /// Handle to a running DNS echo server.
@@ -64,7 +67,8 @@ pub fn start_dns_echo_with_config(config: ServerConfig) -> DnsEchoHandle {
                     .unwrap();
                 addr_tx.send(sock.local_addr().unwrap()).unwrap();
 
-                dns_echo_loop(sock, &shutdown_clone).await;
+                let pool = Rc::new(make_pool(&config, 4096, 32));
+                dns_echo_loop(sock, &shutdown_clone, &pool).await;
             });
         })
         .unwrap();
@@ -84,19 +88,31 @@ pub fn start_dns_echo_with_config(config: ServerConfig) -> DnsEchoHandle {
 ///
 /// Used by both `start_dns_echo_with_config` (single-worker) and
 /// `TestServer` (multi-worker with SO_REUSEPORT).
-pub(crate) async fn dns_echo_loop(sock: UdpSocket, shutdown: &AtomicBool) {
+pub(crate) async fn dns_echo_loop(sock: UdpSocket, shutdown: &AtomicBool, pool: &BufPool) {
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
 
-        let buf = vec![0u8; 4096];
+        // Take buffer at full size for recv (compio reads into 0..len).
+        let buf = pool.take();
         let recv = compio::time::timeout(Duration::from_millis(100), sock.recv_from(buf)).await;
 
-        if let Ok(BufResult(Ok((n, peer)), buf)) = recv {
-            if n >= 12 {
-                let response = build_response(&buf[..n]);
-                let BufResult(_, _) = sock.send_to(response, peer).await;
+        match recv {
+            Ok(BufResult(Ok((n, peer)), recv_buf)) => {
+                if n >= 12 {
+                    let response = build_response(&recv_buf[..n]);
+                    pool.give(recv_buf);
+                    let BufResult(_, _) = sock.send_to(response, peer).await;
+                } else {
+                    pool.give(recv_buf);
+                }
+            }
+            Ok(BufResult(Err(_), recv_buf)) => {
+                pool.give(recv_buf);
+            }
+            Err(_timeout) => {
+                continue;
             }
         }
     }

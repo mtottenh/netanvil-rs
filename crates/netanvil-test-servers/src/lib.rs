@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub mod bufpool;
 pub mod dns;
 pub mod protocol;
 pub mod tcp;
@@ -32,6 +33,10 @@ pub struct ServerConfig {
     pub num_workers: usize,
     /// Pin each worker to a CPU core via core_affinity.
     pub pin_cores: bool,
+    /// Optional data pattern to tile across write buffers.
+    /// If None, buffers are filled with deterministic PRNG data.
+    /// Loaded from `--fill-data /path/to/file` on the CLI.
+    pub fill_pattern: Option<Vec<u8>>,
 }
 
 impl Default for ServerConfig {
@@ -43,6 +48,7 @@ impl Default for ServerConfig {
             send_buf_size: 256 * 1024, // 256 KiB
             num_workers: 1,
             pin_cores: true,
+            fill_pattern: None,
         }
     }
 }
@@ -184,44 +190,44 @@ impl TestServerBuilder {
             let config = self.config.clone();
             let ready_tx = ready_tx.clone();
 
-            let thread =
-                std::thread::Builder::new()
-                    .name(format!("test-server-{}", i))
-                    .spawn(move || {
-                        if config.pin_cores {
-                            let core = core_affinity::CoreId { id: i };
-                            if !core_affinity::set_for_current(core) {
-                                tracing::debug!(worker = i, "failed to pin test server worker");
-                            }
+            let thread = std::thread::Builder::new()
+                .name(format!("test-server-{}", i))
+                .spawn(move || {
+                    if config.pin_cores {
+                        let core = core_affinity::CoreId { id: i };
+                        if !core_affinity::set_for_current(core) {
+                            tracing::debug!(worker = i, "failed to pin test server worker");
                         }
+                    }
 
-                        let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
-                        rt.block_on(async {
-                            // TCP listener with SO_REUSEPORT
-                            let tcp_listener = if let Some(port) = tcp_port {
-                                let opts = SocketOpts::new()
-                                    .reuse_address(true)
-                                    .reuse_port(true)
-                                    .recv_buffer_size(config.recv_buf_size)
-                                    .send_buffer_size(config.send_buf_size);
-                                let addr = format!("127.0.0.1:{}", port);
-                                Some(
-                                    compio::net::TcpListener::bind_with_options(&addr, &opts)
-                                        .await
-                                        .unwrap_or_else(|e| {
-                                            panic!("worker {i}: TCP bind to {addr} failed: {e}")
-                                        }),
-                                )
-                            } else {
-                                None
-                            };
+                    let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
+                    rt.block_on(async {
+                        // TCP listener with SO_REUSEPORT
+                        let tcp_listener = if let Some(port) = tcp_port {
+                            let opts = SocketOpts::new()
+                                .reuse_address(true)
+                                .reuse_port(true)
+                                .recv_buffer_size(config.recv_buf_size)
+                                .send_buffer_size(config.send_buf_size);
+                            let addr = format!("127.0.0.1:{}", port);
+                            Some(
+                                compio::net::TcpListener::bind_with_options(&addr, &opts)
+                                    .await
+                                    .unwrap_or_else(|e| {
+                                        panic!("worker {i}: TCP bind to {addr} failed: {e}")
+                                    }),
+                            )
+                        } else {
+                            None
+                        };
 
-                            // UDP socket with SO_REUSEPORT
-                            // NOTE: compio's UdpSocket::bind_with_options applies socket opts
-                            // AFTER bind, so SO_REUSEPORT isn't set in time for multi-listener.
-                            // Work around by creating the socket via socket2 (options before bind)
-                            // and converting via from_std().
-                            let udp_socket = if let Some(port) = udp_port {
+                        // UDP socket with SO_REUSEPORT
+                        // NOTE: compio's UdpSocket::bind_with_options applies socket opts
+                        // AFTER bind, so SO_REUSEPORT isn't set in time for multi-listener.
+                        // Work around by creating the socket via socket2 (options before bind)
+                        // and converting via from_std().
+                        let udp_socket =
+                            if let Some(port) = udp_port {
                                 let addr = SocketAddr::from(([127, 0, 0, 1], port));
                                 let std_socket = bind_udp_reuse_port(addr, 4 * 1024 * 1024)
                                     .unwrap_or_else(|e| {
@@ -234,8 +240,9 @@ impl TestServerBuilder {
                                 None
                             };
 
-                            // DNS socket with SO_REUSEPORT (same workaround as UDP)
-                            let dns_socket = if let Some(port) = dns_port {
+                        // DNS socket with SO_REUSEPORT (same workaround as UDP)
+                        let dns_socket =
+                            if let Some(port) = dns_port {
                                 let addr = SocketAddr::from(([127, 0, 0, 1], port));
                                 let std_socket = bind_udp_reuse_port(addr, 4 * 1024 * 1024)
                                     .unwrap_or_else(|e| {
@@ -248,45 +255,48 @@ impl TestServerBuilder {
                                 None
                             };
 
-                            // Signal ready
-                            let _ = ready_tx.send(());
-                            drop(ready_tx);
+                        // Signal ready
+                        let _ = ready_tx.send(());
+                        drop(ready_tx);
 
-                            // Spawn handler tasks (detached — they check shutdown flag)
-                            if let Some(listener) = tcp_listener {
-                                let sd = shutdown.clone();
-                                let cfg = config.clone();
-                                compio::runtime::spawn(async move {
-                                    crate::tcp::tcp_accept_loop(listener, &sd, &cfg).await;
-                                })
-                                .detach();
-                            }
+                        // Spawn handler tasks (detached — they check shutdown flag)
+                        if let Some(listener) = tcp_listener {
+                            let sd = shutdown.clone();
+                            let cfg = config.clone();
+                            let pool = std::rc::Rc::new(crate::tcp::make_pool(&config, 65536, 256));
+                            compio::runtime::spawn(async move {
+                                crate::tcp::tcp_accept_loop(listener, &sd, &cfg, pool).await;
+                            })
+                            .detach();
+                        }
 
-                            if let Some(socket) = udp_socket {
-                                let sd = shutdown.clone();
-                                compio::runtime::spawn(async move {
-                                    crate::udp::udp_echo_loop(socket, &sd).await;
-                                })
-                                .detach();
-                            }
+                        if let Some(socket) = udp_socket {
+                            let sd = shutdown.clone();
+                            let pool = std::rc::Rc::new(crate::tcp::make_pool(&config, 65536, 64));
+                            compio::runtime::spawn(async move {
+                                crate::udp::udp_echo_loop(socket, &sd, &pool).await;
+                            })
+                            .detach();
+                        }
 
-                            if let Some(socket) = dns_socket {
-                                let sd = shutdown.clone();
-                                compio::runtime::spawn(async move {
-                                    crate::dns::dns_echo_loop(socket, &sd).await;
-                                })
-                                .detach();
-                            }
+                        if let Some(socket) = dns_socket {
+                            let sd = shutdown.clone();
+                            let pool = std::rc::Rc::new(crate::tcp::make_pool(&config, 4096, 32));
+                            compio::runtime::spawn(async move {
+                                crate::dns::dns_echo_loop(socket, &sd, &pool).await;
+                            })
+                            .detach();
+                        }
 
-                            // Keep runtime alive until shutdown
-                            while !shutdown.load(Ordering::Relaxed) {
-                                compio::time::sleep(Duration::from_millis(100)).await;
-                            }
-                            // Give handlers time to finish current operation
-                            compio::time::sleep(Duration::from_millis(200)).await;
-                        });
-                    })
-                    .expect("failed to spawn test server worker");
+                        // Keep runtime alive until shutdown
+                        while !shutdown.load(Ordering::Relaxed) {
+                            compio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                        // Give handlers time to finish current operation
+                        compio::time::sleep(Duration::from_millis(200)).await;
+                    });
+                })
+                .expect("failed to spawn test server worker");
 
             workers.push(thread);
         }

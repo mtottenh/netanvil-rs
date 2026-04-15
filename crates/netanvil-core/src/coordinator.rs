@@ -369,6 +369,21 @@ impl Coordinator {
             self.handle_external_command(cmd);
         }
 
+        // Check if warmup just completed — must happen before draining
+        // metrics so that the first tick's data is not silently lost when
+        // no warmup is configured.
+        if !self.warmup_complete {
+            if let Some(warmup) = self.warmup_duration {
+                if self.start_time.elapsed() >= warmup {
+                    self.warmup_complete = true;
+                    tracing::info!("warmup complete, metrics collection started");
+                }
+            } else {
+                // No warmup configured
+                self.warmup_complete = true;
+            }
+        }
+
         // Collect metrics from all I/O workers
         self.tick_aggregate.reset();
         for worker in &self.io_workers {
@@ -379,19 +394,6 @@ impl Coordinator {
                 if self.warmup_complete {
                     self.total_aggregate.merge(&snapshot);
                 }
-            }
-        }
-
-        // Check if warmup just completed
-        if !self.warmup_complete {
-            if let Some(warmup) = self.warmup_duration {
-                if self.start_time.elapsed() >= warmup {
-                    self.warmup_complete = true;
-                    tracing::info!("warmup complete, metrics collection started");
-                }
-            } else {
-                // No warmup configured
-                self.warmup_complete = true;
             }
         }
 

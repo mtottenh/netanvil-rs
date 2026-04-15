@@ -6,12 +6,16 @@
 //! corresponding mode handler (RR, SINK, SOURCE, BIDIR). Otherwise the
 //! server falls back to plain echo mode for backward compatibility.
 
+use std::cell::Cell;
 use std::net::SocketAddr;
+use std::rc::Rc;
 use std::time::Duration;
 
 use compio::buf::BufResult;
+use compio::net::SocketOpts;
 
 use crate::protocol;
+use crate::ServerConfig;
 
 /// Handle to a running TCP echo server.
 ///
@@ -48,15 +52,22 @@ pub fn start_tcp_echo() -> TcpEchoHandle {
 /// Use `"127.0.0.1:0"` for a random port or `"127.0.0.1:9000"` for a fixed one.
 /// Returns a handle that stops the server when dropped.
 pub fn start_tcp_echo_on(addr: &str) -> TcpEchoHandle {
+    start_tcp_echo_with_config(ServerConfig {
+        addr: addr.to_string(),
+        ..Default::default()
+    })
+}
+
+/// Start a TCP echo server with full configuration.
+pub fn start_tcp_echo_with_config(config: ServerConfig) -> TcpEchoHandle {
     let (shutdown_tx, shutdown_rx) = flume::bounded::<()>(1);
     let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
-    let listen_addr = addr.to_string();
 
     let thread = std::thread::Builder::new()
         .name("tcp-echo-server".into())
         .spawn(move || {
             let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
-            rt.block_on(run_tcp_echo(shutdown_rx, addr_tx, &listen_addr));
+            rt.block_on(run_tcp_echo(shutdown_rx, addr_tx, &config));
         })
         .expect("failed to spawn TCP echo server thread");
 
@@ -74,13 +85,32 @@ pub fn start_tcp_echo_on(addr: &str) -> TcpEchoHandle {
 async fn run_tcp_echo(
     shutdown_rx: flume::Receiver<()>,
     addr_tx: std::sync::mpsc::Sender<SocketAddr>,
-    listen_addr: &str,
+    config: &ServerConfig,
 ) {
-    let listener = compio::net::TcpListener::bind(listen_addr).await.unwrap();
+    // Listener socket options: SO_REUSEADDR + buffer sizing
+    let listener_opts = SocketOpts::new()
+        .reuse_address(true)
+        .recv_buffer_size(config.recv_buf_size)
+        .send_buffer_size(config.send_buf_size);
+
+    let listener = compio::net::TcpListener::bind_with_options(&config.addr, &listener_opts)
+        .await
+        .unwrap();
     let local_addr = listener.local_addr().unwrap();
     addr_tx.send(local_addr).unwrap();
 
     tracing::info!("TCP echo server listening on {}", local_addr);
+
+    // Accepted stream options: TCP_NODELAY + buffer sizing
+    let stream_opts = SocketOpts::new()
+        .nodelay(true)
+        .recv_buffer_size(config.recv_buf_size)
+        .send_buffer_size(config.send_buf_size);
+
+    // Connection backpressure tracking
+    let active_connections = Rc::new(Cell::new(0u32));
+    let max_connections = config.max_connections;
+    let limit_logged = Cell::new(false);
 
     loop {
         // Check for shutdown
@@ -90,12 +120,34 @@ async fn run_tcp_echo(
         }
 
         // Accept with a timeout so we can check for shutdown periodically
-        let accept_result =
-            compio::time::timeout(Duration::from_millis(100), listener.accept()).await;
+        let accept_result = compio::time::timeout(
+            Duration::from_millis(100),
+            listener.accept_with_options(&stream_opts),
+        )
+        .await;
 
         match accept_result {
             Ok(Ok((stream, _peer))) => {
-                compio::runtime::spawn(handle_tcp_connection(stream)).detach();
+                // Connection backpressure: if at limit, accept then immediately drop
+                if max_connections > 0 && active_connections.get() as usize >= max_connections {
+                    if !limit_logged.get() {
+                        tracing::warn!(
+                            "TCP connection limit reached ({}), dropping new connections",
+                            max_connections
+                        );
+                        limit_logged.set(true);
+                    }
+                    drop(stream);
+                    continue;
+                }
+
+                active_connections.set(active_connections.get() + 1);
+                let counter = Rc::clone(&active_connections);
+                compio::runtime::spawn(async move {
+                    handle_tcp_connection(stream).await;
+                    counter.set(counter.get() - 1);
+                })
+                .detach();
             }
             Ok(Err(e)) => {
                 tracing::warn!("TCP accept error: {}", e);

@@ -7,6 +7,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use compio::buf::BufResult;
+use compio::net::SocketOpts;
+
+use crate::ServerConfig;
 
 /// Handle to a running UDP echo server.
 ///
@@ -43,15 +46,22 @@ pub fn start_udp_echo() -> UdpEchoHandle {
 /// Use `"127.0.0.1:0"` for a random port or `"127.0.0.1:9000"` for a fixed one.
 /// Returns a handle that stops the server when dropped.
 pub fn start_udp_echo_on(addr: &str) -> UdpEchoHandle {
+    start_udp_echo_with_config(ServerConfig {
+        addr: addr.to_string(),
+        ..ServerConfig::udp_default()
+    })
+}
+
+/// Start a UDP echo server with full configuration.
+pub fn start_udp_echo_with_config(config: ServerConfig) -> UdpEchoHandle {
     let (shutdown_tx, shutdown_rx) = flume::bounded::<()>(1);
     let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
-    let listen_addr = addr.to_string();
 
     let thread = std::thread::Builder::new()
         .name("udp-echo-server".into())
         .spawn(move || {
             let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
-            rt.block_on(run_udp_echo(shutdown_rx, addr_tx, &listen_addr));
+            rt.block_on(run_udp_echo(shutdown_rx, addr_tx, &config));
         })
         .expect("failed to spawn UDP echo server thread");
 
@@ -66,16 +76,28 @@ pub fn start_udp_echo_on(addr: &str) -> UdpEchoHandle {
     }
 }
 
+/// Maximum number of recv errors to log before suppressing.
+const MAX_LOGGED_ERRORS: u64 = 10;
+
 async fn run_udp_echo(
     shutdown_rx: flume::Receiver<()>,
     addr_tx: std::sync::mpsc::Sender<SocketAddr>,
-    listen_addr: &str,
+    config: &ServerConfig,
 ) {
-    let socket = compio::net::UdpSocket::bind(listen_addr).await.unwrap();
+    let socket_opts = SocketOpts::new()
+        .reuse_address(true)
+        .recv_buffer_size(config.recv_buf_size)
+        .send_buffer_size(config.send_buf_size);
+
+    let socket = compio::net::UdpSocket::bind_with_options(&config.addr, &socket_opts)
+        .await
+        .unwrap();
     let local_addr = socket.local_addr().unwrap();
     addr_tx.send(local_addr).unwrap();
 
     tracing::info!("UDP echo server listening on {}", local_addr);
+
+    let mut error_count: u64 = 0;
 
     loop {
         // Check for shutdown
@@ -94,8 +116,21 @@ async fn run_udp_echo(
                 let _ = socket.send_to(response, peer).await;
             }
             Ok(BufResult(Err(e), _)) => {
-                tracing::warn!("UDP recv error: {}", e);
-                break;
+                error_count += 1;
+                if error_count <= MAX_LOGGED_ERRORS {
+                    tracing::warn!(
+                        "UDP recv error ({}/{}): {}",
+                        error_count,
+                        MAX_LOGGED_ERRORS,
+                        e
+                    );
+                } else if error_count == MAX_LOGGED_ERRORS + 1 {
+                    tracing::warn!(
+                        "UDP recv error logging suppressed after {} errors",
+                        MAX_LOGGED_ERRORS
+                    );
+                }
+                continue; // keep serving, don't break
             }
             Err(_timeout) => {
                 // Timeout — loop back and check shutdown

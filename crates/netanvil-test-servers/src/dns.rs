@@ -6,8 +6,10 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use compio::net::UdpSocket;
+use compio::net::{SocketOpts, UdpSocket};
 use compio::BufResult;
+
+use crate::ServerConfig;
 
 /// Handle to a running DNS echo server.
 pub struct DnsEchoHandle {
@@ -33,16 +35,30 @@ pub fn start_dns_echo() -> DnsEchoHandle {
 
 /// Start a DNS echo server on the specified address.
 pub fn start_dns_echo_on(addr: &str) -> DnsEchoHandle {
+    start_dns_echo_with_config(ServerConfig {
+        addr: addr.to_string(),
+        ..ServerConfig::udp_default()
+    })
+}
+
+/// Start a DNS echo server with full configuration.
+pub fn start_dns_echo_with_config(config: ServerConfig) -> DnsEchoHandle {
     let (addr_tx, addr_rx) = std::sync::mpsc::channel();
     let (shutdown_tx, shutdown_rx) = flume::bounded(1);
-    let bind_addr = addr.to_string();
 
     let thread = std::thread::Builder::new()
         .name("dns-echo".into())
         .spawn(move || {
             let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
             rt.block_on(async {
-                let sock = UdpSocket::bind(&bind_addr).await.unwrap();
+                let socket_opts = SocketOpts::new()
+                    .reuse_address(true)
+                    .recv_buffer_size(config.recv_buf_size)
+                    .send_buffer_size(config.send_buf_size);
+
+                let sock = UdpSocket::bind_with_options(&config.addr, &socket_opts)
+                    .await
+                    .unwrap();
                 addr_tx.send(sock.local_addr().unwrap()).unwrap();
 
                 loop {

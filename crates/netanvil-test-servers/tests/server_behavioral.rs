@@ -410,3 +410,226 @@ fn test_backward_compat_single_worker() {
         "expected some requests completed"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3: Buffer management behavioral tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_tcp_large_payload_sustained() {
+    let server = netanvil_test_servers::TestServer::builder()
+        .tcp(0)
+        .workers(2)
+        .pin_cores(false)
+        .build();
+    let tcp_addr = server.tcp_addr().unwrap();
+    let targets = vec![tcp_addr];
+    let payload = vec![0u8; 1024];
+
+    let config = TestConfig {
+        targets: vec![format!("{}", tcp_addr)],
+        duration: Duration::from_secs(15),
+        rate: RateConfig::Static { rps: 2000.0 },
+        num_cores: 2,
+        error_status_threshold: 0,
+        ..Default::default()
+    };
+
+    let result = GenericTestBuilder::new(
+        config,
+        |_| TcpExecutor::with_pool(Duration::from_secs(5), 100, ConnectionPolicy::KeepAlive),
+        Box::new(move |_| {
+            Box::new(
+                SimpleTcpGenerator::new(targets.clone(), payload.clone(), TcpFraming::Raw, true)
+                    .with_mode(TcpTestMode::RR)
+                    .with_request_size(1024)
+                    .with_response_size(65536),
+            ) as Box<dyn RequestGenerator<Spec = TcpRequestSpec>>
+        }),
+        Box::new(|_| {
+            Box::new(TcpNoopTransformer) as Box<dyn RequestTransformer<Spec = TcpRequestSpec>>
+        }),
+    )
+    .run()
+    .expect("test run failed");
+
+    assert_eq!(
+        result.total_errors, 0,
+        "expected 0 errors with large payload RR, got {}",
+        result.total_errors
+    );
+    let achieved_rps = result.total_requests as f64 / 15.0;
+    assert!(
+        achieved_rps >= 1600.0,
+        "achieved RPS too low: {:.0} (expected >= 1600 with large payloads)",
+        achieved_rps
+    );
+    assert!(
+        result.latency_p99 < Duration::from_millis(20),
+        "p99 latency too high: {:?} (expected < 20ms)",
+        result.latency_p99
+    );
+}
+
+#[test]
+fn test_tcp_source_sustained() {
+    let server = netanvil_test_servers::TestServer::builder()
+        .tcp(0)
+        .workers(2)
+        .pin_cores(false)
+        .build();
+    let tcp_addr = server.tcp_addr().unwrap();
+    let targets = vec![tcp_addr];
+    let payload = vec![0u8; 64];
+
+    let config = TestConfig {
+        targets: vec![format!("{}", tcp_addr)],
+        duration: Duration::from_secs(10),
+        rate: RateConfig::Static { rps: 500.0 },
+        num_cores: 1,
+        error_status_threshold: 0,
+        ..Default::default()
+    };
+
+    let result = GenericTestBuilder::new(
+        config,
+        |_| TcpExecutor::with_pool(Duration::from_secs(5), 100, ConnectionPolicy::KeepAlive),
+        Box::new(move |_| {
+            Box::new(
+                SimpleTcpGenerator::new(targets.clone(), payload.clone(), TcpFraming::Raw, true)
+                    .with_mode(TcpTestMode::Source)
+                    .with_response_size(65536),
+            ) as Box<dyn RequestGenerator<Spec = TcpRequestSpec>>
+        }),
+        Box::new(|_| {
+            Box::new(TcpNoopTransformer) as Box<dyn RequestTransformer<Spec = TcpRequestSpec>>
+        }),
+    )
+    .run()
+    .expect("test run failed");
+
+    assert_eq!(
+        result.total_errors, 0,
+        "expected 0 errors in SOURCE mode, got {}",
+        result.total_errors
+    );
+    assert!(
+        result.total_requests > 0,
+        "expected some SOURCE requests completed"
+    );
+}
+
+#[test]
+fn test_udp_small_packet_flood() {
+    use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
+
+    let server = netanvil_test_servers::TestServer::builder()
+        .udp(0)
+        .workers(4)
+        .pin_cores(false)
+        .build();
+    let udp_addr = server.udp_addr().unwrap();
+    let targets = vec![udp_addr];
+    let payload = vec![0u8; 64];
+
+    // 30k RPS with 4 workers: ~7.5k PPS/worker, well within budget.
+    // Relaxed loss threshold for CI environments with limited resources.
+    let config = TestConfig {
+        targets: vec![format!("{}", udp_addr)],
+        duration: Duration::from_secs(10),
+        rate: RateConfig::Static { rps: 30000.0 },
+        num_cores: 2,
+        error_status_threshold: 0,
+        ..Default::default()
+    };
+
+    let result = GenericTestBuilder::new(
+        config,
+        |_| UdpExecutor::with_timeout(Duration::from_secs(2)),
+        Box::new(move |_| {
+            Box::new(SimpleUdpGenerator::new(
+                targets.clone(),
+                payload.clone(),
+                true,
+            )) as Box<dyn RequestGenerator<Spec = UdpRequestSpec>>
+        }),
+        Box::new(|_| {
+            Box::new(UdpNoopTransformer) as Box<dyn RequestTransformer<Spec = UdpRequestSpec>>
+        }),
+    )
+    .run()
+    .expect("test run failed");
+
+    assert!(
+        result.total_requests > 0,
+        "expected some UDP requests completed"
+    );
+
+    let loss_rate = result.total_errors as f64 / result.total_requests as f64;
+    assert!(
+        loss_rate < 0.05,
+        "UDP small packet flood loss rate too high: {:.2}% ({} errors / {} requests)",
+        loss_rate * 100.0,
+        result.total_errors,
+        result.total_requests
+    );
+}
+
+/// Validates that server-generated write buffers contain non-zero data
+/// (PRNG fill is working, not sending all-zeros).
+#[compio::test]
+async fn test_response_data_has_entropy() {
+    use compio::buf::BufResult;
+    use compio::io::{AsyncReadExt, AsyncWriteExt};
+    use netanvil_test_servers::protocol;
+
+    let server = netanvil_test_servers::tcp::start_tcp_echo();
+
+    let stream = compio::net::TcpStream::connect(server.addr).await.unwrap();
+    let mut stream = stream;
+
+    // Send protocol header: RR mode, request_size=64, response_size=256
+    let mut header = [0u8; protocol::HEADER_SIZE];
+    header[0] = protocol::MODE_RR;
+    // request_size = 64 (big-endian u16 at offset 2..4)
+    header[2] = 0;
+    header[3] = 64;
+    // response_size = 256 (big-endian u32 at offset 4..8)
+    header[4] = 0;
+    header[5] = 0;
+    header[6] = 1;
+    header[7] = 0;
+    let BufResult(result, _) = stream.write_all(header.to_vec()).await;
+    result.unwrap();
+
+    // Send 64 bytes of request payload
+    let request = vec![0xABu8; 64];
+    let BufResult(result, _) = stream.write_all(request).await;
+    result.unwrap();
+
+    // Read 256 bytes of response
+    let response = vec![0u8; 256];
+    let BufResult(result, response) = stream.read_exact(response).await;
+    result.unwrap();
+
+    // Assert response is not all zeros
+    let nonzero_count = response.iter().filter(|&&b| b != 0).count();
+    assert!(
+        nonzero_count > 100,
+        "response should contain PRNG data, not zeros. \
+         Only {} of 256 bytes are non-zero",
+        nonzero_count
+    );
+
+    // Assert reasonable entropy: count unique byte values
+    let mut seen = [false; 256];
+    for &b in &response {
+        seen[b as usize] = true;
+    }
+    let unique_values = seen.iter().filter(|&&s| s).count();
+    assert!(
+        unique_values > 50,
+        "response should have reasonable entropy. Only {} unique byte values in 256 bytes",
+        unique_values
+    );
+}

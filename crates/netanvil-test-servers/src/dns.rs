@@ -4,6 +4,8 @@
 //! Runs on a background compio thread, binding to a random UDP port.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use compio::net::{SocketOpts, UdpSocket};
@@ -15,13 +17,13 @@ use crate::ServerConfig;
 pub struct DnsEchoHandle {
     /// The address the server is listening on.
     pub addr: SocketAddr,
-    shutdown: flume::Sender<()>,
+    shutdown: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for DnsEchoHandle {
     fn drop(&mut self) {
-        let _ = self.shutdown.send(());
+        self.shutdown.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -44,7 +46,8 @@ pub fn start_dns_echo_on(addr: &str) -> DnsEchoHandle {
 /// Start a DNS echo server with full configuration.
 pub fn start_dns_echo_with_config(config: ServerConfig) -> DnsEchoHandle {
     let (addr_tx, addr_rx) = std::sync::mpsc::channel();
-    let (shutdown_tx, shutdown_rx) = flume::bounded(1);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
 
     let thread = std::thread::Builder::new()
         .name("dns-echo".into())
@@ -61,24 +64,7 @@ pub fn start_dns_echo_with_config(config: ServerConfig) -> DnsEchoHandle {
                     .unwrap();
                 addr_tx.send(sock.local_addr().unwrap()).unwrap();
 
-                loop {
-                    // Check shutdown
-                    if shutdown_rx.try_recv().is_ok() {
-                        break;
-                    }
-
-                    let buf = vec![0u8; 4096];
-                    let recv =
-                        compio::time::timeout(Duration::from_millis(100), sock.recv_from(buf))
-                            .await;
-
-                    if let Ok(BufResult(Ok((n, peer)), buf)) = recv {
-                        if n >= 12 {
-                            let response = build_response(&buf[..n]);
-                            let BufResult(_, _) = sock.send_to(response, peer).await;
-                        }
-                    }
-                }
+                dns_echo_loop(sock, &shutdown_clone).await;
             });
         })
         .unwrap();
@@ -89,8 +75,30 @@ pub fn start_dns_echo_with_config(config: ServerConfig) -> DnsEchoHandle {
 
     DnsEchoHandle {
         addr,
-        shutdown: shutdown_tx,
+        shutdown,
         thread: Some(thread),
+    }
+}
+
+/// Core DNS echo loop. Takes a pre-bound socket and runs until shutdown.
+///
+/// Used by both `start_dns_echo_with_config` (single-worker) and
+/// `TestServer` (multi-worker with SO_REUSEPORT).
+pub(crate) async fn dns_echo_loop(sock: UdpSocket, shutdown: &AtomicBool) {
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let buf = vec![0u8; 4096];
+        let recv = compio::time::timeout(Duration::from_millis(100), sock.recv_from(buf)).await;
+
+        if let Ok(BufResult(Ok((n, peer)), buf)) = recv {
+            if n >= 12 {
+                let response = build_response(&buf[..n]);
+                let BufResult(_, _) = sock.send_to(response, peer).await;
+            }
+        }
     }
 }
 

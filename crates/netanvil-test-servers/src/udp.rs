@@ -4,6 +4,8 @@
 //! datagrams and echoes them back to the sender.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use compio::buf::BufResult;
@@ -17,17 +19,13 @@ use crate::ServerConfig;
 pub struct UdpEchoHandle {
     /// The address the server is listening on.
     pub addr: SocketAddr,
-    shutdown_tx: Option<flume::Sender<()>>,
+    shutdown: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for UdpEchoHandle {
     fn drop(&mut self) {
-        // Signal shutdown
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
-        // Join the thread
+        self.shutdown.store(true, Ordering::Relaxed);
         if let Some(handle) = self.thread.take() {
             let _ = handle.join();
         }
@@ -54,14 +52,30 @@ pub fn start_udp_echo_on(addr: &str) -> UdpEchoHandle {
 
 /// Start a UDP echo server with full configuration.
 pub fn start_udp_echo_with_config(config: ServerConfig) -> UdpEchoHandle {
-    let (shutdown_tx, shutdown_rx) = flume::bounded::<()>(1);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
     let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
 
     let thread = std::thread::Builder::new()
         .name("udp-echo-server".into())
         .spawn(move || {
             let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
-            rt.block_on(run_udp_echo(shutdown_rx, addr_tx, &config));
+            rt.block_on(async {
+                let socket_opts = SocketOpts::new()
+                    .reuse_address(true)
+                    .recv_buffer_size(config.recv_buf_size)
+                    .send_buffer_size(config.send_buf_size);
+
+                let socket = compio::net::UdpSocket::bind_with_options(&config.addr, &socket_opts)
+                    .await
+                    .unwrap();
+                let local_addr = socket.local_addr().unwrap();
+                addr_tx.send(local_addr).unwrap();
+
+                tracing::info!("UDP echo server listening on {}", local_addr);
+
+                udp_echo_loop(socket, &shutdown_clone).await;
+            });
         })
         .expect("failed to spawn UDP echo server thread");
 
@@ -71,7 +85,7 @@ pub fn start_udp_echo_with_config(config: ServerConfig) -> UdpEchoHandle {
 
     UdpEchoHandle {
         addr,
-        shutdown_tx: Some(shutdown_tx),
+        shutdown,
         thread: Some(thread),
     }
 }
@@ -79,30 +93,16 @@ pub fn start_udp_echo_with_config(config: ServerConfig) -> UdpEchoHandle {
 /// Maximum number of recv errors to log before suppressing.
 const MAX_LOGGED_ERRORS: u64 = 10;
 
-async fn run_udp_echo(
-    shutdown_rx: flume::Receiver<()>,
-    addr_tx: std::sync::mpsc::Sender<SocketAddr>,
-    config: &ServerConfig,
-) {
-    let socket_opts = SocketOpts::new()
-        .reuse_address(true)
-        .recv_buffer_size(config.recv_buf_size)
-        .send_buffer_size(config.send_buf_size);
-
-    let socket = compio::net::UdpSocket::bind_with_options(&config.addr, &socket_opts)
-        .await
-        .unwrap();
-    let local_addr = socket.local_addr().unwrap();
-    addr_tx.send(local_addr).unwrap();
-
-    tracing::info!("UDP echo server listening on {}", local_addr);
-
+/// Core UDP echo loop. Takes a pre-bound socket and runs until shutdown.
+///
+/// Used by both `start_udp_echo_with_config` (single-worker) and
+/// `TestServer` (multi-worker with SO_REUSEPORT).
+pub(crate) async fn udp_echo_loop(socket: compio::net::UdpSocket, shutdown: &AtomicBool) {
     let mut error_count: u64 = 0;
 
     loop {
-        // Check for shutdown
-        if shutdown_rx.try_recv().is_ok() {
-            tracing::info!("UDP echo server shutting down");
+        if shutdown.load(Ordering::Relaxed) {
+            tracing::info!("UDP echo loop shutting down");
             break;
         }
 
@@ -130,10 +130,9 @@ async fn run_udp_echo(
                         MAX_LOGGED_ERRORS
                     );
                 }
-                continue; // keep serving, don't break
+                continue;
             }
             Err(_timeout) => {
-                // Timeout — loop back and check shutdown
                 continue;
             }
         }

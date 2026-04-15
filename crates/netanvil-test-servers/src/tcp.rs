@@ -9,6 +9,8 @@
 use std::cell::Cell;
 use std::net::SocketAddr;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use compio::buf::BufResult;
@@ -23,17 +25,13 @@ use crate::ServerConfig;
 pub struct TcpEchoHandle {
     /// The address the server is listening on.
     pub addr: SocketAddr,
-    shutdown_tx: Option<flume::Sender<()>>,
+    shutdown: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for TcpEchoHandle {
     fn drop(&mut self) {
-        // Signal shutdown
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
-        // Join the thread
+        self.shutdown.store(true, Ordering::Relaxed);
         if let Some(handle) = self.thread.take() {
             let _ = handle.join();
         }
@@ -60,14 +58,31 @@ pub fn start_tcp_echo_on(addr: &str) -> TcpEchoHandle {
 
 /// Start a TCP echo server with full configuration.
 pub fn start_tcp_echo_with_config(config: ServerConfig) -> TcpEchoHandle {
-    let (shutdown_tx, shutdown_rx) = flume::bounded::<()>(1);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
     let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
 
     let thread = std::thread::Builder::new()
         .name("tcp-echo-server".into())
         .spawn(move || {
             let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
-            rt.block_on(run_tcp_echo(shutdown_rx, addr_tx, &config));
+            rt.block_on(async {
+                let listener_opts = SocketOpts::new()
+                    .reuse_address(true)
+                    .recv_buffer_size(config.recv_buf_size)
+                    .send_buffer_size(config.send_buf_size);
+
+                let listener =
+                    compio::net::TcpListener::bind_with_options(&config.addr, &listener_opts)
+                        .await
+                        .unwrap();
+                let local_addr = listener.local_addr().unwrap();
+                addr_tx.send(local_addr).unwrap();
+
+                tracing::info!("TCP echo server listening on {}", local_addr);
+
+                tcp_accept_loop(listener, &shutdown_clone, &config).await;
+            });
         })
         .expect("failed to spawn TCP echo server thread");
 
@@ -77,49 +92,35 @@ pub fn start_tcp_echo_with_config(config: ServerConfig) -> TcpEchoHandle {
 
     TcpEchoHandle {
         addr,
-        shutdown_tx: Some(shutdown_tx),
+        shutdown,
         thread: Some(thread),
     }
 }
 
-async fn run_tcp_echo(
-    shutdown_rx: flume::Receiver<()>,
-    addr_tx: std::sync::mpsc::Sender<SocketAddr>,
+/// Core TCP accept loop. Takes a pre-bound listener and runs until shutdown.
+///
+/// Used by both `start_tcp_echo_with_config` (single-worker) and
+/// `TestServer` (multi-worker with SO_REUSEPORT).
+pub(crate) async fn tcp_accept_loop(
+    listener: compio::net::TcpListener,
+    shutdown: &AtomicBool,
     config: &ServerConfig,
 ) {
-    // Listener socket options: SO_REUSEADDR + buffer sizing
-    let listener_opts = SocketOpts::new()
-        .reuse_address(true)
-        .recv_buffer_size(config.recv_buf_size)
-        .send_buffer_size(config.send_buf_size);
-
-    let listener = compio::net::TcpListener::bind_with_options(&config.addr, &listener_opts)
-        .await
-        .unwrap();
-    let local_addr = listener.local_addr().unwrap();
-    addr_tx.send(local_addr).unwrap();
-
-    tracing::info!("TCP echo server listening on {}", local_addr);
-
-    // Accepted stream options: TCP_NODELAY + buffer sizing
     let stream_opts = SocketOpts::new()
         .nodelay(true)
         .recv_buffer_size(config.recv_buf_size)
         .send_buffer_size(config.send_buf_size);
 
-    // Connection backpressure tracking
     let active_connections = Rc::new(Cell::new(0u32));
     let max_connections = config.max_connections;
     let limit_logged = Cell::new(false);
 
     loop {
-        // Check for shutdown
-        if shutdown_rx.try_recv().is_ok() {
-            tracing::info!("TCP echo server shutting down");
+        if shutdown.load(Ordering::Relaxed) {
+            tracing::info!("TCP accept loop shutting down");
             break;
         }
 
-        // Accept with a timeout so we can check for shutdown periodically
         let accept_result = compio::time::timeout(
             Duration::from_millis(100),
             listener.accept_with_options(&stream_opts),
@@ -128,7 +129,6 @@ async fn run_tcp_echo(
 
         match accept_result {
             Ok(Ok((stream, _peer))) => {
-                // Connection backpressure: if at limit, accept then immediately drop
                 if max_connections > 0 && active_connections.get() as usize >= max_connections {
                     if !limit_logged.get() {
                         tracing::warn!(
@@ -153,7 +153,6 @@ async fn run_tcp_echo(
                 tracing::warn!("TCP accept error: {}", e);
             }
             Err(_timeout) => {
-                // Timeout — loop back and check shutdown
                 continue;
             }
         }

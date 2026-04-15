@@ -633,3 +633,257 @@ async fn test_response_data_has_entropy() {
         unique_values
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4: Connected UDP behavioral tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_udp_connected_throughput() {
+    use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
+
+    // Connected mode uses spawned handler tasks per client, which adds compio
+    // scheduling overhead on loopback. Keep RPS moderate — the value of connected
+    // sockets is kernel-level demuxing at scale, not raw PPS on loopback.
+    let server = netanvil_test_servers::TestServer::builder()
+        .udp(0)
+        .workers(2)
+        .pin_cores(false)
+        .udp_idle_timeout(30)
+        .build();
+    let udp_addr = server.udp_addr().unwrap();
+    let targets = vec![udp_addr];
+    let payload = vec![0u8; 64];
+
+    let config = TestConfig {
+        targets: vec![format!("{}", udp_addr)],
+        duration: Duration::from_secs(10),
+        rate: RateConfig::Static { rps: 5000.0 },
+        num_cores: 2,
+        error_status_threshold: 0,
+        ..Default::default()
+    };
+
+    let result = GenericTestBuilder::new(
+        config,
+        |_| UdpExecutor::with_timeout(Duration::from_secs(2)),
+        Box::new(move |_| {
+            Box::new(SimpleUdpGenerator::new(
+                targets.clone(),
+                payload.clone(),
+                true,
+            )) as Box<dyn RequestGenerator<Spec = UdpRequestSpec>>
+        }),
+        Box::new(|_| {
+            Box::new(UdpNoopTransformer) as Box<dyn RequestTransformer<Spec = UdpRequestSpec>>
+        }),
+    )
+    .run()
+    .expect("test run failed");
+
+    assert!(
+        result.total_requests > 0,
+        "expected some UDP requests completed"
+    );
+
+    let loss_rate = if result.total_requests > 0 {
+        result.total_errors as f64 / result.total_requests as f64
+    } else {
+        1.0
+    };
+    assert!(
+        loss_rate < 0.05,
+        "connected UDP loss rate too high: {:.2}% ({} errors / {} requests)",
+        loss_rate * 100.0,
+        result.total_errors,
+        result.total_requests
+    );
+}
+
+#[test]
+fn test_udp_connected_idle_cleanup() {
+    use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
+
+    let server = netanvil_test_servers::TestServer::builder()
+        .udp(0)
+        .workers(1)
+        .pin_cores(false)
+        .udp_idle_timeout(3) // 3 second idle timeout
+        .build();
+    let udp_addr = server.udp_addr().unwrap();
+
+    // First run
+    {
+        let targets = vec![udp_addr];
+        let payload = vec![0u8; 64];
+        let config = TestConfig {
+            targets: vec![format!("{}", udp_addr)],
+            duration: Duration::from_secs(2),
+            rate: RateConfig::Static { rps: 1000.0 },
+            num_cores: 1,
+            error_status_threshold: 0,
+            ..Default::default()
+        };
+
+        let result = GenericTestBuilder::new(
+            config,
+            |_| UdpExecutor::with_timeout(Duration::from_secs(2)),
+            Box::new(move |_| {
+                Box::new(SimpleUdpGenerator::new(
+                    targets.clone(),
+                    payload.clone(),
+                    true,
+                )) as Box<dyn RequestGenerator<Spec = UdpRequestSpec>>
+            }),
+            Box::new(|_| {
+                Box::new(UdpNoopTransformer) as Box<dyn RequestTransformer<Spec = UdpRequestSpec>>
+            }),
+        )
+        .run()
+        .expect("first run failed");
+
+        assert!(
+            result.total_requests > 0,
+            "first run should complete requests"
+        );
+    }
+
+    // Wait for idle timeout to expire — connected sockets should be cleaned up.
+    std::thread::sleep(Duration::from_secs(5));
+
+    // Second run — new client, should work fine after cleanup.
+    {
+        let targets = vec![udp_addr];
+        let payload = vec![0u8; 64];
+        let config = TestConfig {
+            targets: vec![format!("{}", udp_addr)],
+            duration: Duration::from_secs(2),
+            rate: RateConfig::Static { rps: 1000.0 },
+            num_cores: 1,
+            error_status_threshold: 0,
+            ..Default::default()
+        };
+
+        let result = GenericTestBuilder::new(
+            config,
+            |_| UdpExecutor::with_timeout(Duration::from_secs(2)),
+            Box::new(move |_| {
+                Box::new(SimpleUdpGenerator::new(
+                    targets.clone(),
+                    payload.clone(),
+                    true,
+                )) as Box<dyn RequestGenerator<Spec = UdpRequestSpec>>
+            }),
+            Box::new(|_| {
+                Box::new(UdpNoopTransformer) as Box<dyn RequestTransformer<Spec = UdpRequestSpec>>
+            }),
+        )
+        .run()
+        .expect("second run failed");
+
+        assert!(
+            result.total_requests > 0,
+            "second run should complete requests after idle cleanup"
+        );
+        assert_eq!(
+            result.total_errors, 0,
+            "expected 0 errors on second run after idle cleanup, got {}",
+            result.total_errors
+        );
+    }
+}
+
+#[test]
+fn test_udp_connected_multi_client() {
+    use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
+
+    let server = netanvil_test_servers::TestServer::builder()
+        .udp(0)
+        .workers(2)
+        .pin_cores(false)
+        .udp_idle_timeout(30)
+        .build();
+    let udp_addr = server.udp_addr().unwrap();
+
+    // Run two sequential netanvil runs (each gets different source ports).
+    for run in 1..=2 {
+        let targets = vec![udp_addr];
+        let payload = vec![0u8; 64];
+        let config = TestConfig {
+            targets: vec![format!("{}", udp_addr)],
+            duration: Duration::from_secs(3),
+            rate: RateConfig::Static { rps: 5000.0 },
+            num_cores: 1,
+            error_status_threshold: 0,
+            ..Default::default()
+        };
+
+        let result = GenericTestBuilder::new(
+            config,
+            |_| UdpExecutor::with_timeout(Duration::from_secs(2)),
+            Box::new(move |_| {
+                Box::new(SimpleUdpGenerator::new(
+                    targets.clone(),
+                    payload.clone(),
+                    true,
+                )) as Box<dyn RequestGenerator<Spec = UdpRequestSpec>>
+            }),
+            Box::new(|_| {
+                Box::new(UdpNoopTransformer) as Box<dyn RequestTransformer<Spec = UdpRequestSpec>>
+            }),
+        )
+        .run()
+        .unwrap_or_else(|e| panic!("run {run} failed: {e}"));
+
+        assert!(
+            result.total_requests > 0,
+            "run {run}: expected some requests completed"
+        );
+    }
+}
+
+#[test]
+fn test_backward_compat_udp_unconnected() {
+    use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
+
+    // Use the old start_udp_echo() API — defaults to unconnected mode.
+    let server = netanvil_test_servers::udp::start_udp_echo();
+    let targets = vec![server.addr];
+    let payload = vec![0u8; 64];
+
+    let config = TestConfig {
+        targets: vec![format!("{}", server.addr)],
+        duration: Duration::from_secs(3),
+        rate: RateConfig::Static { rps: 1000.0 },
+        num_cores: 1,
+        error_status_threshold: 0,
+        ..Default::default()
+    };
+
+    let result = GenericTestBuilder::new(
+        config,
+        |_| UdpExecutor::with_timeout(Duration::from_secs(2)),
+        Box::new(move |_| {
+            Box::new(SimpleUdpGenerator::new(
+                targets.clone(),
+                payload.clone(),
+                true,
+            )) as Box<dyn RequestGenerator<Spec = UdpRequestSpec>>
+        }),
+        Box::new(|_| {
+            Box::new(UdpNoopTransformer) as Box<dyn RequestTransformer<Spec = UdpRequestSpec>>
+        }),
+    )
+    .run()
+    .expect("test run failed");
+
+    assert_eq!(
+        result.total_errors, 0,
+        "expected 0 errors with unconnected UDP backward compat, got {}",
+        result.total_errors
+    );
+    assert!(
+        result.total_requests > 0,
+        "expected some requests completed"
+    );
+}

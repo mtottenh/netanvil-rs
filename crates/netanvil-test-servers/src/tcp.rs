@@ -302,14 +302,18 @@ async fn handle_rr(
 ) {
     use compio::io::{AsyncReadExt, AsyncWriteExt};
 
-    // Pre-allocate response buffer with PRNG data (not zeros) to avoid
-    // compression artifacts. Cloned per write since compio takes ownership.
-    let response_buf = {
-        let src = pool.take();
-        let buf = src[..response_size as usize].to_vec();
-        pool.give(src);
-        buf
-    };
+    let resp_size = response_size as usize;
+
+    // Take one buffer from the pool for the lifetime of this connection.
+    // write_all returns the buffer unchanged, so we reuse it directly
+    // without clone or per-iteration pool take/give.
+    let mut resp_buf = pool.take();
+    if resp_buf.len() > resp_size {
+        resp_buf.truncate(resp_size);
+    } else if resp_buf.len() < resp_size {
+        resp_buf.resize(resp_size, 0xAA);
+    }
+
     let mut first = true;
 
     loop {
@@ -341,15 +345,17 @@ async fn handle_rr(
             first = false;
         }
 
-        // Write exactly response_size bytes.
-        // Clone per iteration: compio takes ownership of the buffer.
+        // Write exactly response_size bytes. write_all returns the buffer
+        // unchanged, so we reuse it directly — zero allocations per iteration.
         if response_size > 0 {
-            let BufResult(result, _) = stream.write_all(response_buf.clone()).await;
+            let BufResult(result, returned) = stream.write_all(resp_buf).await;
+            resp_buf = returned;
             if result.is_err() {
                 break;
             }
         }
     }
+    pool.give(resp_buf);
 }
 
 /// SINK mode: read and discard all incoming data.
@@ -373,20 +379,24 @@ async fn handle_sink(stream: &mut compio::net::TcpStream, pool: &BufPool) {
 async fn handle_source(stream: &mut compio::net::TcpStream, chunk_size: u32, pool: &BufPool) {
     use compio::io::AsyncWriteExt;
 
-    // Pre-allocate chunk with PRNG data, clone per write.
-    let chunk = {
-        let src = pool.take();
-        let buf = src[..chunk_size as usize].to_vec();
-        pool.give(src);
-        buf
-    };
+    let size = chunk_size as usize;
+
+    // Take one buffer, reuse across iterations.
+    let mut buf = pool.take();
+    if buf.len() > size {
+        buf.truncate(size);
+    } else if buf.len() < size {
+        buf.resize(size, 0xAA);
+    }
 
     loop {
-        let BufResult(result, _) = stream.write_all(chunk.clone()).await;
+        let BufResult(result, returned) = stream.write_all(buf).await;
+        buf = returned;
         if result.is_err() {
             break;
         }
     }
+    pool.give(buf);
 }
 
 /// BIDIR mode: read and write simultaneously.

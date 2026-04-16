@@ -341,6 +341,8 @@ impl FromLuaPlugin for netanvil_types::TcpRequestSpec {
             mode: netanvil_types::TcpTestMode::Echo,
             request_size: 0,
             response_size: 0,
+            latency_us: None,
+            error_rate: None,
         })
     }
 
@@ -354,6 +356,8 @@ impl FromLuaPlugin for netanvil_types::TcpRequestSpec {
             mode: netanvil_types::TcpTestMode::Echo,
             request_size: 0,
             response_size: 0,
+            latency_us: None,
+            error_rate: None,
         }
     }
 }

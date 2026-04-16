@@ -14,7 +14,7 @@ use crate::spec::UdpRequestSpec;
 /// 8-byte little-endian sequence number header prepended to each datagram.
 const SEQ_HEADER_LEN: usize = 8;
 
-/// UDP executor with lazy-initialized connected socket and per-core loss tracking.
+/// UDP executor with shared connected socket and per-core loss tracking.
 ///
 /// Each outbound datagram carries an 8-byte sequence number header (prepended
 /// by the generator).  When a response arrives, the executor extracts the
@@ -25,6 +25,14 @@ const SEQ_HEADER_LEN: usize = 8;
 /// route at connect() time, eliminating per-packet route lookup overhead.
 /// Connected sockets also use simpler io_uring ops (SEND/RECV instead of
 /// SENDMSG/RECVMSG — no sockaddr per packet).
+///
+/// Unlike TCP, UDP datagrams are independent and atomic — multiple concurrent
+/// send/recv operations on the same socket fd are safe. The socket is shared
+/// via `RefCell::borrow()` (immutable), allowing all in-flight tasks on a
+/// core to perform I/O concurrently through io_uring. With response mixing
+/// (task A may receive task B's echo), per-request sequence correlation is
+/// approximate, but aggregate loss tracking via the [`LossTracker`] bitmap
+/// remains accurate.
 pub struct UdpExecutor {
     request_timeout: Duration,
     socket: RefCell<Option<compio::net::UdpSocket>>,
@@ -55,6 +63,43 @@ impl UdpExecutor {
             connected_to: Cell::new(None),
             tracker: Rc::new(RefCell::new(LossTracker::new())),
         }
+    }
+
+    /// Ensure the socket is initialized and connected to `target`.
+    ///
+    /// Fast path: socket exists and is connected — no-op.
+    /// Slow path: create, bind, connect. If two tasks race through the slow
+    /// path, the first to finish stores its socket; the second detects the
+    /// existing socket after its own `.await` and drops its duplicate.
+    async fn ensure_socket(&self, target: SocketAddr) -> Result<(), ExecutionError> {
+        {
+            let guard = self.socket.borrow();
+            if guard.is_some() && self.connected_to.get() == Some(target) {
+                return Ok(());
+            }
+        } // Ref drops here — no borrow held across await
+
+        // Slow path: need to create + connect.
+        // Drop the old socket first (brief borrow_mut, no await).
+        *self.socket.borrow_mut() = None;
+
+        let sock = compio::net::UdpSocket::bind("0.0.0.0:0")
+            .await
+            .map_err(|e| ExecutionError::Connect(format!("UDP bind: {e}")))?;
+        sock.connect(target)
+            .await
+            .map_err(|e| ExecutionError::Connect(format!("UDP connect: {e}")))?;
+
+        // Double-check: another task may have initialized during our await.
+        let mut guard = self.socket.borrow_mut();
+        if guard.is_none() || self.connected_to.get() != Some(target) {
+            *guard = Some(sock);
+            drop(guard);
+            self.connected_to.set(Some(target));
+        }
+        // else: another task beat us — drop our socket silently
+
+        Ok(())
     }
 }
 
@@ -154,40 +199,27 @@ impl RequestExecutor for UdpExecutor {
 }
 
 impl UdpExecutor {
+    // Holding Ref across await is intentional: on compio's single-threaded runtime,
+    // multiple tasks share the socket via concurrent immutable borrows. The only
+    // borrow_mut() is in ensure_socket(), which is a no-op once initialized.
+    #[allow(clippy::await_holding_refcell_ref)]
     async fn do_execute(
         &self,
         spec: &UdpRequestSpec,
         start: Instant,
     ) -> Result<(u64, TimingBreakdown, Option<u64>), ExecutionError> {
-        // Lazily bind and connect socket on first use, or reconnect on target change.
-        let need_init = {
-            let guard = self.socket.borrow();
-            guard.is_none() || self.connected_to.get() != Some(spec.target)
-        };
-        if need_init {
-            // Drop old socket if target changed.
-            *self.socket.borrow_mut() = None;
+        self.ensure_socket(spec.target).await?;
 
-            let sock = compio::net::UdpSocket::bind("0.0.0.0:0")
-                .await
-                .map_err(|e| ExecutionError::Connect(format!("UDP bind: {e}")))?;
-            sock.connect(spec.target)
-                .await
-                .map_err(|e| ExecutionError::Connect(format!("UDP connect: {e}")))?;
-            *self.socket.borrow_mut() = Some(sock);
-            self.connected_to.set(Some(spec.target));
-        }
-
-        let sock = self
-            .socket
-            .borrow_mut()
-            .take()
-            .ok_or_else(|| ExecutionError::Connect("socket unavailable".into()))?;
+        // Shared access: immutable borrow held across await points.
+        // Multiple Ref guards can coexist — concurrent tasks share the socket.
+        let guard = self.socket.borrow();
+        let sock = guard
+            .as_ref()
+            .ok_or_else(|| ExecutionError::Connect("socket not initialized".into()))?;
 
         // Send datagram on connected socket (no address needed).
         let BufResult(result, _returned_buf) = sock.send(spec.payload.clone()).await;
         if let Err(e) = result {
-            *self.socket.borrow_mut() = Some(sock);
             return Err(ExecutionError::Protocol(format!("send: {e}")));
         }
 
@@ -211,13 +243,12 @@ impl UdpExecutor {
                     }
                 }
                 Err(e) => {
-                    *self.socket.borrow_mut() = Some(sock);
                     return Err(ExecutionError::Protocol(format!("recv: {e}")));
                 }
             }
         }
 
-        *self.socket.borrow_mut() = Some(sock);
+        // guard drops here — Ref released
 
         let total = start.elapsed();
         Ok((

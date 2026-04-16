@@ -57,6 +57,13 @@ pub struct ServerConfig {
     /// 0.01 = ~1% of reads.  Requires kernel >= 6.7 for IORING_OP_URING_CMD;
     /// automatically disabled with a warning on older kernels.
     pub tcp_health_sample_rate: f64,
+    /// UDP send rate limit in bytes/sec per client. 0 = unlimited.
+    /// Only effective in connected UDP mode (udp_idle_timeout_secs > 0).
+    pub udp_pacing_bps: u64,
+    /// Delay in microseconds before each UDP echo response. 0 = none.
+    pub udp_latency_us: u64,
+    /// UDP response drop rate per 10000 requests. 0 = no drops.
+    pub udp_drop_rate: u32,
 }
 
 impl Default for ServerConfig {
@@ -73,6 +80,9 @@ impl Default for ServerConfig {
             report_mode: ReportMode::None,
             report_interval_secs: 1.0,
             tcp_health_sample_rate: 0.0,
+            udp_pacing_bps: 0,
+            udp_latency_us: 0,
+            udp_drop_rate: 0,
         }
     }
 }
@@ -228,6 +238,25 @@ impl TestServerBuilder {
         self
     }
 
+    /// Set the UDP send rate limit in bytes/sec per connected client. 0 = unlimited.
+    /// Only effective with connected UDP (udp_idle_timeout > 0).
+    pub fn udp_pacing_bps(mut self, bps: u64) -> Self {
+        self.config.udp_pacing_bps = bps;
+        self
+    }
+
+    /// Set the delay in microseconds before each UDP echo response. 0 = none.
+    pub fn udp_latency_us(mut self, us: u64) -> Self {
+        self.config.udp_latency_us = us;
+        self
+    }
+
+    /// Set the UDP response drop rate per 10000 requests. 0 = no drops.
+    pub fn udp_drop_rate(mut self, rate: u32) -> Self {
+        self.config.udp_drop_rate = rate;
+        self
+    }
+
     /// Override the full server configuration.
     pub fn config(mut self, config: ServerConfig) -> Self {
         self.config = config;
@@ -358,6 +387,9 @@ impl TestServerBuilder {
                             let idle_timeout_secs = config.udp_idle_timeout_secs;
                             let local_port = udp_port.unwrap();
                             let wm = worker_metrics.clone();
+                            let drop_rate = config.udp_drop_rate;
+                            let latency_us = config.udp_latency_us;
+                            let pacing_bps = config.udp_pacing_bps;
                             compio::runtime::spawn(async move {
                                 crate::udp::udp_echo_loop(
                                     socket,
@@ -366,6 +398,9 @@ impl TestServerBuilder {
                                     idle_timeout_secs,
                                     local_port,
                                     &wm,
+                                    drop_rate,
+                                    latency_us,
+                                    pacing_bps,
                                 )
                                 .await;
                             })

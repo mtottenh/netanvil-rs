@@ -25,6 +25,9 @@ use crate::metrics::WorkerMetrics;
 use crate::tcp::make_pool;
 use crate::ServerConfig;
 
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
+
 /// Handle to a running UDP echo server.
 ///
 /// Dropping the handle sends a shutdown signal and joins the server thread.
@@ -98,6 +101,9 @@ pub fn start_udp_echo_with_config(config: ServerConfig) -> UdpEchoHandle {
                     config.udp_idle_timeout_secs,
                     local_port,
                     &metrics,
+                    config.udp_drop_rate,
+                    config.udp_latency_us,
+                    config.udp_pacing_bps,
                 )
                 .await;
             });
@@ -118,6 +124,42 @@ pub fn start_udp_echo_with_config(config: ServerConfig) -> UdpEchoHandle {
 /// Maximum number of recv errors to log before suppressing.
 const MAX_LOGGED_ERRORS: u64 = 10;
 
+/// Token-bucket rate limiter for UDP send pacing.
+struct TokenBucket {
+    tokens: f64,
+    capacity: f64,
+    rate: f64,
+    last_refill: Instant,
+}
+
+impl TokenBucket {
+    fn new(rate_bps: u64) -> Self {
+        let rate = rate_bps as f64;
+        Self {
+            tokens: rate,
+            capacity: rate * 2.0,
+            rate,
+            last_refill: Instant::now(),
+        }
+    }
+
+    /// Always deducts tokens (may go negative). Returns Some(delay) if tokens
+    /// went negative, None if the send can proceed immediately.
+    fn try_consume(&mut self, bytes: usize) -> Option<Duration> {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.tokens = (self.tokens + self.rate * elapsed).min(self.capacity);
+        self.last_refill = now;
+
+        self.tokens -= bytes as f64;
+        if self.tokens >= 0.0 {
+            None
+        } else {
+            Some(Duration::from_secs_f64(-self.tokens / self.rate))
+        }
+    }
+}
+
 /// Core UDP echo loop. Takes a pre-bound socket and runs until shutdown.
 ///
 /// Used by both `start_udp_echo_with_config` (single-worker) and
@@ -126,6 +168,7 @@ const MAX_LOGGED_ERRORS: u64 = 10;
 /// When `idle_timeout_secs > 0`, enables connected UDP mode: new peers get
 /// a dedicated connected socket for kernel-level demuxing. When 0, uses the
 /// classic unconnected recvfrom/sendto path.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn udp_echo_loop(
     socket: compio::net::UdpSocket,
     shutdown: &AtomicBool,
@@ -133,6 +176,9 @@ pub(crate) async fn udp_echo_loop(
     idle_timeout_secs: u32,
     local_port: u16,
     metrics: &WorkerMetrics,
+    udp_drop_rate: u32,
+    udp_latency_us: u64,
+    udp_pacing_bps: u64,
 ) {
     if idle_timeout_secs > 0 {
         udp_echo_loop_connected(
@@ -142,10 +188,21 @@ pub(crate) async fn udp_echo_loop(
             idle_timeout_secs,
             local_port,
             metrics,
+            udp_drop_rate,
+            udp_latency_us,
+            udp_pacing_bps,
         )
         .await;
     } else {
-        udp_echo_loop_unconnected(socket, shutdown, pool, metrics).await;
+        udp_echo_loop_unconnected(
+            socket,
+            shutdown,
+            pool,
+            metrics,
+            udp_drop_rate,
+            udp_latency_us,
+        )
+        .await;
     }
 }
 
@@ -155,8 +212,11 @@ async fn udp_echo_loop_unconnected(
     shutdown: &AtomicBool,
     pool: &BufPool,
     metrics: &WorkerMetrics,
+    udp_drop_rate: u32,
+    udp_latency_us: u64,
 ) {
     let mut error_count: u64 = 0;
+    let mut rng = SmallRng::seed_from_u64(0xBEEF_CAFE);
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -172,6 +232,17 @@ async fn udp_echo_loop_unconnected(
             Ok(BufResult(Ok((n, peer)), recv_buf)) => {
                 metrics.inc_datagrams_received();
                 metrics.add_bytes_received(n as u64);
+
+                if udp_drop_rate > 0 && rng.gen_range(0..10000u32) < udp_drop_rate {
+                    metrics.inc_datagrams_dropped();
+                    pool.give(recv_buf);
+                    continue;
+                }
+
+                if udp_latency_us > 0 {
+                    compio::time::sleep(Duration::from_micros(udp_latency_us)).await;
+                }
+
                 let mut send_buf = pool.take();
                 send_buf.truncate(n);
                 if send_buf.len() < n {
@@ -216,6 +287,7 @@ async fn udp_echo_loop_unconnected(
 }
 
 /// Connected UDP echo loop — per-client connected sockets with idle cleanup.
+#[allow(clippy::too_many_arguments)]
 async fn udp_echo_loop_connected(
     socket: compio::net::UdpSocket,
     shutdown: &AtomicBool,
@@ -223,6 +295,9 @@ async fn udp_echo_loop_connected(
     idle_timeout_secs: u32,
     local_port: u16,
     metrics: &WorkerMetrics,
+    udp_drop_rate: u32,
+    udp_latency_us: u64,
+    udp_pacing_bps: u64,
 ) {
     let idle_timeout = Duration::from_secs(idle_timeout_secs as u64);
     let active_clients: Rc<RefCell<HashSet<SocketAddr>>> = Rc::new(RefCell::new(HashSet::new()));
@@ -304,6 +379,9 @@ async fn udp_echo_loop_connected(
                                             handler_pool_ref,
                                             idle_timeout,
                                             m,
+                                            udp_drop_rate,
+                                            udp_latency_us,
+                                            udp_pacing_bps,
                                         )
                                         .await;
                                         clients.borrow_mut().remove(&peer);
@@ -358,14 +436,24 @@ async fn udp_echo_loop_connected(
 
 /// Handler for a single connected UDP client. Runs recv()/send() in a loop
 /// until idle timeout or shutdown.
+#[allow(clippy::too_many_arguments)]
 async fn handle_connected_udp_client(
     socket: compio::net::UdpSocket,
     shutdown: &AtomicBool,
     pool: &BufPool,
     idle_timeout: Duration,
     metrics: &WorkerMetrics,
+    udp_drop_rate: u32,
+    udp_latency_us: u64,
+    udp_pacing_bps: u64,
 ) {
     let mut last_activity = Instant::now();
+    let mut rng = SmallRng::seed_from_u64(0xBEEF_CAFE);
+    let mut bucket = if udp_pacing_bps > 0 {
+        Some(TokenBucket::new(udp_pacing_bps))
+    } else {
+        None
+    };
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -387,6 +475,23 @@ async fn handle_connected_udp_client(
                 last_activity = Instant::now();
                 metrics.inc_datagrams_received();
                 metrics.add_bytes_received(n as u64);
+
+                if udp_drop_rate > 0 && rng.gen_range(0..10000u32) < udp_drop_rate {
+                    metrics.inc_datagrams_dropped();
+                    pool.give(recv_buf);
+                    continue;
+                }
+
+                if udp_latency_us > 0 {
+                    compio::time::sleep(Duration::from_micros(udp_latency_us)).await;
+                }
+
+                if let Some(ref mut bucket) = bucket {
+                    if let Some(delay) = bucket.try_consume(n) {
+                        compio::time::sleep(delay).await;
+                    }
+                }
+
                 let mut send_buf = pool.take();
                 send_buf.truncate(n);
                 if send_buf.len() < n {

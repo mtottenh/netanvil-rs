@@ -52,6 +52,19 @@ struct Args {
     /// 0.0 = disabled, 0.01 = 1%, 1.0 = every read.  Requires kernel >= 6.7.
     #[arg(long, default_value = "0.0")]
     tcp_health_sample_rate: f64,
+
+    /// UDP send rate limit in bytes/sec per client. 0 = unlimited.
+    /// Only effective with connected UDP (--udp-idle-timeout > 0).
+    #[arg(long, default_value = "0")]
+    udp_pacing_bps: u64,
+
+    /// Delay in microseconds before each UDP echo response. 0 = none.
+    #[arg(long, default_value = "0")]
+    udp_latency_us: u64,
+
+    /// UDP response drop rate per 10000. 0 = no drops.
+    #[arg(long, default_value = "0")]
+    udp_drop_rate: u32,
 }
 
 fn main() {
@@ -85,6 +98,9 @@ fn main() {
         report_mode,
         report_interval_secs: args.report_interval,
         tcp_health_sample_rate: args.tcp_health_sample_rate,
+        udp_pacing_bps: args.udp_pacing_bps,
+        udp_latency_us: args.udp_latency_us,
+        udp_drop_rate: args.udp_drop_rate,
         ..Default::default()
     };
 

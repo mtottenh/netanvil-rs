@@ -146,7 +146,9 @@ impl AggregateMetrics {
         self.timer_lag_sum_ns += snapshot.timer_lag_sum_ns;
         self.timer_lag_max_ns = self.timer_lag_max_ns.max(snapshot.timer_lag_max_ns);
         self.channel_transit_sum_ns += snapshot.channel_transit_sum_ns;
-        self.channel_transit_max_ns = self.channel_transit_max_ns.max(snapshot.channel_transit_max_ns);
+        self.channel_transit_max_ns = self
+            .channel_transit_max_ns
+            .max(snapshot.channel_transit_max_ns);
         self.dispatch_gap_sum_ns += snapshot.dispatch_gap_sum_ns;
         self.dispatch_gap_max_ns = self.dispatch_gap_max_ns.max(snapshot.dispatch_gap_max_ns);
         self.total_delay_sum_ns += snapshot.total_delay_sum_ns;

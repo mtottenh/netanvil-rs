@@ -387,7 +387,10 @@ fn timer_precision_intended_times_are_accurate() {
 
     let mut times = Vec::new();
     while let Ok(msg) = fire_rxs[0].try_recv() {
-        if let ScheduledRequest::Fire { intended_time: t, .. } = msg {
+        if let ScheduledRequest::Fire {
+            intended_time: t, ..
+        } = msg
+        {
             times.push(t);
         }
     }

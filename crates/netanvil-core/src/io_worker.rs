@@ -249,7 +249,10 @@ where
     M: MetricsCollector + 'static,
 {
     match msg {
-        ScheduledRequest::Fire { intended_time, sent_time } => {
+        ScheduledRequest::Fire {
+            intended_time,
+            sent_time,
+        } => {
             // Check in-flight limit before spawning. If at capacity, count
             // as an in_flight_drop (distinct from fire_channel_drops).
             let permit = match in_flight_limit.try_acquire() {
@@ -278,7 +281,10 @@ where
 
             // Stamp dispatch_time AFTER generate+transform, before spawn.
             let dispatch_time = Instant::now();
-            let context = RequestContext { dispatch_time, ..context };
+            let context = RequestContext {
+                dispatch_time,
+                ..context
+            };
 
             let exec = executor.clone();
             let met = metrics.clone();

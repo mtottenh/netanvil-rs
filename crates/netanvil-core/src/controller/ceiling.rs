@@ -124,9 +124,7 @@ mod tests {
     #[test]
     fn returns_start_before_started() {
         let clock = Arc::new(TestClock::new());
-        let c = ProgressiveCeiling::new_with_clock(
-            100.0, 10000.0, Duration::from_secs(60), clock,
-        );
+        let c = ProgressiveCeiling::new_with_clock(100.0, 10000.0, Duration::from_secs(60), clock);
         assert_eq!(c.ceiling(), 100.0);
         assert_eq!(c.progress(), 0.0);
     }
@@ -135,7 +133,10 @@ mod tests {
     fn ramps_after_start() {
         let clock = Arc::new(TestClock::new());
         let c = ProgressiveCeiling::started_with_clock(
-            100.0, 10000.0, Duration::from_millis(100), clock.clone(),
+            100.0,
+            10000.0,
+            Duration::from_millis(100),
+            clock.clone(),
         );
         // Immediately after start, ceiling is at start_value
         assert_eq!(c.ceiling(), 100.0);
@@ -151,7 +152,10 @@ mod tests {
     fn deferred_start() {
         let clock = Arc::new(TestClock::new());
         let mut c = ProgressiveCeiling::new_with_clock(
-            100.0, 10000.0, Duration::from_millis(100), clock.clone(),
+            100.0,
+            10000.0,
+            Duration::from_millis(100),
+            clock.clone(),
         );
         assert_eq!(c.ceiling(), 100.0);
 
@@ -164,7 +168,10 @@ mod tests {
     fn set_end_value() {
         let clock = Arc::new(TestClock::new());
         let mut c = ProgressiveCeiling::started_with_clock(
-            100.0, 10000.0, Duration::from_millis(100), clock.clone(),
+            100.0,
+            10000.0,
+            Duration::from_millis(100),
+            clock.clone(),
         );
         clock.advance(Duration::from_millis(100));
         assert!((c.ceiling() - 10000.0).abs() < 1.0);
@@ -176,9 +183,7 @@ mod tests {
     #[test]
     fn zero_duration_gives_end_value() {
         let clock = Arc::new(TestClock::new());
-        let c = ProgressiveCeiling::started_with_clock(
-            100.0, 10000.0, Duration::ZERO, clock,
-        );
+        let c = ProgressiveCeiling::started_with_clock(100.0, 10000.0, Duration::ZERO, clock);
         assert_eq!(c.ceiling(), 10000.0);
         assert_eq!(c.progress(), 1.0);
     }
@@ -187,7 +192,10 @@ mod tests {
     fn milestone_detection() {
         let clock = Arc::new(TestClock::new());
         let mut c = ProgressiveCeiling::started_with_clock(
-            0.0, 100.0, Duration::from_millis(100), clock.clone(),
+            0.0,
+            100.0,
+            Duration::from_millis(100),
+            clock.clone(),
         );
         assert_eq!(c.check_milestone(), None); // 0% — not a new milestone
 

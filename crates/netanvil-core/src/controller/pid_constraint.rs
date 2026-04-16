@@ -236,12 +236,7 @@ impl PidConstraint {
     /// Uses conservative placeholder gains until `on_exploration_complete()`
     /// delivers computed gains from the `ExplorationManager`. Returns `None`
     /// from `evaluate()` while `awaiting_exploration` is true.
-    pub fn auto_tuning(
-        id: String,
-        metric: TargetMetric,
-        target: f64,
-        smoother: Smoother,
-    ) -> Self {
+    pub fn auto_tuning(id: String, metric: TargetMetric, target: f64, smoother: Smoother) -> Self {
         let direction = MetricDirection::from_metric(&metric);
         let mut s = Self::from_config(PidConstraintConfig {
             id,

@@ -580,16 +580,36 @@ impl Coordinator {
 
         // Decomposed scheduling delay from the tick aggregate
         let total_requests = summary.total_requests;
-        let timer_lag_mean_ns = if total_requests > 0 { self.tick_aggregate.timer_lag_sum_ns() / total_requests } else { 0 };
+        let timer_lag_mean_ns = if total_requests > 0 {
+            self.tick_aggregate.timer_lag_sum_ns() / total_requests
+        } else {
+            0
+        };
         let timer_lag_max_ns = self.tick_aggregate.timer_lag_max_ns();
-        let channel_transit_mean_ns = if total_requests > 0 { self.tick_aggregate.channel_transit_sum_ns() / total_requests } else { 0 };
+        let channel_transit_mean_ns = if total_requests > 0 {
+            self.tick_aggregate.channel_transit_sum_ns() / total_requests
+        } else {
+            0
+        };
         let channel_transit_max_ns = self.tick_aggregate.channel_transit_max_ns();
-        let dispatch_gap_mean_ns = if total_requests > 0 { self.tick_aggregate.dispatch_gap_sum_ns() / total_requests } else { 0 };
+        let dispatch_gap_mean_ns = if total_requests > 0 {
+            self.tick_aggregate.dispatch_gap_sum_ns() / total_requests
+        } else {
+            0
+        };
         let dispatch_gap_max_ns = self.tick_aggregate.dispatch_gap_max_ns();
-        let scheduling_delay_mean_ns = if total_requests > 0 { self.tick_aggregate.total_delay_sum_ns() / total_requests } else { 0 };
+        let scheduling_delay_mean_ns = if total_requests > 0 {
+            self.tick_aggregate.total_delay_sum_ns() / total_requests
+        } else {
+            0
+        };
         let scheduling_delay_max_ns = self.tick_aggregate.total_delay_max_ns();
         let delay_over_1ms = self.tick_aggregate.total_delay_count_over_1ms();
-        let delayed_request_ratio = if total_requests > 0 { delay_over_1ms as f64 / total_requests as f64 } else { 0.0 };
+        let delayed_request_ratio = if total_requests > 0 {
+            delay_over_1ms as f64 / total_requests as f64
+        } else {
+            0.0
+        };
 
         let rate_achievement = if target_rps > 0.0 {
             (smoothed_rps / target_rps).min(2.0)
@@ -746,16 +766,36 @@ impl Coordinator {
         let total_attempted = total_dispatched + total_dropped;
         let total_requests = self.total_aggregate.total_requests();
 
-        let timer_lag_mean_ns = if total_requests > 0 { self.total_aggregate.timer_lag_sum_ns() / total_requests } else { 0 };
+        let timer_lag_mean_ns = if total_requests > 0 {
+            self.total_aggregate.timer_lag_sum_ns() / total_requests
+        } else {
+            0
+        };
         let timer_lag_max_ns = self.total_aggregate.timer_lag_max_ns();
-        let channel_transit_mean_ns = if total_requests > 0 { self.total_aggregate.channel_transit_sum_ns() / total_requests } else { 0 };
+        let channel_transit_mean_ns = if total_requests > 0 {
+            self.total_aggregate.channel_transit_sum_ns() / total_requests
+        } else {
+            0
+        };
         let channel_transit_max_ns = self.total_aggregate.channel_transit_max_ns();
-        let dispatch_gap_mean_ns = if total_requests > 0 { self.total_aggregate.dispatch_gap_sum_ns() / total_requests } else { 0 };
+        let dispatch_gap_mean_ns = if total_requests > 0 {
+            self.total_aggregate.dispatch_gap_sum_ns() / total_requests
+        } else {
+            0
+        };
         let dispatch_gap_max_ns = self.total_aggregate.dispatch_gap_max_ns();
-        let scheduling_delay_mean_ns = if total_requests > 0 { self.total_aggregate.total_delay_sum_ns() / total_requests } else { 0 };
+        let scheduling_delay_mean_ns = if total_requests > 0 {
+            self.total_aggregate.total_delay_sum_ns() / total_requests
+        } else {
+            0
+        };
         let scheduling_delay_max_ns = self.total_aggregate.total_delay_max_ns();
         let delay_over_1ms = self.total_aggregate.total_delay_count_over_1ms();
-        let delayed_request_ratio = if total_requests > 0 { delay_over_1ms as f64 / total_requests as f64 } else { 0.0 };
+        let delayed_request_ratio = if total_requests > 0 {
+            delay_over_1ms as f64 / total_requests as f64
+        } else {
+            0.0
+        };
 
         let saturation = SaturationInfo {
             backpressure_drops: total_dropped,
@@ -779,9 +819,7 @@ impl Coordinator {
             tcp_retransmit_ratio: self.total_aggregate.tcp_retransmit_ratio(),
             rate_achievement: 1.0, // not meaningful for final result
             assessment: if total_dropped > 0
-                || delay_over_1ms as f64
-                    / total_requests.max(1) as f64
-                    > 0.10
+                || delay_over_1ms as f64 / total_requests.max(1) as f64 > 0.10
             {
                 SaturationAssessment::ClientSaturated
             } else {

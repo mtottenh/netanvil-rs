@@ -15,11 +15,11 @@ use super::autotune::ExplorationManager;
 use super::ceiling::ProgressiveCeiling;
 use super::clock::{Clock, SystemClock};
 use super::composition::{CompositionStrategy, ConstraintEval, MinSelector};
-use super::constraint::{Constraint, ConstraintIntent, ConstraintOutput, EvalContext, WarmupBaseline};
-use super::constraints::ConstraintClass;
-use super::trace::{
-    ArbiterRecord, EvaluationRecord, Participation, TickRecord, TraceRecorder,
+use super::constraint::{
+    Constraint, ConstraintIntent, ConstraintOutput, EvalContext, WarmupBaseline,
 };
+use super::constraints::ConstraintClass;
+use super::trace::{ArbiterRecord, EvaluationRecord, Participation, TickRecord, TraceRecorder};
 
 // ---------------------------------------------------------------------------
 // Sub-components
@@ -87,7 +87,12 @@ struct KnownGoodTracker {
 }
 
 impl KnownGoodTracker {
-    fn new(floor_fraction: f64, window: Duration, initial_rate: f64, clock: Arc<dyn Clock>) -> Self {
+    fn new(
+        floor_fraction: f64,
+        window: Duration,
+        initial_rate: f64,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         let now = clock.now();
         Self {
             max_recent_rate: initial_rate,
@@ -441,8 +446,7 @@ pub struct Arbiter {
 
 impl Arbiter {
     pub fn new(config: ArbiterConfig) -> Self {
-        let clock: Arc<dyn Clock> =
-            config.clock.unwrap_or_else(|| Arc::new(SystemClock));
+        let clock: Arc<dyn Clock> = config.clock.unwrap_or_else(|| Arc::new(SystemClock));
 
         // Determine phase: Exploration takes priority, then Warmup, then Active.
         let warmup_config = config.warmup;
@@ -655,21 +659,15 @@ impl Arbiter {
     }
 
     fn warmup_tick(&mut self, summary: &MetricsSummary) -> RateDecision {
-        let (warmup_rps, warmup_duration, start, p99_samples) =
-            match &mut self.phase {
-                ArbiterPhase::Warmup {
-                    warmup_rps,
-                    warmup_duration,
-                    start,
-                    p99_samples,
-                } => (
-                    *warmup_rps,
-                    *warmup_duration,
-                    *start,
-                    p99_samples,
-                ),
-                _ => unreachable!("warmup_tick called outside warmup phase"),
-            };
+        let (warmup_rps, warmup_duration, start, p99_samples) = match &mut self.phase {
+            ArbiterPhase::Warmup {
+                warmup_rps,
+                warmup_duration,
+                start,
+                p99_samples,
+            } => (*warmup_rps, *warmup_duration, *start, p99_samples),
+            _ => unreachable!("warmup_tick called outside warmup phase"),
+        };
 
         // Collect warmup samples
         if summary.total_requests > 0 {
@@ -772,9 +770,7 @@ impl Arbiter {
         // 4. Compose via strategy.
         let result = self.strategy.compose(&evals, abstainers, increase_rate);
 
-        self.last_binding = result
-            .binding
-            .map(|i| self.constraints[i].id().to_string());
+        self.last_binding = result.binding.map(|i| self.constraints[i].id().to_string());
 
         // Bug 2 fix: classify backoff from the binding constraint's intent,
         // BEFORE arbiter-level clamps mask the signal. A drop caused by the
@@ -965,7 +961,10 @@ impl RateController for Arbiter {
         }
         // Abort exploration on external rate override.
         if matches!(self.phase, ArbiterPhase::Exploration(_)) {
-            tracing::info!(rps, "arbiter: external set_rate during exploration, aborting");
+            tracing::info!(
+                rps,
+                "arbiter: external set_rate during exploration, aborting"
+            );
             self.finish_exploration();
         }
     }

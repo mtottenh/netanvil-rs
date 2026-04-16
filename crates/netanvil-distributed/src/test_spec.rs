@@ -388,12 +388,12 @@ fn convert_rate(spec: RateSpecConfig) -> Result<RateConfig, SpecError> {
             let warmup = match warmup {
                 Some(w) => {
                     let d = parse_duration(&w.duration).map_err(|e| {
-                        SpecError(format!(
-                            "invalid warmup duration '{}': {e}",
-                            w.duration
-                        ))
+                        SpecError(format!("invalid warmup duration '{}': {e}", w.duration))
                     })?;
-                    Some(WarmupConfig { rps: w.rps, duration: d })
+                    Some(WarmupConfig {
+                        rps: w.rps,
+                        duration: d,
+                    })
                 }
                 None => None,
             };

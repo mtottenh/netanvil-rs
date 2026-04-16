@@ -314,10 +314,7 @@ fn build_steady_state_trace(
 }
 
 /// PID-specific: step metric through values to test direction response.
-fn build_step_response_trace(
-    params: &TraceParams,
-    phases: &[(f64, usize)],
-) -> Vec<MetricsSummary> {
+fn build_step_response_trace(params: &TraceParams, phases: &[(f64, usize)]) -> Vec<MetricsSummary> {
     let mut trace = Vec::new();
     // Warmup phase
     for _ in 0..params.warmup_ticks {
@@ -493,7 +490,10 @@ fn ramp_shadow_config(warmup_ticks: usize, control_interval: Duration) -> RateCo
                 smoother: None,
                 class_override: None,
                 threshold_source: ThresholdSource::FromBaseline {
-                    threshold_from_baseline: BaselineMultiplier { multiplier: 3.0, baseline_floor_ms: 0.0 },
+                    threshold_from_baseline: BaselineMultiplier {
+                        multiplier: 3.0,
+                        baseline_floor_ms: 0.0,
+                    },
                 },
                 persistence: 3,
                 self_caused_cap: None,
@@ -980,10 +980,8 @@ fn shadow_pid_sweep_low() {
     };
     let clock = Arc::new(TestClock::new());
     let config = pid_shadow_config(target);
-    let trace = build_step_response_trace(
-        &params,
-        &[(120.0, 40), (80.0, 40), (110.0, 40), (90.0, 40)],
-    );
+    let trace =
+        build_step_response_trace(&params, &[(120.0, 40), (80.0, 40), (110.0, 40), (90.0, 40)]);
     let test_duration = SHADOW_TEST_DURATION;
 
     let (old, new) = run_shadow(
@@ -1021,10 +1019,8 @@ fn shadow_pid_sweep_high() {
     };
     let clock = Arc::new(TestClock::new());
     let config = pid_shadow_config(target);
-    let trace = build_step_response_trace(
-        &params,
-        &[(25.0, 40), (15.0, 40), (22.0, 40), (18.0, 40)],
-    );
+    let trace =
+        build_step_response_trace(&params, &[(25.0, 40), (15.0, 40), (22.0, 40), (18.0, 40)]);
     let test_duration = SHADOW_TEST_DURATION;
 
     let (old, new) = run_shadow(
@@ -1211,18 +1207,9 @@ fn shadow_pid_autotune_single_metric() {
     // - 10 ticks baseline: p99 = 80ms (below 100ms target)
     // - 30 ticks step:     p99 = 120ms (above target, simulating load response)
     // - 100 ticks settle:  p99 = 100ms (at target)
-    let trace = build_step_response_trace(
-        &params,
-        &[(80.0, 10), (120.0, 30), (100.0, 100)],
-    );
+    let trace = build_step_response_trace(&params, &[(80.0, 10), (120.0, 30), (100.0, 100)]);
 
-    let (old, new) = run_shadow(
-        &config,
-        &trace,
-        &clock,
-        control_interval,
-        test_duration,
-    );
+    let (old, new) = run_shadow(&config, &trace, &clock, control_interval, test_duration);
 
     // Both controllers should have completed exploration by now.
     // Find the tick where exploration likely ended (around tick 10-20).
@@ -1261,8 +1248,14 @@ fn shadow_pid_autotune_single_metric() {
     let old_rates: Vec<f64> = old.iter().map(|t| t.target_rps).collect();
     let new_rates: Vec<f64> = new.iter().map(|t| t.target_rps).collect();
 
-    let old_distinct = old_rates.windows(2).filter(|w| (w[1] - w[0]).abs() > 0.01).count();
-    let new_distinct = new_rates.windows(2).filter(|w| (w[1] - w[0]).abs() > 0.01).count();
+    let old_distinct = old_rates
+        .windows(2)
+        .filter(|w| (w[1] - w[0]).abs() > 0.01)
+        .count();
+    let new_distinct = new_rates
+        .windows(2)
+        .filter(|w| (w[1] - w[0]).abs() > 0.01)
+        .count();
 
     eprintln!(
         "[pid_autotune/single_metric] old_changes={}, new_changes={}, old_final={:.1}, new_final={:.1}",
@@ -1291,7 +1284,10 @@ fn shadow_pid_autotune_single_metric() {
             let min = post.iter().cloned().fold(f64::INFINITY, f64::min);
             if min > 0.0 {
                 let ratio = max / min;
-                eprintln!("[pid_autotune/single_metric] {label} post-exploration max/min ratio={:.2}", ratio);
+                eprintln!(
+                    "[pid_autotune/single_metric] {label} post-exploration max/min ratio={:.2}",
+                    ratio
+                );
                 assert!(
                     ratio < max_ratio,
                     "[{label}] post-exploration max/min ratio {ratio:.2} exceeds {max_ratio:.1}"

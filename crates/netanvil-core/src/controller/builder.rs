@@ -17,7 +17,9 @@ use super::pid_constraint::PidConstraint;
 use super::smoothing::Smoother;
 use super::static_rate::StaticRateController;
 use super::step_rate::StepRateController;
-use super::threshold::{BackoffSchedule, MetricExtractor, SeverityMapping, ThresholdConfig, ThresholdConstraint};
+use super::threshold::{
+    BackoffSchedule, MetricExtractor, SeverityMapping, ThresholdConfig, ThresholdConstraint,
+};
 
 /// Build a `Box<dyn RateController>` from a [`RateConfig`].
 ///
@@ -200,7 +202,11 @@ fn build_adaptive_constraint(
                             tc.id
                         );
                     }
-                    (0.0, Some(threshold_from_baseline.multiplier), Some(threshold_from_baseline.baseline_floor_ms))
+                    (
+                        0.0,
+                        Some(threshold_from_baseline.multiplier),
+                        Some(threshold_from_baseline.baseline_floor_ms),
+                    )
                 }
             };
 
@@ -263,10 +269,8 @@ fn build_adaptive_constraint(
                     } else {
                         Smoother::ema(*smoothing)
                     };
-                    auto_explorations.push(MetricExploration::new(
-                        target_metric.clone(),
-                        sc.target,
-                    ));
+                    auto_explorations
+                        .push(MetricExploration::new(target_metric.clone(), sc.target));
                     let mut constraint = PidConstraint::auto_tuning(
                         sc.id.clone(),
                         target_metric,
@@ -360,9 +364,7 @@ fn map_smoother_config_for_pid(
 fn default_smoother_for_metric(metric: &MetricRef) -> Smoother {
     match metric {
         MetricRef::Internal(
-            InternalMetric::LatencyP50
-            | InternalMetric::LatencyP90
-            | InternalMetric::LatencyP99,
+            InternalMetric::LatencyP50 | InternalMetric::LatencyP90 | InternalMetric::LatencyP99,
         ) => Smoother::median(3),
         _ => Smoother::ema(0.3),
     }
@@ -388,9 +390,9 @@ fn map_constraint_class(
 /// Map metric direction from MetricRef.
 fn map_metric_direction(metric: &MetricRef) -> netanvil_types::SignalDirection {
     match metric {
-        MetricRef::Internal(
-            InternalMetric::ThroughputSend | InternalMetric::ThroughputRecv,
-        ) => netanvil_types::SignalDirection::LowerIsWorse,
+        MetricRef::Internal(InternalMetric::ThroughputSend | InternalMetric::ThroughputRecv) => {
+            netanvil_types::SignalDirection::LowerIsWorse
+        }
         MetricRef::External(ext) => ext.direction,
         _ => netanvil_types::SignalDirection::HigherIsWorse,
     }

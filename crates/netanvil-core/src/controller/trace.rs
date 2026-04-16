@@ -224,11 +224,7 @@ impl JsonlTraceRecorder {
     fn record(&mut self, tick: &TickRecord) {
         let result = serde_json::to_writer(&mut self.writer, tick)
             .map_err(|e| e.to_string())
-            .and_then(|_| {
-                self.writer
-                    .write_all(b"\n")
-                    .map_err(|e| e.to_string())
-            });
+            .and_then(|_| self.writer.write_all(b"\n").map_err(|e| e.to_string()));
         if let Err(e) = result {
             if self.ticks_written == 0 {
                 tracing::warn!("control trace: failed to write tick record: {e}");

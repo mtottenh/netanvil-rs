@@ -357,7 +357,12 @@ fn timer_plus_workers_coordinated_omission_tracking() {
 
     // Send from another thread so the worker can process between messages
     std::thread::spawn(move || {
-        fire_tx.send(ScheduledRequest::Fire { intended_time, sent_time: intended_time }).unwrap();
+        fire_tx
+            .send(ScheduledRequest::Fire {
+                intended_time,
+                sent_time: intended_time,
+            })
+            .unwrap();
         // Give the worker time to process and spawn the task
         std::thread::sleep(Duration::from_millis(200));
         fire_tx.send(ScheduledRequest::Stop).unwrap();

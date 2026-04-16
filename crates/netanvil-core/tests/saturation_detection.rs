@@ -144,8 +144,7 @@ fn collector_tracks_scheduling_delay() {
     );
     // Max total delay should be ~10ms
     assert!(
-        snapshot.total_delay_max_ns >= 9_000_000
-            && snapshot.total_delay_max_ns <= 11_000_000,
+        snapshot.total_delay_max_ns >= 9_000_000 && snapshot.total_delay_max_ns <= 11_000_000,
         "max should be ~10ms: {}ns",
         snapshot.total_delay_max_ns
     );
@@ -162,7 +161,8 @@ fn collector_tracks_scheduling_delay() {
     );
     // Channel transit max should be ~5ms (from request 1)
     assert!(
-        snapshot.channel_transit_max_ns >= 4_500_000 && snapshot.channel_transit_max_ns <= 5_500_000,
+        snapshot.channel_transit_max_ns >= 4_500_000
+            && snapshot.channel_transit_max_ns <= 5_500_000,
         "channel_transit max should be ~5ms: {}ns",
         snapshot.channel_transit_max_ns
     );
@@ -320,8 +320,8 @@ fn saturation_healthy_when_no_signals() {
         channel_transit_max_ns: 0,
         dispatch_gap_mean_ns: 0,
         dispatch_gap_max_ns: 0,
-        scheduling_delay_mean_ns: 100_000,  // 0.1ms
-        scheduling_delay_max_ns: 500_000,   // 0.5ms
+        scheduling_delay_mean_ns: 100_000, // 0.1ms
+        scheduling_delay_max_ns: 500_000,  // 0.5ms
         delayed_request_ratio: 0.0,
         rate_achievement: 1.0,
         cpu_affinity_ratio: 0.0,
@@ -348,8 +348,8 @@ fn saturation_client_when_backpressure() {
         channel_transit_max_ns: 0,
         dispatch_gap_mean_ns: 0,
         dispatch_gap_max_ns: 0,
-        scheduling_delay_mean_ns: 100_000,  // 0.1ms
-        scheduling_delay_max_ns: 500_000,   // 0.5ms
+        scheduling_delay_mean_ns: 100_000, // 0.1ms
+        scheduling_delay_max_ns: 500_000,  // 0.5ms
         delayed_request_ratio: 0.0,
         rate_achievement: 0.95,
         cpu_affinity_ratio: 0.0,
@@ -375,8 +375,8 @@ fn saturation_info_serializes_to_json() {
         channel_transit_max_ns: 0,
         dispatch_gap_mean_ns: 0,
         dispatch_gap_max_ns: 0,
-        scheduling_delay_mean_ns: 5_000_000,   // 5.0ms
-        scheduling_delay_max_ns: 50_000_000,   // 50.0ms
+        scheduling_delay_mean_ns: 5_000_000, // 5.0ms
+        scheduling_delay_max_ns: 50_000_000, // 50.0ms
         delayed_request_ratio: 0.15,
         rate_achievement: 0.88,
         cpu_affinity_ratio: 0.0,

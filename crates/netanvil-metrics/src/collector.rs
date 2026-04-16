@@ -200,24 +200,40 @@ impl<P: PacketCounterSource> MetricsCollector for HdrMetricsCollector<P> {
         let _ = self.histogram.borrow_mut().record(latency_ns.max(1));
 
         // Track decomposed scheduling delay for saturation detection.
-        let timer_lag_ns = result.sent_time.saturating_duration_since(result.intended_time).as_nanos() as u64;
-        let channel_transit_ns = result.actual_time.saturating_duration_since(result.sent_time).as_nanos() as u64;
-        let dispatch_gap_ns = result.dispatch_time.saturating_duration_since(result.actual_time).as_nanos() as u64;
-        let total_delay_ns = result.dispatch_time.saturating_duration_since(result.intended_time).as_nanos() as u64;
+        let timer_lag_ns = result
+            .sent_time
+            .saturating_duration_since(result.intended_time)
+            .as_nanos() as u64;
+        let channel_transit_ns = result
+            .actual_time
+            .saturating_duration_since(result.sent_time)
+            .as_nanos() as u64;
+        let dispatch_gap_ns = result
+            .dispatch_time
+            .saturating_duration_since(result.actual_time)
+            .as_nanos() as u64;
+        let total_delay_ns = result
+            .dispatch_time
+            .saturating_duration_since(result.intended_time)
+            .as_nanos() as u64;
 
-        self.timer_lag_sum_ns.set(self.timer_lag_sum_ns.get() + timer_lag_ns);
+        self.timer_lag_sum_ns
+            .set(self.timer_lag_sum_ns.get() + timer_lag_ns);
         if timer_lag_ns > self.timer_lag_max_ns.get() {
             self.timer_lag_max_ns.set(timer_lag_ns);
         }
-        self.channel_transit_sum_ns.set(self.channel_transit_sum_ns.get() + channel_transit_ns);
+        self.channel_transit_sum_ns
+            .set(self.channel_transit_sum_ns.get() + channel_transit_ns);
         if channel_transit_ns > self.channel_transit_max_ns.get() {
             self.channel_transit_max_ns.set(channel_transit_ns);
         }
-        self.dispatch_gap_sum_ns.set(self.dispatch_gap_sum_ns.get() + dispatch_gap_ns);
+        self.dispatch_gap_sum_ns
+            .set(self.dispatch_gap_sum_ns.get() + dispatch_gap_ns);
         if dispatch_gap_ns > self.dispatch_gap_max_ns.get() {
             self.dispatch_gap_max_ns.set(dispatch_gap_ns);
         }
-        self.total_delay_sum_ns.set(self.total_delay_sum_ns.get() + total_delay_ns);
+        self.total_delay_sum_ns
+            .set(self.total_delay_sum_ns.get() + total_delay_ns);
         if total_delay_ns > self.total_delay_max_ns.get() {
             self.total_delay_max_ns.set(total_delay_ns);
         }

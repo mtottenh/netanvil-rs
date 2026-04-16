@@ -5,7 +5,9 @@ use netanvil_core::clock::{Clock, TestClock};
 use netanvil_core::controller::autotune::{
     compute_cohen_coon_gains, gain_schedule, ExplorationManager, MetricExploration, PidState,
 };
-use netanvil_core::{build_arbiter, Arbiter, ArbiterConfig, StaticRateController, StepRateController};
+use netanvil_core::{
+    build_arbiter, Arbiter, ArbiterConfig, StaticRateController, StepRateController,
+};
 use netanvil_types::{
     BaselineMultiplier, BoundsConfig, ConstraintClassConfig, ConstraintConfig,
     ExternalConstraintConfig, InternalMetric, MetricRef, MetricsSummary, MissingSignalBehavior,
@@ -454,7 +456,11 @@ fn arbiter_ramp_warmup_holds_rate() {
     let clock = Arc::new(TestClock::new());
     // test_duration=2ms so ceiling opens almost immediately (ramp_duration = 1ms).
     let mut ctrl = build_ramp_arbiter(
-        100.0, 5.0, 10.0, 50000.0, 3.0,
+        100.0,
+        5.0,
+        10.0,
+        50000.0,
+        3.0,
         clock.clone() as Arc<dyn Clock>,
         Duration::from_millis(2),
     );
@@ -472,7 +478,11 @@ fn arbiter_ramp_warmup_holds_rate() {
 fn arbiter_ramp_transitions_to_active_and_increases() {
     let clock = Arc::new(TestClock::new());
     let mut ctrl = build_ramp_arbiter(
-        100.0, 5.0, 10.0, 50000.0, 3.0,
+        100.0,
+        5.0,
+        10.0,
+        50000.0,
+        3.0,
         clock.clone() as Arc<dyn Clock>,
         Duration::from_millis(2),
     );
@@ -520,7 +530,11 @@ fn arbiter_ramp_backs_off_on_latency_spike() {
     // masked whether the test was actually exercising latency backoff or
     // just hitting a closed ceiling.
     let mut ctrl = build_ramp_arbiter(
-        100.0, 5.0, 10.0, 50000.0, 3.0,
+        100.0,
+        5.0,
+        10.0,
+        50000.0,
+        3.0,
         clock.clone() as Arc<dyn Clock>,
         Duration::from_millis(2),
     );
@@ -926,7 +940,11 @@ fn arbiter_warmup_sets_latency_threshold() {
     let clock = Arc::new(TestClock::new());
     let control_interval = Duration::from_millis(100);
     let mut ctrl = build_ramp_arbiter(
-        100.0, 5.0, 10.0, 50000.0, 3.0,
+        100.0,
+        5.0,
+        10.0,
+        50000.0,
+        3.0,
         clock.clone() as Arc<dyn Clock>,
         Duration::from_millis(2),
     );
@@ -991,11 +1009,11 @@ fn arbiter_warmup_sets_latency_threshold() {
 
 #[test]
 fn arbiter_exploration_drives_rate_then_transitions() {
-    use std::sync::Arc;
-    use netanvil_core::controller::pid_constraint::PidConstraint as PidC;
-    use netanvil_core::controller::smoothing::Smoother;
     use netanvil_core::controller::clock::TestClock;
     use netanvil_core::controller::constraint::Constraint;
+    use netanvil_core::controller::pid_constraint::PidConstraint as PidC;
+    use netanvil_core::controller::smoothing::Smoother;
+    use std::sync::Arc;
 
     let clock = Arc::new(TestClock::new());
     let control_interval = Duration::from_millis(100);
@@ -1021,8 +1039,8 @@ fn arbiter_exploration_drives_rate_then_transitions() {
 
     let config = ArbiterConfig::new(
         constraints,
-        500.0,  // initial_rps
-        10.0,   // min_rps
+        500.0,   // initial_rps
+        10.0,    // min_rps
         50000.0, // max_rps
         Duration::from_secs(60),
     )
@@ -1104,11 +1122,11 @@ fn arbiter_exploration_drives_rate_then_transitions() {
 
 #[test]
 fn arbiter_exploration_set_rate_aborts() {
-    use std::sync::Arc;
-    use netanvil_core::controller::pid_constraint::PidConstraint as PidC;
-    use netanvil_core::controller::smoothing::Smoother;
     use netanvil_core::controller::clock::TestClock;
     use netanvil_core::controller::constraint::Constraint;
+    use netanvil_core::controller::pid_constraint::PidConstraint as PidC;
+    use netanvil_core::controller::smoothing::Smoother;
+    use std::sync::Arc;
 
     let clock = Arc::new(TestClock::new());
     let control_interval = Duration::from_millis(100);
@@ -1128,15 +1146,9 @@ fn arbiter_exploration_set_rate_aborts() {
     );
 
     let constraints: Vec<Box<dyn Constraint>> = vec![Box::new(constraint)];
-    let config = ArbiterConfig::new(
-        constraints,
-        500.0,
-        10.0,
-        50000.0,
-        Duration::from_secs(60),
-    )
-    .with_exploration(exploration)
-    .with_clock(clock.clone() as Arc<dyn netanvil_core::Clock>);
+    let config = ArbiterConfig::new(constraints, 500.0, 10.0, 50000.0, Duration::from_secs(60))
+        .with_exploration(exploration)
+        .with_clock(clock.clone() as Arc<dyn netanvil_core::Clock>);
 
     let mut arbiter = Arbiter::new(config);
 
@@ -1189,11 +1201,11 @@ fn arbiter_exploration_set_rate_aborts() {
 
 #[test]
 fn arbiter_all_manual_skips_exploration() {
-    use std::sync::Arc;
-    use netanvil_core::controller::pid_constraint::PidConstraint as PidC;
-    use netanvil_core::controller::smoothing::Smoother;
     use netanvil_core::controller::clock::TestClock;
     use netanvil_core::controller::constraint::Constraint;
+    use netanvil_core::controller::pid_constraint::PidConstraint as PidC;
+    use netanvil_core::controller::smoothing::Smoother;
+    use std::sync::Arc;
 
     let clock = Arc::new(TestClock::new());
 
@@ -1210,14 +1222,8 @@ fn arbiter_all_manual_skips_exploration() {
     );
 
     let constraints: Vec<Box<dyn Constraint>> = vec![Box::new(constraint)];
-    let config = ArbiterConfig::new(
-        constraints,
-        500.0,
-        10.0,
-        50000.0,
-        Duration::from_secs(60),
-    )
-    .with_clock(clock.clone() as Arc<dyn netanvil_core::Clock>);
+    let config = ArbiterConfig::new(constraints, 500.0, 10.0, 50000.0, Duration::from_secs(60))
+        .with_clock(clock.clone() as Arc<dyn netanvil_core::Clock>);
 
     let arbiter = Arbiter::new(config);
 
@@ -1239,11 +1245,11 @@ fn arbiter_all_manual_skips_exploration() {
 
 #[test]
 fn arbiter_exploration_then_pid_active() {
-    use std::sync::Arc;
-    use netanvil_core::controller::pid_constraint::PidConstraint as PidC;
-    use netanvil_core::controller::smoothing::Smoother;
     use netanvil_core::controller::clock::TestClock;
     use netanvil_core::controller::constraint::Constraint;
+    use netanvil_core::controller::pid_constraint::PidConstraint as PidC;
+    use netanvil_core::controller::smoothing::Smoother;
+    use std::sync::Arc;
 
     let clock = Arc::new(TestClock::new());
     let control_interval = Duration::from_millis(100);
@@ -1263,15 +1269,9 @@ fn arbiter_exploration_then_pid_active() {
     );
 
     let constraints: Vec<Box<dyn Constraint>> = vec![Box::new(constraint)];
-    let config = ArbiterConfig::new(
-        constraints,
-        500.0,
-        10.0,
-        50000.0,
-        Duration::from_secs(60),
-    )
-    .with_exploration(exploration)
-    .with_clock(clock.clone() as Arc<dyn netanvil_core::Clock>);
+    let config = ArbiterConfig::new(constraints, 500.0, 10.0, 50000.0, Duration::from_secs(60))
+        .with_exploration(exploration)
+        .with_clock(clock.clone() as Arc<dyn netanvil_core::Clock>);
 
     let mut arbiter = Arbiter::new(config);
 

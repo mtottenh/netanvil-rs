@@ -496,10 +496,7 @@ where
     let exploration_secs = 8.0 * control_interval.as_secs_f64();
     let steady_state_secs = config.duration.as_secs_f64() - ramp_secs - exploration_secs;
     if steady_state_secs < config.duration.as_secs_f64() * 0.25 {
-        let uses_pid = matches!(
-            config.rate,
-            netanvil_types::RateConfig::Adaptive { .. }
-        );
+        let uses_pid = matches!(config.rate, netanvil_types::RateConfig::Adaptive { .. });
         if uses_pid {
             tracing::warn!(
                 duration_secs = config.duration.as_secs(),
@@ -728,15 +725,14 @@ where
     };
 
     // ── Create coordinator ──
-    let rate_controller =
-        crate::build_rate_controller(
-            &config.rate,
-            control_interval,
-            start_time,
-            config.duration,
-            crate::clock::system_clock(),
-            config.control_trace.as_deref(),
-        );
+    let rate_controller = crate::build_rate_controller(
+        &config.rate,
+        control_interval,
+        start_time,
+        config.duration,
+        crate::clock::system_clock(),
+        config.control_trace.as_deref(),
+    );
 
     let mut coordinator = Coordinator::new(
         rate_controller,

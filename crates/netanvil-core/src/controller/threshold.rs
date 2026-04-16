@@ -687,7 +687,10 @@ mod tests {
     use super::*;
     use netanvil_types::MetricsSummary;
 
-    fn make_ctx(p99_ms: f64, ticks_since_increase: u32) -> (Box<MetricsSummary>, EvalContext<'static>) {
+    fn make_ctx(
+        p99_ms: f64,
+        ticks_since_increase: u32,
+    ) -> (Box<MetricsSummary>, EvalContext<'static>) {
         let summary = Box::new(MetricsSummary {
             total_requests: 100,
             latency_p99_ns: (p99_ms * 1_000_000.0) as u64,

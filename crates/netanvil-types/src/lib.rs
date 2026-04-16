@@ -24,10 +24,10 @@ pub use config::{
     ConnectionPolicy, ConstraintClassConfig, ConstraintConfig, CooldownPolicyConfig,
     EventLogOutput, ExternalConstraintConfig, ExternalMetricRef, FloorPolicyConfig, GainsConfig,
     HttpVersion, IncreasePolicyConfig, InternalMetric, MetricRef, MissingSignalBehavior,
-    PluginConfig,
-    PluginType, ProtocolConfig, RateConfig, RateChangeLimitsConfig, ResponseSignalConfig,
-    SchedulerConfig, SetpointConstraintConfig, SignalAggregation, SignalDirection, SmootherConfig,
-    TargetMetric, TestConfig, ThresholdConstraintConfig, ThresholdSource, TlsConfig, WarmupConfig,
+    PluginConfig, PluginType, ProtocolConfig, RateChangeLimitsConfig, RateConfig,
+    ResponseSignalConfig, SchedulerConfig, SetpointConstraintConfig, SignalAggregation,
+    SignalDirection, SmootherConfig, TargetMetric, TestConfig, ThresholdConstraintConfig,
+    ThresholdSource, TlsConfig, WarmupConfig,
 };
 pub use controller::{ControllerInfo, ControllerType, ControllerView, HoldCommand, HoldState};
 pub use distributed::{MetricsFetcher, NodeCommander, NodeDiscovery, RemoteMetrics};

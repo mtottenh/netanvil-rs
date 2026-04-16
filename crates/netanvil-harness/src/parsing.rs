@@ -986,7 +986,9 @@ pub fn build_rate_config(
                     metric: MetricRef::Internal(InternalMetric::LatencyP99),
                     smoother: None,
                     class_override: None,
-                    threshold_source: ThresholdSource::Absolute { threshold: limit_ms },
+                    threshold_source: ThresholdSource::Absolute {
+                        threshold: limit_ms,
+                    },
                     persistence: 2,
                     self_caused_cap: Some(1.5),
                     backoff: None,
@@ -1197,7 +1199,10 @@ pub fn parse_tcp_mode(s: &str) -> Result<netanvil_tcp::TcpTestMode> {
         "stream" | "sink" => Ok(netanvil_tcp::TcpTestMode::Sink),
         "maerts" | "source" => Ok(netanvil_tcp::TcpTestMode::Source),
         "bidir" => Ok(netanvil_tcp::TcpTestMode::Bidir),
-        other => anyhow::bail!("unknown mode: {other}. Expected: echo, rr, stream, maerts, bidir"),
+        "crr" => Ok(netanvil_tcp::TcpTestMode::CRR),
+        other => {
+            anyhow::bail!("unknown mode: {other}. Expected: echo, rr, stream, maerts, bidir, crr")
+        }
     }
 }
 

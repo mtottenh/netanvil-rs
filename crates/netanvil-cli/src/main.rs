@@ -287,6 +287,17 @@ enum Commands {
         /// Only active with adaptive rate control.
         #[arg(long)]
         control_trace: Option<String>,
+
+        // ── TCP injection flags ──
+        /// Server-side latency injection in microseconds (TCP only).
+        /// Adds a sleep before each server response. Uses v2 protocol header.
+        #[arg(long)]
+        latency_us: Option<u32>,
+
+        /// Server-side error injection rate per 10,000 requests (TCP only).
+        /// Server truncates responses at this rate, causing client-side errors.
+        #[arg(long)]
+        error_rate: Option<u32>,
     },
 
     /// Run as a remotely controllable agent node
@@ -691,6 +702,8 @@ fn main() -> Result<()> {
             event_sample_rate,
             health_sample_rate,
             control_trace,
+            latency_us,
+            error_rate,
         } => commands::test::run(
             url,
             plugin,
@@ -745,6 +758,8 @@ fn main() -> Result<()> {
             event_sample_rate,
             health_sample_rate,
             control_trace,
+            latency_us,
+            error_rate,
         )?,
 
         Commands::Agent {

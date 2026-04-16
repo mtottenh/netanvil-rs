@@ -65,6 +65,8 @@ pub fn run(
     event_sample_rate: f64,
     health_sample_rate: f64,
     control_trace: Option<String>,
+    latency_us: Option<u32>,
+    error_rate: Option<u32>,
 ) -> Result<()> {
     let duration = parse_duration(&duration).context("invalid --duration")?;
     let timeout = parse_duration(&timeout).context("invalid --timeout")?;
@@ -264,17 +266,22 @@ pub fn run(
                     build_tcp_plugin_factory(plugin_path, ptype, &config.targets)?
                 } else {
                     Box::new(move |_core_id| {
-                        Box::new(
-                            netanvil_tcp::SimpleTcpGenerator::new(
-                                targets.clone(),
-                                tcp_payload.clone(),
-                                tcp_framing.clone(),
-                                expect_response,
-                            )
-                            .with_mode(tcp_mode)
-                            .with_request_size_dist(req_size_dist.clone())
-                            .with_response_size_dist(resp_size_dist.clone()),
+                        let mut gen = netanvil_tcp::SimpleTcpGenerator::new(
+                            targets.clone(),
+                            tcp_payload.clone(),
+                            tcp_framing.clone(),
+                            expect_response,
                         )
+                        .with_mode(tcp_mode)
+                        .with_request_size_dist(req_size_dist.clone())
+                        .with_response_size_dist(resp_size_dist.clone());
+                        if let Some(us) = latency_us {
+                            gen = gen.with_latency_us(us);
+                        }
+                        if let Some(rate) = error_rate {
+                            gen = gen.with_error_rate(rate);
+                        }
+                        Box::new(gen)
                     })
                 };
             let trans_factory: netanvil_core::GenericTransformerFactory<

@@ -13,13 +13,108 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use compio::buf::BufResult;
+use compio::buf::{BufResult, IoBuf, IoBufMut, IoVectoredBufMut};
+use compio::io::{AsyncRead, AsyncWrite};
 use compio::net::SocketOpts;
 
 use crate::bufpool::BufPool;
 use crate::metrics::WorkerMetrics;
 use crate::protocol;
 use crate::ServerConfig;
+
+// ---------------------------------------------------------------------------
+// ObservedStream: transparent TCP_INFO sampling on reads
+// ---------------------------------------------------------------------------
+
+/// TCP stream wrapper that probabilistically piggybacks `getsockopt(TCP_INFO)`
+/// on reads via io_uring linked SQEs.
+///
+/// Mirrors the client-side `ObservedTcpStream` pattern: when sampling is
+/// enabled, `read()` submits a linked `Recv → GetSockOpt(TCP_INFO)` pair
+/// instead of a plain `Recv`. The getsockopt rides on the recv that was
+/// happening anyway — zero extra operations. When sampling is disabled
+/// (rate 0.0), delegates directly with zero overhead.
+///
+/// Implements `AsyncRead` + `AsyncWrite` so it can be used as a drop-in
+/// replacement for `&TcpStream` in all handler functions.
+struct ObservedStream<'a> {
+    inner: &'a compio::net::TcpStream,
+    metrics: &'a WorkerMetrics,
+    sample_rate: f64,
+}
+
+impl<'a> ObservedStream<'a> {
+    fn new(
+        inner: &'a compio::net::TcpStream,
+        metrics: &'a WorkerMetrics,
+        sample_rate: f64,
+    ) -> Self {
+        Self {
+            inner,
+            metrics,
+            sample_rate,
+        }
+    }
+
+    fn should_sample(&self) -> bool {
+        self.sample_rate > 0.0
+    }
+}
+
+impl AsyncRead for ObservedStream<'_> {
+    async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+        if !self.should_sample() {
+            return self.inner.read(buf).await;
+        }
+
+        // Linked 2-SQE chain: Recv → GetSockOpt(TCP_INFO).
+        // The recv is the operation that was going to happen anyway;
+        // the getsockopt rides along in the same kernel round-trip.
+        // SAFETY: IPPROTO_TCP + TCP_INFO is a valid getsockopt combination.
+        let result = unsafe {
+            self.inner
+                .recv_observe::<B, libc::tcp_info>(buf, 0, libc::IPPROTO_TCP, libc::TCP_INFO)
+                .await
+        };
+        match result {
+            Ok((recv_result, tcp_info)) => {
+                self.metrics.record_tcp_info(&tcp_info);
+                recv_result
+            }
+            Err(_e) => {
+                // Linked SQE submission failed — kernel doesn't support
+                // URING_CMD (requires >= 6.7).  Same handling as client side.
+                self.sample_rate = 0.0;
+                panic!(
+                    "linked recv_observe failed: {_e}. \
+                     --tcp-health-sample requires kernel >= 6.7 with io_uring URING_CMD support"
+                );
+            }
+        }
+    }
+
+    async fn read_vectored<V: IoVectoredBufMut>(&mut self, buf: V) -> BufResult<usize, V> {
+        self.inner.read_vectored(buf).await
+    }
+}
+
+impl AsyncWrite for ObservedStream<'_> {
+    async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+        self.inner.write(buf).await
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush().await
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        self.inner.shutdown().await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Server handles and accept loop
+// ---------------------------------------------------------------------------
 
 /// Handle to a running TCP echo server.
 ///
@@ -129,6 +224,7 @@ pub(crate) async fn tcp_accept_loop(
     let active_connections = Rc::new(Cell::new(0u32));
     let max_connections = config.max_connections;
     let limit_logged = Cell::new(false);
+    let sample_rate = if config.tcp_health_sample { 1.0 } else { 0.0 };
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -162,7 +258,7 @@ pub(crate) async fn tcp_accept_loop(
                 let pool = Rc::clone(&pool);
                 let task_metrics = metrics.clone();
                 compio::runtime::spawn(async move {
-                    handle_tcp_connection(stream, &pool, &task_metrics).await;
+                    handle_tcp_connection(stream, &pool, &task_metrics, sample_rate).await;
                     counter.set(counter.get() - 1);
                     task_metrics.inc_connections_closed();
                 })
@@ -179,12 +275,27 @@ pub(crate) async fn tcp_accept_loop(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Connection handling
+// ---------------------------------------------------------------------------
+
 async fn handle_tcp_connection(
-    mut stream: compio::net::TcpStream,
+    stream: compio::net::TcpStream,
+    pool: &BufPool,
+    metrics: &WorkerMetrics,
+    sample_rate: f64,
+) {
+    let mut observed = ObservedStream::new(&stream, metrics, sample_rate);
+    handle_tcp_protocol(&mut observed, pool, metrics).await;
+}
+
+/// Protocol detection and dispatch.
+async fn handle_tcp_protocol(
+    stream: &mut ObservedStream<'_>,
     pool: &BufPool,
     metrics: &WorkerMetrics,
 ) {
-    use compio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+    use compio::io::{AsyncReadExt, AsyncWriteExt};
 
     // Read initial data into a pooled buffer.
     // compio read() uses buf capacity, but the pool buffer has
@@ -214,7 +325,7 @@ async fn handle_tcp_connection(
         if let Some(header) = protocol::parse_header(&buf[..protocol::HEADER_SIZE]) {
             let leftover = buf[protocol::HEADER_SIZE..n].to_vec();
             pool.give(buf);
-            dispatch_protocol(&mut stream, header, leftover, pool, metrics).await;
+            dispatch_protocol(stream, header, leftover, pool, metrics).await;
             return;
         }
         pool.give(buf);
@@ -235,20 +346,20 @@ async fn handle_tcp_connection(
                     if result.is_err() {
                         return;
                     }
-                    handle_echo_loop(&mut stream, pool, metrics).await;
+                    handle_echo_loop(stream, pool, metrics).await;
                     return;
                 }
             }
         }
         if let Some(header) = protocol::parse_header(&header_bytes) {
-            dispatch_protocol(&mut stream, header, Vec::new(), pool, metrics).await;
+            dispatch_protocol(stream, header, Vec::new(), pool, metrics).await;
             return;
         }
         let BufResult(result, _) = stream.write_all(header_bytes).await;
         if result.is_err() {
             return;
         }
-        handle_echo_loop(&mut stream, pool, metrics).await;
+        handle_echo_loop(stream, pool, metrics).await;
     } else {
         // Not a protocol header — echo back what we received.
         let data = buf[..n].to_vec();
@@ -259,13 +370,13 @@ async fn handle_tcp_connection(
         if result.is_err() {
             return;
         }
-        handle_echo_loop(&mut stream, pool, metrics).await;
+        handle_echo_loop(stream, pool, metrics).await;
     }
 }
 
 /// Dispatch to the appropriate protocol mode handler.
 async fn dispatch_protocol(
-    stream: &mut compio::net::TcpStream,
+    stream: &mut ObservedStream<'_>,
     header: protocol::ProtocolHeader,
     leftover: Vec<u8>,
     pool: &BufPool,
@@ -304,12 +415,16 @@ async fn dispatch_protocol(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Mode handlers
+// ---------------------------------------------------------------------------
+
 /// RR mode: read request_size bytes, write response_size bytes, repeat.
 ///
 /// `leftover` contains any bytes read beyond the protocol header that belong
 /// to the first request payload.
 async fn handle_rr(
-    stream: &mut compio::net::TcpStream,
+    stream: &mut ObservedStream<'_>,
     request_size: u16,
     response_size: u32,
     leftover: Vec<u8>,
@@ -381,9 +496,7 @@ async fn handle_rr(
 }
 
 /// SINK mode: read and discard all incoming data.
-async fn handle_sink(stream: &mut compio::net::TcpStream, pool: &BufPool, metrics: &WorkerMetrics) {
-    use compio::io::AsyncRead;
-
+async fn handle_sink(stream: &mut ObservedStream<'_>, pool: &BufPool, metrics: &WorkerMetrics) {
     let mut buf = pool.take();
     loop {
         let BufResult(result, b) = stream.read(buf).await;
@@ -401,7 +514,7 @@ async fn handle_sink(stream: &mut compio::net::TcpStream, pool: &BufPool, metric
 
 /// SOURCE mode: write response_size-byte chunks continuously.
 async fn handle_source(
-    stream: &mut compio::net::TcpStream,
+    stream: &mut ObservedStream<'_>,
     chunk_size: u32,
     pool: &BufPool,
     metrics: &WorkerMetrics,
@@ -434,7 +547,7 @@ async fn handle_source(
 /// For v1: alternate read/write like RR. A full implementation would use
 /// `try_clone()` for concurrent read/write.
 async fn handle_bidir(
-    stream: &mut compio::net::TcpStream,
+    stream: &mut ObservedStream<'_>,
     request_size: u16,
     response_size: u32,
     leftover: Vec<u8>,
@@ -447,11 +560,11 @@ async fn handle_bidir(
 /// Echo loop: read data, write it back. Used after the initial bytes have
 /// already been echoed for non-protocol connections.
 async fn handle_echo_loop(
-    stream: &mut compio::net::TcpStream,
+    stream: &mut ObservedStream<'_>,
     pool: &BufPool,
     metrics: &WorkerMetrics,
 ) {
-    use compio::io::{AsyncRead, AsyncWriteExt};
+    use compio::io::AsyncWriteExt;
 
     let mut buf = pool.take();
     loop {

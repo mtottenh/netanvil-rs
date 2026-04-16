@@ -14,24 +14,43 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// cross-counter consistency guarantees, but individual counters are
 /// monotonically non-decreasing.
 pub struct WorkerMetrics {
+    // -- Throughput --
     /// Total bytes received from clients.
     pub bytes_received: AtomicU64,
     /// Total bytes sent to clients.
     pub bytes_sent: AtomicU64,
+
+    // -- TCP connections --
     /// Total TCP connections accepted.
     pub connections_accepted: AtomicU64,
     /// Total TCP connections that have closed.
     pub connections_closed: AtomicU64,
+
+    // -- Requests --
     /// Total request-response cycles completed (TCP RR/BIDIR mode).
     pub requests_completed: AtomicU64,
     /// Total I/O errors encountered.
     pub errors: AtomicU64,
+
+    // -- UDP/DNS --
     /// Total UDP/DNS datagrams received.
     pub datagrams_received: AtomicU64,
     /// Total UDP/DNS datagrams sent.
     pub datagrams_sent: AtomicU64,
     /// Total UDP/DNS datagrams dropped (send failures).
     pub datagrams_dropped: AtomicU64,
+
+    // -- TCP health (from getsockopt TCP_INFO on connection close) --
+    /// Sum of smoothed RTT observations (microseconds).
+    pub tcp_rtt_sum_us: AtomicU64,
+    /// Number of TCP_INFO RTT observations.
+    pub tcp_rtt_count: AtomicU64,
+    /// Maximum smoothed RTT observed (microseconds).
+    pub tcp_rtt_max_us: AtomicU64,
+    /// Total TCP retransmits across all sampled connections.
+    pub tcp_retransmits: AtomicU64,
+    /// Total TCP lost segments across all sampled connections.
+    pub tcp_lost: AtomicU64,
 }
 
 impl Default for WorkerMetrics {
@@ -52,6 +71,11 @@ impl WorkerMetrics {
             datagrams_received: AtomicU64::new(0),
             datagrams_sent: AtomicU64::new(0),
             datagrams_dropped: AtomicU64::new(0),
+            tcp_rtt_sum_us: AtomicU64::new(0),
+            tcp_rtt_count: AtomicU64::new(0),
+            tcp_rtt_max_us: AtomicU64::new(0),
+            tcp_retransmits: AtomicU64::new(0),
+            tcp_lost: AtomicU64::new(0),
         }
     }
 
@@ -67,7 +91,27 @@ impl WorkerMetrics {
             datagrams_received: self.datagrams_received.load(Ordering::Relaxed),
             datagrams_sent: self.datagrams_sent.load(Ordering::Relaxed),
             datagrams_dropped: self.datagrams_dropped.load(Ordering::Relaxed),
+            tcp_rtt_sum_us: self.tcp_rtt_sum_us.load(Ordering::Relaxed),
+            tcp_rtt_count: self.tcp_rtt_count.load(Ordering::Relaxed),
+            tcp_rtt_max_us: self.tcp_rtt_max_us.load(Ordering::Relaxed),
+            tcp_retransmits: self.tcp_retransmits.load(Ordering::Relaxed),
+            tcp_lost: self.tcp_lost.load(Ordering::Relaxed),
         }
+    }
+
+    /// Record a `getsockopt(TCP_INFO)` observation.
+    ///
+    /// Mirrors the field extraction from `netanvil_types::TcpHealthCounters::record()`.
+    #[inline]
+    pub fn record_tcp_info(&self, info: &libc::tcp_info) {
+        let rtt = info.tcpi_rtt as u64;
+        self.tcp_rtt_sum_us.fetch_add(rtt, Ordering::Relaxed);
+        self.tcp_rtt_count.fetch_add(1, Ordering::Relaxed);
+        self.tcp_rtt_max_us.fetch_max(rtt, Ordering::Relaxed);
+        self.tcp_retransmits
+            .fetch_add(info.tcpi_total_retrans as u64, Ordering::Relaxed);
+        self.tcp_lost
+            .fetch_add(info.tcpi_lost as u64, Ordering::Relaxed);
     }
 
     #[inline]
@@ -128,6 +172,11 @@ pub struct WorkerSnapshot {
     pub datagrams_received: u64,
     pub datagrams_sent: u64,
     pub datagrams_dropped: u64,
+    pub tcp_rtt_sum_us: u64,
+    pub tcp_rtt_count: u64,
+    pub tcp_rtt_max_us: u64,
+    pub tcp_retransmits: u64,
+    pub tcp_lost: u64,
 }
 
 /// Aggregated metrics across all workers at a point in time.
@@ -144,12 +193,23 @@ pub struct ServerMetricsSummary {
     pub datagrams_received: u64,
     pub datagrams_sent: u64,
     pub datagrams_dropped: u64,
+    // -- TCP health --
+    /// Average smoothed RTT in microseconds (0 if no observations).
+    pub tcp_rtt_avg_us: f64,
+    /// Maximum smoothed RTT in microseconds.
+    pub tcp_rtt_max_us: u64,
+    /// Total TCP retransmits.
+    pub tcp_retransmits: u64,
+    /// Total TCP lost segments.
+    pub tcp_lost: u64,
 }
 
 impl ServerMetricsSummary {
     /// Aggregate multiple worker snapshots into a summary.
     pub fn from_snapshots(snapshots: &[WorkerSnapshot]) -> Self {
         let mut summary = Self::default();
+        let mut rtt_sum: u64 = 0;
+        let mut rtt_count: u64 = 0;
         for snap in snapshots {
             summary.bytes_received += snap.bytes_received;
             summary.bytes_sent += snap.bytes_sent;
@@ -160,10 +220,20 @@ impl ServerMetricsSummary {
             summary.datagrams_received += snap.datagrams_received;
             summary.datagrams_sent += snap.datagrams_sent;
             summary.datagrams_dropped += snap.datagrams_dropped;
+            rtt_sum += snap.tcp_rtt_sum_us;
+            rtt_count += snap.tcp_rtt_count;
+            if snap.tcp_rtt_max_us > summary.tcp_rtt_max_us {
+                summary.tcp_rtt_max_us = snap.tcp_rtt_max_us;
+            }
+            summary.tcp_retransmits += snap.tcp_retransmits;
+            summary.tcp_lost += snap.tcp_lost;
         }
         summary.connections_active = summary
             .connections_accepted
             .saturating_sub(summary.connections_closed);
+        if rtt_count > 0 {
+            summary.tcp_rtt_avg_us = rtt_sum as f64 / rtt_count as f64;
+        }
         summary
     }
 }

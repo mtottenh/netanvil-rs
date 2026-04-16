@@ -46,6 +46,11 @@ struct Args {
     /// Metrics reporting interval in seconds.
     #[arg(long, default_value = "1.0")]
     report_interval: f64,
+
+    /// Sample getsockopt(TCP_INFO) on TCP connection close.
+    /// Records RTT, retransmits, and lost segments.  Requires kernel >= 6.7.
+    #[arg(long)]
+    tcp_health_sample: bool,
 }
 
 fn main() {
@@ -70,6 +75,7 @@ fn main() {
         udp_idle_timeout_secs: args.udp_idle_timeout,
         report_mode,
         report_interval_secs: args.report_interval,
+        tcp_health_sample: args.tcp_health_sample,
         ..Default::default()
     };
 

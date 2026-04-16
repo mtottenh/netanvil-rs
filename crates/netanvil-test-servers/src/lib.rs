@@ -51,6 +51,11 @@ pub struct ServerConfig {
     pub report_mode: ReportMode,
     /// Metrics reporting interval in seconds. Default: 1.0.
     pub report_interval_secs: f64,
+    /// Sample getsockopt(TCP_INFO) on TCP connection close via io_uring
+    /// linked SQEs.  Records RTT, retransmits, and lost segments into
+    /// server metrics.  Default: false (adds one extra SQE pair per
+    /// connection close — negligible overhead, but requires kernel >= 6.7).
+    pub tcp_health_sample: bool,
 }
 
 impl Default for ServerConfig {
@@ -66,6 +71,7 @@ impl Default for ServerConfig {
             udp_idle_timeout_secs: 0,
             report_mode: ReportMode::None,
             report_interval_secs: 1.0,
+            tcp_health_sample: false,
         }
     }
 }
@@ -97,6 +103,7 @@ pub struct TestServer {
     workers: Vec<std::thread::JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
     worker_metrics: Vec<Arc<WorkerMetrics>>,
+    reporter: Option<std::thread::JoinHandle<()>>,
 }
 
 impl TestServer {
@@ -135,6 +142,10 @@ impl TestServer {
 impl Drop for TestServer {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
+        // Join reporter first (it reads metrics from workers).
+        if let Some(handle) = self.reporter.take() {
+            let _ = handle.join();
+        }
         for handle in self.workers.drain(..) {
             let _ = handle.join();
         }
@@ -197,6 +208,13 @@ impl TestServerBuilder {
     /// Set the metrics reporting interval in seconds.
     pub fn report_interval(mut self, secs: f64) -> Self {
         self.config.report_interval_secs = secs;
+        self
+    }
+
+    /// Enable TCP_INFO sampling via io_uring linked SQEs on connection close.
+    /// Records RTT, retransmits, and lost segments.  Requires kernel >= 6.7.
+    pub fn tcp_health_sample(mut self, enable: bool) -> Self {
+        self.config.tcp_health_sample = enable;
         self
     }
 
@@ -390,6 +408,18 @@ impl TestServerBuilder {
         let udp_addr = udp_port.map(|p| SocketAddr::from(([127, 0, 0, 1], p)));
         let dns_addr = dns_port.map(|p| SocketAddr::from(([127, 0, 0, 1], p)));
 
+        // Spawn reporter thread if a reporting mode is configured.
+        let reporter = if self.config.report_mode != crate::reporter::ReportMode::None {
+            Some(crate::reporter::spawn_reporter(
+                all_metrics.clone(),
+                shutdown.clone(),
+                self.config.report_mode,
+                self.config.report_interval_secs,
+            ))
+        } else {
+            None
+        };
+
         TestServer {
             tcp_addr,
             udp_addr,
@@ -397,6 +427,7 @@ impl TestServerBuilder {
             workers,
             shutdown,
             worker_metrics: all_metrics,
+            reporter,
         }
     }
 }

@@ -887,3 +887,266 @@ fn test_backward_compat_udp_unconnected() {
         "expected some requests completed"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 5: Server-side metrics behavioral tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_server_metrics_match_client() {
+    let server = netanvil_test_servers::TestServer::builder()
+        .tcp(0)
+        .workers(2)
+        .pin_cores(false)
+        .build();
+    let tcp_addr = server.tcp_addr().unwrap();
+    let targets = vec![tcp_addr];
+    let payload = vec![0u8; 64];
+
+    let config = TestConfig {
+        targets: vec![format!("{}", tcp_addr)],
+        duration: Duration::from_secs(10),
+        rate: RateConfig::Static { rps: 5000.0 },
+        num_cores: 2,
+        error_status_threshold: 0,
+        ..Default::default()
+    };
+
+    let result = GenericTestBuilder::new(
+        config,
+        |_| TcpExecutor::with_pool(Duration::from_secs(5), 100, ConnectionPolicy::KeepAlive),
+        Box::new(move |_| {
+            Box::new(
+                SimpleTcpGenerator::new(targets.clone(), payload.clone(), TcpFraming::Raw, true)
+                    .with_mode(TcpTestMode::RR)
+                    .with_request_size(64)
+                    .with_response_size(256),
+            ) as Box<dyn RequestGenerator<Spec = TcpRequestSpec>>
+        }),
+        Box::new(|_| {
+            Box::new(TcpNoopTransformer) as Box<dyn RequestTransformer<Spec = TcpRequestSpec>>
+        }),
+    )
+    .run()
+    .expect("test run failed");
+
+    // Give server time to process final connections
+    std::thread::sleep(Duration::from_millis(500));
+
+    let metrics = server.metrics_snapshot();
+
+    // Server requests_completed within 10% of client total_requests
+    let ratio = metrics.requests_completed as f64 / result.total_requests as f64;
+    assert!(
+        (0.9..=1.1).contains(&ratio),
+        "requests mismatch: server={}, client={}, ratio={:.2}",
+        metrics.requests_completed,
+        result.total_requests,
+        ratio
+    );
+
+    // Server bytes_sent within 10% of expected (total_requests * 256)
+    let expected_bytes_sent = result.total_requests * 256;
+    let bytes_sent_ratio = metrics.bytes_sent as f64 / expected_bytes_sent as f64;
+    assert!(
+        (0.9..=1.1).contains(&bytes_sent_ratio),
+        "bytes_sent mismatch: server={}, expected={}, ratio={:.2}",
+        metrics.bytes_sent,
+        expected_bytes_sent,
+        bytes_sent_ratio
+    );
+
+    // Server bytes_received within 10% of expected (total_requests * 64)
+    let expected_bytes_received = result.total_requests * 64;
+    let bytes_received_ratio = metrics.bytes_received as f64 / expected_bytes_received as f64;
+    assert!(
+        (0.9..=1.1).contains(&bytes_received_ratio),
+        "bytes_received mismatch: server={}, expected={}, ratio={:.2}",
+        metrics.bytes_received,
+        expected_bytes_received,
+        bytes_received_ratio
+    );
+}
+
+#[test]
+fn test_server_metrics_connections_tracked() {
+    let server = netanvil_test_servers::TestServer::builder()
+        .tcp(0)
+        .workers(1)
+        .pin_cores(false)
+        .build();
+    let tcp_addr = server.tcp_addr().unwrap();
+    let targets = vec![tcp_addr];
+    let payload = vec![0u8; 64];
+
+    let config = TestConfig {
+        targets: vec![format!("{}", tcp_addr)],
+        duration: Duration::from_secs(5),
+        rate: RateConfig::Static { rps: 1000.0 },
+        num_cores: 1,
+        error_status_threshold: 0,
+        connections: netanvil_types::ConnectionConfig {
+            connection_policy: ConnectionPolicy::AlwaysNew,
+            request_timeout: Duration::from_secs(2),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let result = GenericTestBuilder::new(
+        config,
+        |_| TcpExecutor::with_pool(Duration::from_secs(2), 200, ConnectionPolicy::AlwaysNew),
+        Box::new(move |_| {
+            Box::new(
+                SimpleTcpGenerator::new(targets.clone(), payload.clone(), TcpFraming::Raw, true)
+                    .with_mode(TcpTestMode::RR)
+                    .with_request_size(64)
+                    .with_response_size(128),
+            ) as Box<dyn RequestGenerator<Spec = TcpRequestSpec>>
+        }),
+        Box::new(|_| {
+            Box::new(TcpNoopTransformer) as Box<dyn RequestTransformer<Spec = TcpRequestSpec>>
+        }),
+    )
+    .run()
+    .expect("test run failed");
+
+    // Give server time to close all connections
+    std::thread::sleep(Duration::from_millis(500));
+
+    let metrics = server.metrics_snapshot();
+
+    assert!(
+        metrics.connections_accepted >= result.total_requests,
+        "connections_accepted ({}) should be >= total_requests ({})",
+        metrics.connections_accepted,
+        result.total_requests
+    );
+
+    assert_eq!(
+        metrics.connections_active, 0,
+        "connections_active should be 0 after test, got {}",
+        metrics.connections_active
+    );
+}
+
+#[test]
+fn test_server_metrics_udp_datagrams() {
+    use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
+
+    let server = netanvil_test_servers::TestServer::builder()
+        .udp(0)
+        .workers(2)
+        .pin_cores(false)
+        .build();
+    let udp_addr = server.udp_addr().unwrap();
+    let targets = vec![udp_addr];
+    let payload = vec![0u8; 64];
+
+    let config = TestConfig {
+        targets: vec![format!("{}", udp_addr)],
+        duration: Duration::from_secs(5),
+        rate: RateConfig::Static { rps: 10000.0 },
+        num_cores: 2,
+        error_status_threshold: 0,
+        ..Default::default()
+    };
+
+    let result = GenericTestBuilder::new(
+        config,
+        |_| UdpExecutor::with_timeout(Duration::from_secs(2)),
+        Box::new(move |_| {
+            Box::new(SimpleUdpGenerator::new(
+                targets.clone(),
+                payload.clone(),
+                true,
+            )) as Box<dyn RequestGenerator<Spec = UdpRequestSpec>>
+        }),
+        Box::new(|_| {
+            Box::new(UdpNoopTransformer) as Box<dyn RequestTransformer<Spec = UdpRequestSpec>>
+        }),
+    )
+    .run()
+    .expect("test run failed");
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    let metrics = server.metrics_snapshot();
+
+    // datagrams_received >= 90% of client requests
+    assert!(
+        metrics.datagrams_received as f64 >= result.total_requests as f64 * 0.90,
+        "datagrams_received ({}) should be >= 90% of total_requests ({})",
+        metrics.datagrams_received,
+        result.total_requests
+    );
+
+    // datagrams_sent within 5% of datagrams_received (echo sends one per recv)
+    let recv = metrics.datagrams_received as f64;
+    let sent = metrics.datagrams_sent as f64;
+    let ratio = if recv > 0.0 { sent / recv } else { 0.0 };
+    assert!(
+        (0.95..=1.05).contains(&ratio),
+        "datagrams_sent ({}) should be within 5% of datagrams_received ({}), ratio={:.2}",
+        metrics.datagrams_sent,
+        metrics.datagrams_received,
+        ratio
+    );
+}
+
+#[test]
+fn test_server_metrics_snapshot_accessible() {
+    let server = netanvil_test_servers::TestServer::builder()
+        .tcp(0)
+        .workers(1)
+        .pin_cores(false)
+        .build();
+    let tcp_addr = server.tcp_addr().unwrap();
+    let targets = vec![tcp_addr];
+    let payload = vec![0u8; 64];
+
+    let config = TestConfig {
+        targets: vec![format!("{}", tcp_addr)],
+        duration: Duration::from_secs(3),
+        rate: RateConfig::Static { rps: 500.0 },
+        num_cores: 1,
+        error_status_threshold: 0,
+        ..Default::default()
+    };
+
+    let _result = GenericTestBuilder::new(
+        config,
+        |_| TcpExecutor::with_pool(Duration::from_secs(5), 100, ConnectionPolicy::KeepAlive),
+        Box::new(move |_| {
+            Box::new(
+                SimpleTcpGenerator::new(targets.clone(), payload.clone(), TcpFraming::Raw, true)
+                    .with_mode(TcpTestMode::RR)
+                    .with_request_size(64)
+                    .with_response_size(256),
+            ) as Box<dyn RequestGenerator<Spec = TcpRequestSpec>>
+        }),
+        Box::new(|_| {
+            Box::new(TcpNoopTransformer) as Box<dyn RequestTransformer<Spec = TcpRequestSpec>>
+        }),
+    )
+    .run()
+    .expect("test run failed");
+
+    let metrics = server.metrics_snapshot();
+
+    assert!(
+        metrics.requests_completed > 0,
+        "expected non-zero requests_completed, got {}",
+        metrics.requests_completed
+    );
+    assert!(
+        metrics.bytes_sent > 0,
+        "expected non-zero bytes_sent, got {}",
+        metrics.bytes_sent
+    );
+    assert!(
+        metrics.bytes_received > 0,
+        "expected non-zero bytes_received, got {}",
+        metrics.bytes_received
+    );
+}

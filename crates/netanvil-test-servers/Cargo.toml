@@ -19,18 +19,6 @@ libc = { workspace = true }
 serde_json = { workspace = true }
 
 [[bin]]
-name = "tcp-echo"
-path = "src/bin/tcp_echo.rs"
-
-[[bin]]
-name = "udp-echo"
-path = "src/bin/udp_echo.rs"
-
-[[bin]]
-name = "dns-echo"
-path = "src/bin/dns_echo.rs"
-
-[[bin]]
 name = "netanvil-test-server"
 path = "src/bin/test_server.rs"
 
@@ -40,6 +28,7 @@ netanvil-core = { workspace = true }
 netanvil-types = { workspace = true }
 netanvil-tcp = { workspace = true }
 netanvil-udp = { workspace = true }
+serde_json = { workspace = true }
 
 [package.metadata.deb]
 maintainer = "NetAnvil-RS Contributors"
@@ -48,12 +37,15 @@ depends = "$auto"
 section = "utils"
 priority = "optional"
 extended-description = """\
-TCP echo, UDP echo, and DNS echo servers for load testing with netanvil-rs. \
-The TCP server supports multiple modes: echo, request-response, sink, source, \
-and bidirectional. Used as unit-under-test targets for distributed load tests."""
+Compio-based test servers for load testing with netanvil-rs. Supports TCP \
+(echo, RR, CRR, sink, source, bidir), UDP (echo with pacing/latency/drop \
+injection), and DNS (authoritative echo). Single multicall binary — create \
+symlinks named netanvil-tcp-echo, netanvil-udp-echo, netanvil-dns-echo for \
+single-protocol mode with clean per-protocol --help."""
 assets = [
     ["target/release/netanvil-test-server", "usr/bin/", "755"],
-    ["target/release/tcp-echo", "usr/bin/", "755"],
-    ["target/release/udp-echo", "usr/bin/", "755"],
-    ["target/release/dns-echo", "usr/bin/", "755"],
 ]
+# Post-install: create symlinks for single-protocol invocation
+# ln -sf netanvil-test-server /usr/bin/netanvil-tcp-echo
+# ln -sf netanvil-test-server /usr/bin/netanvil-udp-echo
+# ln -sf netanvil-test-server /usr/bin/netanvil-dns-echo

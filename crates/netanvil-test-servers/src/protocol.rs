@@ -118,6 +118,20 @@ pub fn parse_header(buf: &[u8]) -> Option<ParsedHeader> {
     })
 }
 
+/// Parse a protocol header and return the offset where payload data begins.
+///
+/// Returns `(header, payload_offset)` where `payload_offset` is the first byte
+/// after the header. For UDP, this is the start of the datagram payload; for TCP,
+/// it corresponds to the "leftover" bytes after the header.
+pub fn parse_header_with_offset(buf: &[u8]) -> Option<(ParsedHeader, usize)> {
+    if buf.len() < 2 {
+        return None;
+    }
+    let header_len = buf[1] as usize;
+    let header = parse_header(buf)?;
+    Some((header, header_len))
+}
+
 /// Returns true if `first_byte` could be the start of a protocol header.
 pub fn is_protocol_sentinel(first_byte: u8) -> bool {
     first_byte >= VERSION_V2

@@ -1398,6 +1398,417 @@ fn test_error_injection() {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 6C: UDP Protocol Modes
+// ---------------------------------------------------------------------------
+
+/// Build a v2 protocol header for UDP datagrams.
+fn build_udp_protocol_header(
+    mode: u8,
+    request_size: u16,
+    response_size: u32,
+    latency_us: Option<u32>,
+    error_rate: Option<u32>,
+) -> Vec<u8> {
+    use netanvil_test_servers::protocol;
+
+    let mut flags: u8 = 0;
+    let mut header_len = protocol::HEADER_MIN;
+    if latency_us.is_some() {
+        flags |= protocol::FLAG_LATENCY;
+        header_len += 4;
+    }
+    if error_rate.is_some() {
+        flags |= protocol::FLAG_ERROR;
+        header_len += 4;
+    }
+
+    let mut buf = Vec::with_capacity(header_len);
+    buf.push(protocol::VERSION_V2);
+    buf.push(header_len as u8);
+    buf.push(mode);
+    buf.push(flags);
+    buf.extend_from_slice(&request_size.to_be_bytes());
+    buf.extend_from_slice(&response_size.to_be_bytes());
+    if let Some(lat) = latency_us {
+        buf.extend_from_slice(&lat.to_be_bytes());
+    }
+    if let Some(err) = error_rate {
+        buf.extend_from_slice(&err.to_be_bytes());
+    }
+    buf
+}
+
+#[compio::test]
+async fn test_udp_rr_unconnected() {
+    use compio::buf::BufResult;
+    use netanvil_test_servers::protocol;
+
+    let server = netanvil_test_servers::udp::start_udp_echo();
+    let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    // Send datagram with RR header: response_size=128
+    let mut payload = build_udp_protocol_header(protocol::MODE_RR, 64, 128, None, None);
+    payload.extend_from_slice(&[0xAB; 64]); // request body
+
+    let BufResult(result, _) = socket.send_to(payload, server.addr).await;
+    result.unwrap();
+
+    // Should receive a 128-byte response.
+    let recv_buf = vec![0u8; 256];
+    let recv_result =
+        compio::time::timeout(Duration::from_secs(2), socket.recv_from(recv_buf)).await;
+    let BufResult(Ok((n, _)), _) = recv_result.unwrap() else {
+        panic!("recv failed");
+    };
+    assert_eq!(n, 128, "RR response should be 128 bytes, got {}", n);
+}
+
+#[compio::test]
+async fn test_udp_rr_connected() {
+    use compio::buf::BufResult;
+    use netanvil_test_servers::protocol;
+
+    let server = netanvil_test_servers::udp::start_udp_echo_with_config(
+        netanvil_test_servers::ServerConfig {
+            addr: "127.0.0.1:0".to_string(),
+            udp_idle_timeout_secs: 30,
+            ..netanvil_test_servers::ServerConfig::udp_default()
+        },
+    );
+    let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    // First datagram: RR header with response_size=256
+    let mut payload = build_udp_protocol_header(protocol::MODE_RR, 64, 256, None, None);
+    payload.extend_from_slice(&[0xAB; 64]);
+
+    let BufResult(result, _) = socket.send_to(payload, server.addr).await;
+    result.unwrap();
+
+    // First response from listener: 256 bytes.
+    let recv_buf = vec![0u8; 512];
+    let recv_result =
+        compio::time::timeout(Duration::from_secs(2), socket.recv_from(recv_buf)).await;
+    let BufResult(Ok((n, _)), _) = recv_result.unwrap() else {
+        panic!("recv failed");
+    };
+    assert_eq!(n, 256, "first RR response should be 256 bytes, got {}", n);
+
+    // Wait for connected handler to be ready.
+    compio::time::sleep(Duration::from_millis(50)).await;
+
+    // Subsequent datagrams (no header) should still get response_size responses
+    // since the session mode is stored.
+    let payload2 = vec![0xCD; 64];
+    let BufResult(result, _) = socket.send_to(payload2, server.addr).await;
+    result.unwrap();
+
+    let recv_buf = vec![0u8; 512];
+    let recv_result =
+        compio::time::timeout(Duration::from_secs(2), socket.recv_from(recv_buf)).await;
+    let BufResult(Ok((n, _)), _) = recv_result.unwrap() else {
+        panic!("second recv failed");
+    };
+    assert_eq!(
+        n, 256,
+        "subsequent RR response should be 256 bytes, got {}",
+        n
+    );
+}
+
+#[compio::test]
+async fn test_udp_sink_unconnected() {
+    use compio::buf::BufResult;
+    use netanvil_test_servers::protocol;
+
+    let server = netanvil_test_servers::udp::start_udp_echo();
+    let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    // Send SINK header — should get no response.
+    let payload = build_udp_protocol_header(protocol::MODE_SINK, 0, 0, None, None);
+    let BufResult(result, _) = socket.send_to(payload, server.addr).await;
+    result.unwrap();
+
+    // Verify no response within 200ms.
+    let recv_buf = vec![0u8; 256];
+    let recv_result =
+        compio::time::timeout(Duration::from_millis(200), socket.recv_from(recv_buf)).await;
+    assert!(
+        recv_result.is_err(),
+        "SINK mode should not send any response"
+    );
+}
+
+#[compio::test]
+async fn test_udp_sink_connected() {
+    use compio::buf::BufResult;
+    use netanvil_test_servers::protocol;
+
+    let server = netanvil_test_servers::udp::start_udp_echo_with_config(
+        netanvil_test_servers::ServerConfig {
+            addr: "127.0.0.1:0".to_string(),
+            udp_idle_timeout_secs: 30,
+            ..netanvil_test_servers::ServerConfig::udp_default()
+        },
+    );
+    let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    // Send SINK header.
+    let payload = build_udp_protocol_header(protocol::MODE_SINK, 0, 0, None, None);
+    let BufResult(result, _) = socket.send_to(payload, server.addr).await;
+    result.unwrap();
+
+    // No response expected.
+    let recv_buf = vec![0u8; 256];
+    let recv_result =
+        compio::time::timeout(Duration::from_millis(200), socket.recv_from(recv_buf)).await;
+    assert!(
+        recv_result.is_err(),
+        "SINK mode (connected) should not send any response"
+    );
+
+    // Send more datagrams — still no response (session is SINK).
+    compio::time::sleep(Duration::from_millis(50)).await;
+    let payload2 = vec![0xAB; 64];
+    let BufResult(result, _) = socket.send_to(payload2, server.addr).await;
+    result.unwrap();
+
+    let recv_buf = vec![0u8; 256];
+    let recv_result =
+        compio::time::timeout(Duration::from_millis(200), socket.recv_from(recv_buf)).await;
+    assert!(
+        recv_result.is_err(),
+        "SINK mode (connected) should still not respond after session established"
+    );
+}
+
+#[compio::test]
+async fn test_udp_source_connected() {
+    use compio::buf::BufResult;
+    use netanvil_test_servers::protocol;
+
+    let server = netanvil_test_servers::udp::start_udp_echo_with_config(
+        netanvil_test_servers::ServerConfig {
+            addr: "127.0.0.1:0".to_string(),
+            udp_idle_timeout_secs: 30,
+            ..netanvil_test_servers::ServerConfig::udp_default()
+        },
+    );
+    let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    // Send SOURCE header: response_size=256
+    let payload = build_udp_protocol_header(protocol::MODE_SOURCE, 0, 256, None, None);
+    let BufResult(result, _) = socket.send_to(payload, server.addr).await;
+    result.unwrap();
+
+    // Should receive multiple 256-byte datagrams without sending more.
+    let mut received = 0;
+    for _ in 0..5 {
+        let recv_buf = vec![0u8; 512];
+        let recv_result =
+            compio::time::timeout(Duration::from_secs(2), socket.recv_from(recv_buf)).await;
+        match recv_result {
+            Ok(BufResult(Ok((n, _)), _)) => {
+                assert_eq!(n, 256, "SOURCE datagram should be 256 bytes, got {}", n);
+                received += 1;
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        received >= 3,
+        "SOURCE mode should continuously send datagrams, only received {}",
+        received
+    );
+}
+
+#[compio::test]
+async fn test_udp_source_unconnected_rejected() {
+    use compio::buf::BufResult;
+    use netanvil_test_servers::protocol;
+
+    // Unconnected mode (idle_timeout=0).
+    let server = netanvil_test_servers::udp::start_udp_echo();
+    let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    // Send SOURCE header in unconnected mode — should be rejected.
+    let payload = build_udp_protocol_header(protocol::MODE_SOURCE, 0, 256, None, None);
+    let BufResult(result, _) = socket.send_to(payload, server.addr).await;
+    result.unwrap();
+
+    // No response expected.
+    let recv_buf = vec![0u8; 512];
+    let recv_result =
+        compio::time::timeout(Duration::from_millis(200), socket.recv_from(recv_buf)).await;
+    assert!(
+        recv_result.is_err(),
+        "SOURCE mode should be rejected in unconnected mode"
+    );
+}
+
+#[compio::test]
+async fn test_udp_bidir_connected() {
+    use compio::buf::BufResult;
+    use netanvil_test_servers::protocol;
+
+    let server = netanvil_test_servers::udp::start_udp_echo_with_config(
+        netanvil_test_servers::ServerConfig {
+            addr: "127.0.0.1:0".to_string(),
+            udp_idle_timeout_secs: 30,
+            ..netanvil_test_servers::ServerConfig::udp_default()
+        },
+    );
+    let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    // Send BIDIR header: response_size=128
+    let payload = build_udp_protocol_header(protocol::MODE_BIDIR, 0, 128, None, None);
+    let BufResult(result, _) = socket.send_to(payload, server.addr).await;
+    result.unwrap();
+
+    // Should receive continuous 128-byte datagrams (SOURCE side of BIDIR).
+    let mut received = 0;
+    for _ in 0..5 {
+        let recv_buf = vec![0u8; 256];
+        let recv_result =
+            compio::time::timeout(Duration::from_secs(2), socket.recv_from(recv_buf)).await;
+        match recv_result {
+            Ok(BufResult(Ok((n, _)), _)) => {
+                assert_eq!(n, 128, "BIDIR datagram should be 128 bytes, got {}", n);
+                received += 1;
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        received >= 3,
+        "BIDIR mode should continuously send datagrams, only received {}",
+        received
+    );
+
+    // Also send datagrams while receiving (SINK side should absorb them).
+    let payload2 = vec![0xAB; 64];
+    let BufResult(result, _) = socket.send_to(payload2, server.addr).await;
+    result.unwrap();
+
+    // Can still receive SOURCE datagrams after sending.
+    let recv_buf = vec![0u8; 256];
+    let recv_result =
+        compio::time::timeout(Duration::from_secs(2), socket.recv_from(recv_buf)).await;
+    assert!(
+        recv_result.is_ok(),
+        "BIDIR should still send after receiving client datagrams"
+    );
+}
+
+#[compio::test]
+async fn test_udp_bidir_unconnected_rejected() {
+    use compio::buf::BufResult;
+    use netanvil_test_servers::protocol;
+
+    let server = netanvil_test_servers::udp::start_udp_echo();
+    let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    // Send BIDIR header in unconnected mode — should be rejected.
+    let payload = build_udp_protocol_header(protocol::MODE_BIDIR, 0, 128, None, None);
+    let BufResult(result, _) = socket.send_to(payload, server.addr).await;
+    result.unwrap();
+
+    let recv_buf = vec![0u8; 256];
+    let recv_result =
+        compio::time::timeout(Duration::from_millis(200), socket.recv_from(recv_buf)).await;
+    assert!(
+        recv_result.is_err(),
+        "BIDIR mode should be rejected in unconnected mode"
+    );
+}
+
+#[compio::test]
+async fn test_udp_echo_fallback() {
+    use compio::buf::BufResult;
+
+    let server = netanvil_test_servers::udp::start_udp_echo();
+    let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    // Send plain datagram (no protocol sentinel) — should echo back.
+    let payload = vec![0xAB; 100];
+    let BufResult(result, _) = socket.send_to(payload, server.addr).await;
+    result.unwrap();
+
+    let recv_buf = vec![0u8; 256];
+    let recv_result =
+        compio::time::timeout(Duration::from_secs(2), socket.recv_from(recv_buf)).await;
+    let BufResult(Ok((n, _)), buf) = recv_result.unwrap() else {
+        panic!("echo recv failed");
+    };
+    assert_eq!(n, 100, "echo should return same size, got {}", n);
+    assert!(
+        buf[..n].iter().all(|&b| b == 0xAB),
+        "echo should return same data"
+    );
+}
+
+#[compio::test]
+async fn test_udp_rr_error_injection() {
+    use compio::buf::BufResult;
+    use netanvil_test_servers::protocol;
+
+    let server = netanvil_test_servers::udp::start_udp_echo();
+    let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    // RR with 100% error rate: response_size=128, error_rate=10000
+    let mut payload = build_udp_protocol_header(protocol::MODE_RR, 64, 128, None, Some(10000));
+    payload.extend_from_slice(&[0xAB; 64]);
+
+    let BufResult(result, _) = socket.send_to(payload, server.addr).await;
+    result.unwrap();
+
+    let recv_buf = vec![0u8; 256];
+    let recv_result =
+        compio::time::timeout(Duration::from_secs(2), socket.recv_from(recv_buf)).await;
+    let BufResult(Ok((n, _)), buf) = recv_result.unwrap() else {
+        panic!("error response recv failed");
+    };
+
+    // Error response should be half size (64 bytes) filled with 0xEE.
+    assert_eq!(
+        n, 64,
+        "error response should be half of 128 = 64 bytes, got {}",
+        n
+    );
+    assert!(
+        buf[..n].iter().all(|&b| b == 0xEE),
+        "error response should be filled with 0xEE"
+    );
+}
+
+#[compio::test]
+async fn test_udp_crr_treated_as_rr() {
+    use compio::buf::BufResult;
+    use netanvil_test_servers::protocol;
+
+    let server = netanvil_test_servers::udp::start_udp_echo();
+    let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    // Send CRR header — should be treated as RR.
+    let mut payload = build_udp_protocol_header(protocol::MODE_CRR, 64, 128, None, None);
+    payload.extend_from_slice(&[0xAB; 64]);
+
+    let BufResult(result, _) = socket.send_to(payload, server.addr).await;
+    result.unwrap();
+
+    let recv_buf = vec![0u8; 256];
+    let recv_result =
+        compio::time::timeout(Duration::from_secs(2), socket.recv_from(recv_buf)).await;
+    let BufResult(Ok((n, _)), _) = recv_result.unwrap() else {
+        panic!("CRR-as-RR recv failed");
+    };
+    assert_eq!(
+        n, 128,
+        "CRR should be treated as RR, expected 128 bytes, got {}",
+        n
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Phase 6B: UDP Behavior Control
 // ---------------------------------------------------------------------------
 

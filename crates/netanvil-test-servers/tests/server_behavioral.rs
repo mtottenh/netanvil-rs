@@ -588,18 +588,21 @@ async fn test_response_data_has_entropy() {
     let stream = compio::net::TcpStream::connect(server.addr).await.unwrap();
     let mut stream = stream;
 
-    // Send protocol header: RR mode, request_size=64, response_size=256
-    let mut header = [0u8; protocol::HEADER_SIZE];
-    header[0] = protocol::MODE_RR;
-    // request_size = 64 (big-endian u16 at offset 2..4)
-    header[2] = 0;
-    header[3] = 64;
-    // response_size = 256 (big-endian u32 at offset 4..8)
+    // Send v2 protocol header: RR mode, request_size=64, response_size=256
+    let mut header = vec![0u8; protocol::HEADER_MIN];
+    header[0] = protocol::VERSION_V2;
+    header[1] = protocol::HEADER_MIN as u8;
+    header[2] = protocol::MODE_RR;
+    header[3] = 0; // no flags
+                   // request_size = 64 (big-endian u16 at offset 4..6)
     header[4] = 0;
-    header[5] = 0;
-    header[6] = 1;
+    header[5] = 64;
+    // response_size = 256 (big-endian u32 at offset 6..10)
+    header[6] = 0;
     header[7] = 0;
-    let BufResult(result, _) = stream.write_all(header.to_vec()).await;
+    header[8] = 1;
+    header[9] = 0;
+    let BufResult(result, _) = stream.write_all(header).await;
     result.unwrap();
 
     // Send 64 bytes of request payload
@@ -1148,5 +1151,248 @@ fn test_server_metrics_snapshot_accessible() {
         metrics.bytes_received > 0,
         "expected non-zero bytes_received, got {}",
         metrics.bytes_received
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6A: v2 Protocol Header + CRR Mode + TCP Injection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_crr_mode() {
+    let server = netanvil_test_servers::TestServer::builder()
+        .tcp(0)
+        .workers(2)
+        .pin_cores(false)
+        .build();
+    let tcp_addr = server.tcp_addr().unwrap();
+    let targets = vec![tcp_addr];
+    let payload = vec![0u8; 64];
+
+    let config = TestConfig {
+        targets: vec![format!("{}", tcp_addr)],
+        duration: Duration::from_secs(10),
+        rate: RateConfig::Static { rps: 3000.0 },
+        num_cores: 2,
+        error_status_threshold: 0,
+        connections: netanvil_types::ConnectionConfig {
+            connection_policy: ConnectionPolicy::AlwaysNew,
+            request_timeout: Duration::from_secs(5),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let result = GenericTestBuilder::new(
+        config,
+        |_| TcpExecutor::with_pool(Duration::from_secs(5), 200, ConnectionPolicy::AlwaysNew),
+        Box::new(move |_| {
+            Box::new(
+                SimpleTcpGenerator::new(targets.clone(), payload.clone(), TcpFraming::Raw, true)
+                    .with_mode(TcpTestMode::CRR)
+                    .with_request_size(64)
+                    .with_response_size(128),
+            ) as Box<dyn RequestGenerator<Spec = TcpRequestSpec>>
+        }),
+        Box::new(|_| {
+            Box::new(TcpNoopTransformer) as Box<dyn RequestTransformer<Spec = TcpRequestSpec>>
+        }),
+    )
+    .run()
+    .expect("test run failed");
+
+    assert_eq!(
+        result.total_errors, 0,
+        "expected 0 errors in CRR mode, got {}",
+        result.total_errors
+    );
+    assert!(
+        result.total_requests > 0,
+        "expected some CRR requests completed"
+    );
+
+    // CRR = one connection per request. Server connections_accepted should
+    // be close to client total_requests.
+    std::thread::sleep(Duration::from_millis(500));
+    let metrics = server.metrics_snapshot();
+    let ratio = metrics.connections_accepted as f64 / result.total_requests as f64;
+    assert!(
+        (0.9..=1.1).contains(&ratio),
+        "CRR: connections_accepted ({}) should be within 10% of total_requests ({}), ratio={:.2}",
+        metrics.connections_accepted,
+        result.total_requests,
+        ratio
+    );
+}
+
+#[test]
+fn test_v2_backward_compat() {
+    // v2 header with standard RR mode and no injection flags should behave
+    // identically to the old v1 header.
+    let server = netanvil_test_servers::TestServer::builder()
+        .tcp(0)
+        .workers(2)
+        .pin_cores(false)
+        .build();
+    let tcp_addr = server.tcp_addr().unwrap();
+    let targets = vec![tcp_addr];
+    let payload = vec![0u8; 64];
+
+    let config = TestConfig {
+        targets: vec![format!("{}", tcp_addr)],
+        duration: Duration::from_secs(5),
+        rate: RateConfig::Static { rps: 5000.0 },
+        num_cores: 2,
+        error_status_threshold: 0,
+        ..Default::default()
+    };
+
+    let result = GenericTestBuilder::new(
+        config,
+        |_| TcpExecutor::with_pool(Duration::from_secs(5), 100, ConnectionPolicy::KeepAlive),
+        Box::new(move |_| {
+            Box::new(
+                SimpleTcpGenerator::new(targets.clone(), payload.clone(), TcpFraming::Raw, true)
+                    .with_mode(TcpTestMode::RR)
+                    .with_request_size(64)
+                    .with_response_size(256),
+            ) as Box<dyn RequestGenerator<Spec = TcpRequestSpec>>
+        }),
+        Box::new(|_| {
+            Box::new(TcpNoopTransformer) as Box<dyn RequestTransformer<Spec = TcpRequestSpec>>
+        }),
+    )
+    .run()
+    .expect("test run failed");
+
+    assert_eq!(
+        result.total_errors, 0,
+        "expected 0 errors with v2 RR mode, got {}",
+        result.total_errors
+    );
+    assert!(
+        result.total_requests > 0,
+        "expected some requests completed with v2 header"
+    );
+}
+
+#[test]
+fn test_latency_injection() {
+    let server = netanvil_test_servers::TestServer::builder()
+        .tcp(0)
+        .workers(1)
+        .pin_cores(false)
+        .build();
+    let tcp_addr = server.tcp_addr().unwrap();
+    let targets = vec![tcp_addr];
+    let payload = vec![0u8; 64];
+
+    let config = TestConfig {
+        targets: vec![format!("{}", tcp_addr)],
+        duration: Duration::from_secs(5),
+        rate: RateConfig::Static { rps: 1000.0 },
+        num_cores: 1,
+        error_status_threshold: 0,
+        ..Default::default()
+    };
+
+    let result = GenericTestBuilder::new(
+        config,
+        |_| TcpExecutor::with_pool(Duration::from_secs(5), 100, ConnectionPolicy::KeepAlive),
+        Box::new(move |_| {
+            Box::new(
+                SimpleTcpGenerator::new(targets.clone(), payload.clone(), TcpFraming::Raw, true)
+                    .with_mode(TcpTestMode::RR)
+                    .with_request_size(64)
+                    .with_response_size(256)
+                    .with_latency_us(5000), // 5ms injection
+            ) as Box<dyn RequestGenerator<Spec = TcpRequestSpec>>
+        }),
+        Box::new(|_| {
+            Box::new(TcpNoopTransformer) as Box<dyn RequestTransformer<Spec = TcpRequestSpec>>
+        }),
+    )
+    .run()
+    .expect("test run failed");
+
+    assert_eq!(
+        result.total_errors, 0,
+        "expected 0 errors with latency injection, got {}",
+        result.total_errors
+    );
+    assert!(
+        result.total_requests > 0,
+        "expected some requests completed"
+    );
+    // p50 should reflect the 5ms injection floor.
+    assert!(
+        result.latency_p50 >= Duration::from_millis(5),
+        "p50 latency should be >= 5ms with 5ms injection, got {:?}",
+        result.latency_p50
+    );
+    assert!(
+        result.latency_p50 < Duration::from_millis(25),
+        "p50 latency should be < 25ms (bounded above injection), got {:?}",
+        result.latency_p50
+    );
+}
+
+#[test]
+fn test_error_injection() {
+    let server = netanvil_test_servers::TestServer::builder()
+        .tcp(0)
+        .workers(1)
+        .pin_cores(false)
+        .build();
+    let tcp_addr = server.tcp_addr().unwrap();
+    let targets = vec![tcp_addr];
+    let payload = vec![0u8; 64];
+
+    let config = TestConfig {
+        targets: vec![format!("{}", tcp_addr)],
+        duration: Duration::from_secs(10),
+        rate: RateConfig::Static { rps: 2000.0 },
+        num_cores: 1,
+        error_status_threshold: 0,
+        connections: netanvil_types::ConnectionConfig {
+            connection_policy: ConnectionPolicy::AlwaysNew,
+            request_timeout: Duration::from_secs(5),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let result = GenericTestBuilder::new(
+        config,
+        |_| TcpExecutor::with_pool(Duration::from_secs(5), 200, ConnectionPolicy::AlwaysNew),
+        Box::new(move |_| {
+            Box::new(
+                SimpleTcpGenerator::new(targets.clone(), payload.clone(), TcpFraming::Raw, true)
+                    .with_mode(TcpTestMode::RR)
+                    .with_request_size(64)
+                    .with_response_size(256)
+                    .with_error_rate(1000), // 10% error rate
+            ) as Box<dyn RequestGenerator<Spec = TcpRequestSpec>>
+        }),
+        Box::new(|_| {
+            Box::new(TcpNoopTransformer) as Box<dyn RequestTransformer<Spec = TcpRequestSpec>>
+        }),
+    )
+    .run()
+    .expect("test run failed");
+
+    assert!(
+        result.total_requests > 0,
+        "expected some requests completed"
+    );
+
+    // With 10% error injection, observed error rate should be between 5% and 20%.
+    let error_rate = result.total_errors as f64 / result.total_requests as f64;
+    assert!(
+        (0.05..=0.20).contains(&error_rate),
+        "error rate should be between 5% and 20% with 10% injection, got {:.1}% ({} errors / {} requests)",
+        error_rate * 100.0,
+        result.total_errors,
+        result.total_requests
     );
 }

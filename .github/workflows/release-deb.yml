@@ -37,7 +37,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential pkg-config scdoc git curl ca-certificates \
-            libc6-dev
+            libc6-dev libssl-dev cmake
 
       - uses: actions/checkout@v4
         with:

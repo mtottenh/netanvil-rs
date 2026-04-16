@@ -98,7 +98,7 @@ impl RequestExecutor for TcpExecutor {
 
         let bytes_sent = match spec.mode {
             TcpTestMode::Echo => spec.payload.len() as u64,
-            TcpTestMode::RR => spec.request_size as u64,
+            TcpTestMode::RR | TcpTestMode::CRR => spec.request_size as u64,
             TcpTestMode::Sink | TcpTestMode::Bidir => spec.payload.len() as u64,
             TcpTestMode::Source => 0,
         };
@@ -183,6 +183,7 @@ impl TcpExecutor {
             TcpTestMode::Sink => self.do_sink(&mut conn, spec).await,
             TcpTestMode::Source => self.do_source(&mut conn, spec).await,
             TcpTestMode::Bidir => self.do_bidir(&mut conn, spec).await,
+            TcpTestMode::CRR => self.do_rr(&mut conn, spec).await,
         };
 
         let (response_size, ttfb) = match io_result {
@@ -199,7 +200,8 @@ impl TcpExecutor {
         let content_transfer = total.saturating_sub(tcp_connect).saturating_sub(ttfb);
 
         // 4. Return to pool or drop based on policy
-        if self.should_keep_connection() {
+        // CRR always drops — single transaction per connection by definition.
+        if spec.mode != TcpTestMode::CRR && self.should_keep_connection() {
             self.pool.borrow_mut().return_idle(conn);
         } else {
             self.pool.borrow_mut().record_dropped();

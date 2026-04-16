@@ -26,6 +26,8 @@ pub struct SimpleTcpGenerator {
     response_size_sampler: Sampler<u32>,
     index: usize,
     rng: SmallRng,
+    latency_us: Option<u32>,
+    error_rate: Option<u32>,
 }
 
 impl SimpleTcpGenerator {
@@ -46,6 +48,8 @@ impl SimpleTcpGenerator {
             response_size_sampler: Sampler::new(&ValueDistribution::Fixed(0)),
             index: 0,
             rng: SmallRng::from_entropy(),
+            latency_us: None,
+            error_rate: None,
         }
     }
 
@@ -82,6 +86,18 @@ impl SimpleTcpGenerator {
         self.response_size_sampler = Sampler::new(&dist);
         self
     }
+
+    /// Set server-side latency injection in microseconds (v2 protocol header).
+    pub fn with_latency_us(mut self, us: u32) -> Self {
+        self.latency_us = Some(us);
+        self
+    }
+
+    /// Set server-side error injection rate per 10,000 requests (v2 protocol header).
+    pub fn with_error_rate(mut self, rate: u32) -> Self {
+        self.error_rate = Some(rate);
+        self
+    }
 }
 
 impl RequestGenerator for SimpleTcpGenerator {
@@ -103,6 +119,8 @@ impl RequestGenerator for SimpleTcpGenerator {
             mode: self.mode,
             request_size,
             response_size,
+            latency_us: self.latency_us,
+            error_rate: self.error_rate,
         }
     }
 

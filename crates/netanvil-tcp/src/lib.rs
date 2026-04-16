@@ -26,6 +26,6 @@ pub use executor::TcpExecutor;
 pub use framing::{encode_frame, read_framed};
 pub use generator::SimpleTcpGenerator;
 pub use pool::ConnectionPool;
-pub use protocol::{encode_header, parse_header, HEADER_SIZE};
+pub use protocol::{encode_header, MODE_CRR, VERSION_V2};
 pub use spec::{TcpFraming, TcpRequestSpec, TcpTestMode};
 pub use transformer::TcpNoopTransformer;

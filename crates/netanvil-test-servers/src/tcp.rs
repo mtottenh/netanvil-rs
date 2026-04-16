@@ -331,17 +331,40 @@ async fn handle_tcp_connection(
     handle_tcp_protocol(&mut observed, pool, metrics).await;
 }
 
-/// Protocol detection and dispatch.
+/// Read exactly `needed` bytes from the stream, starting from whatever is
+/// already in `header_bytes`. Returns `None` on I/O error.
+async fn read_header_bytes(
+    stream: &mut ObservedStream<'_>,
+    header_bytes: &mut Vec<u8>,
+    needed: usize,
+) -> bool {
+    use compio::io::AsyncReadExt;
+    while header_bytes.len() < needed {
+        let remaining = needed - header_bytes.len();
+        let tmp = vec![0u8; remaining];
+        let result = stream.read_exact(tmp).await;
+        match result.0 {
+            Ok(_) => {
+                header_bytes.extend_from_slice(&result.1);
+            }
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+/// Protocol detection and dispatch (v2 only).
+///
+/// If the first byte is the v2 sentinel (>= 0xF0), reads the full header and
+/// dispatches to the appropriate mode handler. Otherwise falls back to echo.
 async fn handle_tcp_protocol(
     stream: &mut ObservedStream<'_>,
     pool: &BufPool,
     metrics: &WorkerMetrics,
 ) {
-    use compio::io::{AsyncReadExt, AsyncWriteExt};
+    use compio::io::AsyncWriteExt;
 
     // Read initial data into a pooled buffer.
-    // compio read() uses buf capacity, but the pool buffer has
-    // capacity == len == buf_size, same as vec![0u8; 65536].
     let buf = pool.take();
     let BufResult(result, buf) = stream.read(buf).await;
     let n = match result {
@@ -356,47 +379,44 @@ async fn handle_tcp_protocol(
         }
     };
 
-    // Quick check: is the first byte a valid protocol mode?
     let first_byte = buf[0];
-    let could_be_protocol = matches!(
-        first_byte,
-        protocol::MODE_RR | protocol::MODE_SINK | protocol::MODE_SOURCE | protocol::MODE_BIDIR
-    );
 
-    if could_be_protocol && n >= protocol::HEADER_SIZE {
-        if let Some(header) = protocol::parse_header(&buf[..protocol::HEADER_SIZE]) {
-            let leftover = buf[protocol::HEADER_SIZE..n].to_vec();
-            pool.give(buf);
+    if protocol::is_protocol_sentinel(first_byte) {
+        // Protocol header detected. Need at least 2 bytes to read header_len.
+        let mut header_bytes = buf[..n].to_vec();
+        pool.give(buf);
+
+        if header_bytes.len() < 2 {
+            if !read_header_bytes(stream, &mut header_bytes, 2).await {
+                return;
+            }
+        }
+
+        let header_len = header_bytes[1] as usize;
+        if header_len < protocol::HEADER_MIN {
+            // Invalid header — fall through to echo.
+            let BufResult(result, _) = stream.write_all(header_bytes).await;
+            if result.is_err() {
+                return;
+            }
+            handle_echo_loop(stream, pool, metrics).await;
+            return;
+        }
+
+        // Read remaining header bytes if needed.
+        if header_bytes.len() < header_len {
+            if !read_header_bytes(stream, &mut header_bytes, header_len).await {
+                return;
+            }
+        }
+
+        if let Some(header) = protocol::parse_header(&header_bytes[..header_len]) {
+            let leftover = header_bytes[header_len..].to_vec();
             dispatch_protocol(stream, header, leftover, pool, metrics).await;
             return;
         }
-        pool.give(buf);
-    } else if could_be_protocol && n < protocol::HEADER_SIZE {
-        let mut header_bytes = buf[..n].to_vec();
-        pool.give(buf);
-        while header_bytes.len() < protocol::HEADER_SIZE {
-            let remaining = protocol::HEADER_SIZE - header_bytes.len();
-            let tmp = vec![0u8; remaining];
-            let result = stream.read_exact(tmp).await;
-            match result.0 {
-                Ok(_) => {
-                    header_bytes.extend_from_slice(&result.1);
-                }
-                Err(_) => {
-                    let data = header_bytes;
-                    let BufResult(result, _) = stream.write_all(data).await;
-                    if result.is_err() {
-                        return;
-                    }
-                    handle_echo_loop(stream, pool, metrics).await;
-                    return;
-                }
-            }
-        }
-        if let Some(header) = protocol::parse_header(&header_bytes) {
-            dispatch_protocol(stream, header, Vec::new(), pool, metrics).await;
-            return;
-        }
+
+        // Failed to parse — echo back what we got.
         let BufResult(result, _) = stream.write_all(header_bytes).await;
         if result.is_err() {
             return;
@@ -419,7 +439,7 @@ async fn handle_tcp_protocol(
 /// Dispatch to the appropriate protocol mode handler.
 async fn dispatch_protocol(
     stream: &mut ObservedStream<'_>,
-    header: protocol::ProtocolHeader,
+    header: protocol::ParsedHeader,
     leftover: Vec<u8>,
     pool: &BufPool,
     metrics: &WorkerMetrics,
@@ -430,6 +450,8 @@ async fn dispatch_protocol(
                 stream,
                 header.request_size,
                 header.response_size,
+                header.latency_us,
+                header.error_rate,
                 leftover,
                 pool,
                 metrics,
@@ -440,13 +462,33 @@ async fn dispatch_protocol(
             handle_sink(stream, pool, metrics).await;
         }
         protocol::MODE_SOURCE => {
-            handle_source(stream, header.response_size, pool, metrics).await;
+            handle_source(
+                stream,
+                header.response_size,
+                header.latency_us,
+                pool,
+                metrics,
+            )
+            .await;
         }
         protocol::MODE_BIDIR => {
             handle_bidir(
                 stream,
                 header.request_size,
                 header.response_size,
+                leftover,
+                pool,
+                metrics,
+            )
+            .await;
+        }
+        protocol::MODE_CRR => {
+            handle_crr(
+                stream,
+                header.request_size,
+                header.response_size,
+                header.latency_us,
+                header.error_rate,
                 leftover,
                 pool,
                 metrics,
@@ -469,6 +511,8 @@ async fn handle_rr(
     stream: &mut ObservedStream<'_>,
     request_size: u16,
     response_size: u32,
+    latency_us: Option<u32>,
+    error_rate: Option<u32>,
     leftover: Vec<u8>,
     pool: &BufPool,
     metrics: &WorkerMetrics,
@@ -477,6 +521,8 @@ async fn handle_rr(
 
     let resp_size = response_size as usize;
     let req_size = request_size as usize;
+
+    let mut rng = SmallRng::from_entropy();
 
     // Take one buffer from the pool for the lifetime of this connection.
     // write_all returns the buffer unchanged, so we reuse it directly
@@ -521,6 +567,25 @@ async fn handle_rr(
             first = false;
         }
 
+        // Error injection: truncate response and close connection.
+        if let Some(rate) = error_rate {
+            if rng.gen_range(0..10000u32) < rate {
+                let half = resp_size / 2;
+                if half > 0 {
+                    let err_buf = vec![0xEE_u8; half];
+                    let BufResult(_, _) = stream.write_all(err_buf).await;
+                }
+                metrics.inc_errors();
+                pool.give(resp_buf);
+                return; // close connection
+            }
+        }
+
+        // Latency injection: sleep before writing response.
+        if let Some(us) = latency_us {
+            compio::time::sleep(Duration::from_micros(us as u64)).await;
+        }
+
         // Write exactly response_size bytes. write_all returns the buffer
         // unchanged, so we reuse it directly — zero allocations per iteration.
         if response_size > 0 {
@@ -535,6 +600,82 @@ async fn handle_rr(
         metrics.inc_requests_completed();
     }
     pool.give(resp_buf);
+}
+
+/// CRR mode: single request-response, then close.
+async fn handle_crr(
+    stream: &mut ObservedStream<'_>,
+    request_size: u16,
+    response_size: u32,
+    latency_us: Option<u32>,
+    error_rate: Option<u32>,
+    leftover: Vec<u8>,
+    pool: &BufPool,
+    metrics: &WorkerMetrics,
+) {
+    use compio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let resp_size = response_size as usize;
+    let req_size = request_size as usize;
+
+    // Read request payload.
+    if request_size > 0 {
+        if !leftover.is_empty() {
+            if leftover.len() < req_size {
+                let remaining = req_size - leftover.len();
+                let tmp = vec![0u8; remaining];
+                let result = stream.read_exact(tmp).await;
+                if result.0.is_err() {
+                    return;
+                }
+            }
+        } else {
+            let req_buf = vec![0u8; req_size];
+            let result = stream.read_exact(req_buf).await;
+            if result.0.is_err() {
+                return;
+            }
+        }
+        metrics.add_bytes_received(req_size as u64);
+    }
+
+    // Error injection.
+    if let Some(rate) = error_rate {
+        let mut rng = SmallRng::from_entropy();
+        if rng.gen_range(0..10000u32) < rate {
+            let half = resp_size / 2;
+            if half > 0 {
+                let err_buf = vec![0xEE_u8; half];
+                let BufResult(_, _) = stream.write_all(err_buf).await;
+            }
+            metrics.inc_errors();
+            return;
+        }
+    }
+
+    // Latency injection.
+    if let Some(us) = latency_us {
+        compio::time::sleep(Duration::from_micros(us as u64)).await;
+    }
+
+    // Write response.
+    if response_size > 0 {
+        let mut resp_buf = pool.take();
+        if resp_buf.len() > resp_size {
+            resp_buf.truncate(resp_size);
+        } else if resp_buf.len() < resp_size {
+            resp_buf.resize(resp_size, 0xAA);
+        }
+        let BufResult(result, resp_buf) = stream.write_all(resp_buf).await;
+        pool.give(resp_buf);
+        if result.is_err() {
+            return;
+        }
+        metrics.add_bytes_sent(resp_size as u64);
+    }
+
+    metrics.inc_requests_completed();
+    // Handler returns — connection closes.
 }
 
 /// SINK mode: read and discard all incoming data.
@@ -558,6 +699,7 @@ async fn handle_sink(stream: &mut ObservedStream<'_>, pool: &BufPool, metrics: &
 async fn handle_source(
     stream: &mut ObservedStream<'_>,
     chunk_size: u32,
+    latency_us: Option<u32>,
     pool: &BufPool,
     metrics: &WorkerMetrics,
 ) {
@@ -574,6 +716,9 @@ async fn handle_source(
     }
 
     loop {
+        if let Some(us) = latency_us {
+            compio::time::sleep(Duration::from_micros(us as u64)).await;
+        }
         let BufResult(result, returned) = stream.write_all(buf).await;
         buf = returned;
         if result.is_err() {
@@ -596,7 +741,17 @@ async fn handle_bidir(
     pool: &BufPool,
     metrics: &WorkerMetrics,
 ) {
-    handle_rr(stream, request_size, response_size, leftover, pool, metrics).await;
+    handle_rr(
+        stream,
+        request_size,
+        response_size,
+        None,
+        None,
+        leftover,
+        pool,
+        metrics,
+    )
+    .await;
 }
 
 /// Echo loop: read data, write it back. Used after the initial bytes have

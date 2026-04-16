@@ -26,6 +26,8 @@ pub enum TcpTestMode {
     Source,
     /// Protocol header 0x04. Both sides send/receive simultaneously.
     Bidir,
+    /// Protocol header 0x05. Connect-Request-Response-Close per transaction.
+    CRR,
 }
 
 /// Protocol-specific request specification for raw TCP load testing.
@@ -48,6 +50,10 @@ pub struct TcpRequestSpec {
     pub request_size: u16,
     /// Response payload size in bytes (used in protocol header for RR/Source/Bidir).
     pub response_size: u32,
+    /// Server-side latency injection in microseconds (v2 protocol header).
+    pub latency_us: Option<u32>,
+    /// Server-side error injection rate per 10,000 requests (v2 protocol header).
+    pub error_rate: Option<u32>,
 }
 
 impl ProtocolSpec for TcpRequestSpec {}

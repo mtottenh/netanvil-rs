@@ -1396,3 +1396,250 @@ fn test_error_injection() {
         result.total_requests
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6B: UDP Behavior Control
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_udp_drop_simulation() {
+    use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
+
+    // Validate server-side drop simulation via server metrics. The client-side
+    // error rate is unreliable because the UDP executor's response mixing
+    // amplifies drops: when the server drops task A's echo, task A may receive
+    // task B's echo (seq mismatch), causing task B to time out too.
+    let server = netanvil_test_servers::TestServer::builder()
+        .udp(0)
+        .workers(1)
+        .pin_cores(false)
+        .udp_drop_rate(1000) // 10%
+        .build();
+    let udp_addr = server.udp_addr().unwrap();
+    let targets = vec![udp_addr];
+    let payload = vec![0u8; 64];
+
+    let config = TestConfig {
+        targets: vec![format!("{}", udp_addr)],
+        duration: Duration::from_secs(5),
+        rate: RateConfig::Static { rps: 1000.0 },
+        num_cores: 1,
+        error_status_threshold: 0,
+        ..Default::default()
+    };
+
+    let _result = GenericTestBuilder::new(
+        config,
+        |_| UdpExecutor::with_timeout(Duration::from_secs(2)),
+        Box::new(move |_| {
+            Box::new(SimpleUdpGenerator::new(
+                targets.clone(),
+                payload.clone(),
+                true,
+            )) as Box<dyn RequestGenerator<Spec = UdpRequestSpec>>
+        }),
+        Box::new(|_| {
+            Box::new(UdpNoopTransformer) as Box<dyn RequestTransformer<Spec = UdpRequestSpec>>
+        }),
+    )
+    .run()
+    .expect("test run failed");
+
+    std::thread::sleep(Duration::from_millis(500));
+    let metrics = server.metrics_snapshot();
+
+    // Server should have received datagrams
+    assert!(
+        metrics.datagrams_received > 0,
+        "expected server datagrams_received > 0, got {}",
+        metrics.datagrams_received
+    );
+
+    // Server should report dropped datagrams
+    assert!(
+        metrics.datagrams_dropped > 0,
+        "expected server datagrams_dropped > 0, got {}",
+        metrics.datagrams_dropped
+    );
+
+    // Server-side drop ratio should be approximately 10%
+    let server_drop_rate = metrics.datagrams_dropped as f64 / metrics.datagrams_received as f64;
+    assert!(
+        (0.05..=0.20).contains(&server_drop_rate),
+        "server drop rate should be ~10%, got {:.1}% ({} dropped / {} received)",
+        server_drop_rate * 100.0,
+        metrics.datagrams_dropped,
+        metrics.datagrams_received
+    );
+}
+
+#[test]
+fn test_udp_latency_injection_udp() {
+    use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
+
+    // In unconnected mode the echo loop is serial: recv → sleep(2ms) → send.
+    // Max throughput ≈ 475 pkt/s. Keep rate well below to avoid backlog.
+    let server = netanvil_test_servers::TestServer::builder()
+        .udp(0)
+        .workers(1)
+        .pin_cores(false)
+        .udp_latency_us(2000) // 2ms
+        .build();
+    let udp_addr = server.udp_addr().unwrap();
+    let targets = vec![udp_addr];
+    let payload = vec![0u8; 64];
+
+    let config = TestConfig {
+        targets: vec![format!("{}", udp_addr)],
+        duration: Duration::from_secs(8),
+        rate: RateConfig::Static { rps: 200.0 },
+        num_cores: 1,
+        error_status_threshold: 0,
+        ..Default::default()
+    };
+
+    let result = GenericTestBuilder::new(
+        config,
+        |_| UdpExecutor::with_timeout(Duration::from_secs(2)),
+        Box::new(move |_| {
+            Box::new(SimpleUdpGenerator::new(
+                targets.clone(),
+                payload.clone(),
+                true,
+            )) as Box<dyn RequestGenerator<Spec = UdpRequestSpec>>
+        }),
+        Box::new(|_| {
+            Box::new(UdpNoopTransformer) as Box<dyn RequestTransformer<Spec = UdpRequestSpec>>
+        }),
+    )
+    .run()
+    .expect("test run failed");
+
+    assert_eq!(
+        result.total_errors, 0,
+        "expected 0 errors with UDP latency injection, got {}",
+        result.total_errors
+    );
+    assert!(
+        result.latency_p50 >= Duration::from_millis(2),
+        "p50 latency should be >= 2ms with 2ms injection, got {:?}",
+        result.latency_p50
+    );
+    assert!(
+        result.latency_p50 < Duration::from_millis(15),
+        "p50 latency should be < 15ms (bounded above), got {:?}",
+        result.latency_p50
+    );
+}
+
+#[test]
+fn test_udp_pacing() {
+    use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
+
+    // 100 KB/s pacing with 64-byte payloads. Client sends at 10k RPS
+    // (unconstrained ~640 KB/s), so pacing should clearly constrain.
+    let server = netanvil_test_servers::TestServer::builder()
+        .udp(0)
+        .workers(1)
+        .pin_cores(false)
+        .udp_idle_timeout(30)
+        .udp_pacing_bps(102400) // 100 KB/s
+        .build();
+    let udp_addr = server.udp_addr().unwrap();
+    let targets = vec![udp_addr];
+    let payload = vec![0u8; 64];
+
+    let config = TestConfig {
+        targets: vec![format!("{}", udp_addr)],
+        duration: Duration::from_secs(10),
+        rate: RateConfig::Static { rps: 10000.0 },
+        num_cores: 1,
+        error_status_threshold: 0,
+        ..Default::default()
+    };
+
+    let _result = GenericTestBuilder::new(
+        config,
+        |_| UdpExecutor::with_timeout(Duration::from_secs(2)),
+        Box::new(move |_| {
+            Box::new(SimpleUdpGenerator::new(
+                targets.clone(),
+                payload.clone(),
+                true,
+            )) as Box<dyn RequestGenerator<Spec = UdpRequestSpec>>
+        }),
+        Box::new(|_| {
+            Box::new(UdpNoopTransformer) as Box<dyn RequestTransformer<Spec = UdpRequestSpec>>
+        }),
+    )
+    .run()
+    .expect("test run failed");
+
+    std::thread::sleep(Duration::from_millis(500));
+    let metrics = server.metrics_snapshot();
+
+    // Server bytes_sent per second should be near the pacing rate.
+    // Allow wide tolerance for initial burst and timer jitter.
+    let bytes_per_sec = metrics.bytes_sent as f64 / 10.0;
+    assert!(
+        bytes_per_sec >= 60_000.0,
+        "bytes/sec too low: {:.0} (expected >= 60000 with 100 KB/s pacing)",
+        bytes_per_sec
+    );
+    assert!(
+        bytes_per_sec <= 180_000.0,
+        "bytes/sec too high: {:.0} (expected <= 180000 with 100 KB/s pacing)",
+        bytes_per_sec
+    );
+}
+
+#[test]
+fn test_udp_behavior_backward_compat() {
+    use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
+
+    // All behavior fields default to 0 — no drop, no latency, no pacing.
+    let server = netanvil_test_servers::TestServer::builder()
+        .udp(0)
+        .workers(1)
+        .pin_cores(false)
+        .build();
+    let udp_addr = server.udp_addr().unwrap();
+    let targets = vec![udp_addr];
+    let payload = vec![0u8; 64];
+
+    let config = TestConfig {
+        targets: vec![format!("{}", udp_addr)],
+        duration: Duration::from_secs(3),
+        rate: RateConfig::Static { rps: 1000.0 },
+        num_cores: 1,
+        error_status_threshold: 0,
+        ..Default::default()
+    };
+
+    let result = GenericTestBuilder::new(
+        config,
+        |_| UdpExecutor::with_timeout(Duration::from_secs(2)),
+        Box::new(move |_| {
+            Box::new(SimpleUdpGenerator::new(
+                targets.clone(),
+                payload.clone(),
+                true,
+            )) as Box<dyn RequestGenerator<Spec = UdpRequestSpec>>
+        }),
+        Box::new(|_| {
+            Box::new(UdpNoopTransformer) as Box<dyn RequestTransformer<Spec = UdpRequestSpec>>
+        }),
+    )
+    .run()
+    .expect("test run failed");
+
+    assert_eq!(
+        result.total_errors, 0,
+        "expected 0 errors with default UDP behavior config, got {}",
+        result.total_errors
+    );
+    assert!(
+        result.total_requests > 0,
+        "expected some requests completed"
+    );
+}

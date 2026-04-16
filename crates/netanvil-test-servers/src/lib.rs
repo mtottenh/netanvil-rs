@@ -206,6 +206,13 @@ impl TestServerBuilder {
         self
     }
 
+    /// Serve Prometheus exposition format on the given port.
+    /// Shorthand for `.report_mode(ReportMode::Prometheus { port })`.
+    pub fn prometheus(mut self, port: u16) -> Self {
+        self.config.report_mode = ReportMode::Prometheus { port };
+        self
+    }
+
     /// Set the metrics reporting interval in seconds.
     pub fn report_interval(mut self, secs: f64) -> Self {
         self.config.report_interval_secs = secs;

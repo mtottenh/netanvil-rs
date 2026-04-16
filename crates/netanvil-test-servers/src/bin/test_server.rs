@@ -39,7 +39,8 @@ struct Args {
     #[arg(long, default_value = "30")]
     udp_idle_timeout: u32,
 
-    /// Metrics reporting mode: none, text (iperf3-style), json.
+    /// Metrics reporting mode: none, text (iperf3-style), json,
+    /// or prometheus:PORT (e.g. prometheus:9090).
     #[arg(long, default_value = "none")]
     report: String,
 
@@ -64,10 +65,18 @@ fn main() {
         })
     });
 
-    let report_mode = match args.report.as_str() {
-        "text" => ReportMode::Text,
-        "json" => ReportMode::Json,
-        _ => ReportMode::None,
+    let report_mode = if let Some(port_str) = args.report.strip_prefix("prometheus:") {
+        let port: u16 = port_str.parse().unwrap_or_else(|_| {
+            eprintln!("Invalid prometheus port: '{}'", port_str);
+            std::process::exit(1);
+        });
+        ReportMode::Prometheus { port }
+    } else {
+        match args.report.as_str() {
+            "text" => ReportMode::Text,
+            "json" => ReportMode::Json,
+            _ => ReportMode::None,
+        }
     };
 
     let config = netanvil_test_servers::ServerConfig {

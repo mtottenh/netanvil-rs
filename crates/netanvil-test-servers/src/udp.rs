@@ -21,6 +21,7 @@ use compio::buf::BufResult;
 use compio::net::SocketOpts;
 
 use crate::bufpool::BufPool;
+use crate::metrics::WorkerMetrics;
 use crate::tcp::make_pool;
 use crate::ServerConfig;
 
@@ -89,12 +90,14 @@ pub fn start_udp_echo_with_config(config: ServerConfig) -> UdpEchoHandle {
                 tracing::info!("UDP echo server listening on {}", local_addr);
 
                 let pool = Rc::new(make_pool(&config, 65536, 64));
+                let metrics = Arc::new(WorkerMetrics::new());
                 udp_echo_loop(
                     socket,
                     &shutdown_clone,
                     &pool,
                     config.udp_idle_timeout_secs,
                     local_port,
+                    &metrics,
                 )
                 .await;
             });
@@ -129,11 +132,20 @@ pub(crate) async fn udp_echo_loop(
     pool: &BufPool,
     idle_timeout_secs: u32,
     local_port: u16,
+    metrics: &WorkerMetrics,
 ) {
     if idle_timeout_secs > 0 {
-        udp_echo_loop_connected(socket, shutdown, pool, idle_timeout_secs, local_port).await;
+        udp_echo_loop_connected(
+            socket,
+            shutdown,
+            pool,
+            idle_timeout_secs,
+            local_port,
+            metrics,
+        )
+        .await;
     } else {
-        udp_echo_loop_unconnected(socket, shutdown, pool).await;
+        udp_echo_loop_unconnected(socket, shutdown, pool, metrics).await;
     }
 }
 
@@ -142,6 +154,7 @@ async fn udp_echo_loop_unconnected(
     socket: compio::net::UdpSocket,
     shutdown: &AtomicBool,
     pool: &BufPool,
+    metrics: &WorkerMetrics,
 ) {
     let mut error_count: u64 = 0;
 
@@ -157,6 +170,8 @@ async fn udp_echo_loop_unconnected(
 
         match recv_result {
             Ok(BufResult(Ok((n, peer)), recv_buf)) => {
+                metrics.inc_datagrams_received();
+                metrics.add_bytes_received(n as u64);
                 let mut send_buf = pool.take();
                 send_buf.truncate(n);
                 if send_buf.len() < n {
@@ -165,12 +180,19 @@ async fn udp_echo_loop_unconnected(
                 send_buf[..n].copy_from_slice(&recv_buf[..n]);
                 pool.give(recv_buf);
 
-                let BufResult(_, returned) = socket.send_to(send_buf, peer).await;
+                let BufResult(result, returned) = socket.send_to(send_buf, peer).await;
                 pool.give(returned);
+                if result.is_ok() {
+                    metrics.inc_datagrams_sent();
+                    metrics.add_bytes_sent(n as u64);
+                } else {
+                    metrics.inc_datagrams_dropped();
+                }
             }
             Ok(BufResult(Err(e), recv_buf)) => {
                 pool.give(recv_buf);
                 error_count += 1;
+                metrics.inc_errors();
                 if error_count <= MAX_LOGGED_ERRORS {
                     tracing::warn!(
                         "UDP recv error ({}/{}): {}",
@@ -200,6 +222,7 @@ async fn udp_echo_loop_connected(
     pool: &BufPool,
     idle_timeout_secs: u32,
     local_port: u16,
+    metrics: &WorkerMetrics,
 ) {
     let idle_timeout = Duration::from_secs(idle_timeout_secs as u64);
     let active_clients: Rc<RefCell<HashSet<SocketAddr>>> = Rc::new(RefCell::new(HashSet::new()));
@@ -217,6 +240,8 @@ async fn udp_echo_loop_connected(
 
         match recv_result {
             Ok(BufResult(Ok((n, peer)), recv_buf)) => {
+                metrics.inc_datagrams_received();
+                metrics.add_bytes_received(n as u64);
                 let is_known = active_clients.borrow().contains(&peer);
 
                 if is_known {
@@ -229,8 +254,14 @@ async fn udp_echo_loop_connected(
                     }
                     send_buf[..n].copy_from_slice(&recv_buf[..n]);
                     pool.give(recv_buf);
-                    let BufResult(_, returned) = socket.send_to(send_buf, peer).await;
+                    let BufResult(result, returned) = socket.send_to(send_buf, peer).await;
                     pool.give(returned);
+                    if result.is_ok() {
+                        metrics.inc_datagrams_sent();
+                        metrics.add_bytes_sent(n as u64);
+                    } else {
+                        metrics.inc_datagrams_dropped();
+                    }
                 } else {
                     // New peer: echo first packet on listener, then spawn connected handler.
                     let mut send_buf = pool.take();
@@ -240,8 +271,14 @@ async fn udp_echo_loop_connected(
                     }
                     send_buf[..n].copy_from_slice(&recv_buf[..n]);
                     pool.give(recv_buf);
-                    let BufResult(_, returned) = socket.send_to(send_buf, peer).await;
+                    let BufResult(result, returned) = socket.send_to(send_buf, peer).await;
                     pool.give(returned);
+                    if result.is_ok() {
+                        metrics.inc_datagrams_sent();
+                        metrics.add_bytes_sent(n as u64);
+                    } else {
+                        metrics.inc_datagrams_dropped();
+                    }
 
                     // Create connected socket
                     match crate::create_connected_udp(local_port, peer, 4 * 1024 * 1024) {
@@ -256,12 +293,17 @@ async fn udp_echo_loop_connected(
                                     let sd_ref = unsafe { &*sd_flag };
                                     let handler_pool = pool as *const BufPool;
                                     let handler_pool_ref = unsafe { &*handler_pool };
+                                    let metrics_ptr = metrics as *const WorkerMetrics;
                                     compio::runtime::spawn(async move {
+                                        // SAFETY: metrics outlives all spawned tasks (same
+                                        // argument as shutdown and pool raw pointers above).
+                                        let m = unsafe { &*metrics_ptr };
                                         handle_connected_udp_client(
                                             connected,
                                             sd_ref,
                                             handler_pool_ref,
                                             idle_timeout,
+                                            m,
                                         )
                                         .await;
                                         clients.borrow_mut().remove(&peer);
@@ -291,6 +333,7 @@ async fn udp_echo_loop_connected(
             Ok(BufResult(Err(e), recv_buf)) => {
                 pool.give(recv_buf);
                 error_count += 1;
+                metrics.inc_errors();
                 if error_count <= MAX_LOGGED_ERRORS {
                     tracing::warn!(
                         "UDP recv error ({}/{}): {}",
@@ -320,6 +363,7 @@ async fn handle_connected_udp_client(
     shutdown: &AtomicBool,
     pool: &BufPool,
     idle_timeout: Duration,
+    metrics: &WorkerMetrics,
 ) {
     let mut last_activity = Instant::now();
 
@@ -341,6 +385,8 @@ async fn handle_connected_udp_client(
                     break;
                 }
                 last_activity = Instant::now();
+                metrics.inc_datagrams_received();
+                metrics.add_bytes_received(n as u64);
                 let mut send_buf = pool.take();
                 send_buf.truncate(n);
                 if send_buf.len() < n {
@@ -348,8 +394,14 @@ async fn handle_connected_udp_client(
                 }
                 send_buf[..n].copy_from_slice(&recv_buf[..n]);
                 pool.give(recv_buf);
-                let BufResult(_, returned) = socket.send(send_buf).await;
+                let BufResult(result, returned) = socket.send(send_buf).await;
                 pool.give(returned);
+                if result.is_ok() {
+                    metrics.inc_datagrams_sent();
+                    metrics.add_bytes_sent(n as u64);
+                } else {
+                    metrics.inc_datagrams_dropped();
+                }
             }
             Ok(BufResult(Err(_), recv_buf)) => {
                 pool.give(recv_buf);

@@ -1,4 +1,5 @@
 use clap::Parser;
+use netanvil_test_servers::reporter::ReportMode;
 use netanvil_test_servers::TestServer;
 
 #[derive(Parser)]
@@ -37,6 +38,14 @@ struct Args {
     /// per-client connected sockets for kernel-level demuxing.
     #[arg(long, default_value = "30")]
     udp_idle_timeout: u32,
+
+    /// Metrics reporting mode: none, text (iperf3-style), json.
+    #[arg(long, default_value = "none")]
+    report: String,
+
+    /// Metrics reporting interval in seconds.
+    #[arg(long, default_value = "1.0")]
+    report_interval: f64,
 }
 
 fn main() {
@@ -50,9 +59,17 @@ fn main() {
         })
     });
 
+    let report_mode = match args.report.as_str() {
+        "text" => ReportMode::Text,
+        "json" => ReportMode::Json,
+        _ => ReportMode::None,
+    };
+
     let config = netanvil_test_servers::ServerConfig {
         fill_pattern,
         udp_idle_timeout_secs: args.udp_idle_timeout,
+        report_mode,
+        report_interval_secs: args.report_interval,
         ..Default::default()
     };
 

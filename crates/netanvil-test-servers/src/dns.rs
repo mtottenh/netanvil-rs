@@ -18,6 +18,7 @@ use compio::net::{SocketOpts, UdpSocket};
 use compio::BufResult;
 
 use crate::bufpool::BufPool;
+use crate::metrics::WorkerMetrics;
 use crate::tcp::make_pool;
 use crate::ServerConfig;
 
@@ -77,12 +78,14 @@ pub fn start_dns_echo_with_config(config: ServerConfig) -> DnsEchoHandle {
                 addr_tx.send(local_addr).unwrap();
 
                 let pool = Rc::new(make_pool(&config, 4096, 32));
+                let metrics = Arc::new(WorkerMetrics::new());
                 dns_echo_loop(
                     sock,
                     &shutdown_clone,
                     &pool,
                     config.udp_idle_timeout_secs,
                     local_port,
+                    &metrics,
                 )
                 .await;
             });
@@ -112,16 +115,22 @@ pub(crate) async fn dns_echo_loop(
     pool: &BufPool,
     idle_timeout_secs: u32,
     local_port: u16,
+    metrics: &WorkerMetrics,
 ) {
     if idle_timeout_secs > 0 {
-        dns_echo_loop_connected(sock, shutdown, pool, idle_timeout_secs, local_port).await;
+        dns_echo_loop_connected(sock, shutdown, pool, idle_timeout_secs, local_port, metrics).await;
     } else {
-        dns_echo_loop_unconnected(sock, shutdown, pool).await;
+        dns_echo_loop_unconnected(sock, shutdown, pool, metrics).await;
     }
 }
 
 /// Unconnected DNS echo loop — original behavior.
-async fn dns_echo_loop_unconnected(sock: UdpSocket, shutdown: &AtomicBool, pool: &BufPool) {
+async fn dns_echo_loop_unconnected(
+    sock: UdpSocket,
+    shutdown: &AtomicBool,
+    pool: &BufPool,
+    metrics: &WorkerMetrics,
+) {
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
@@ -132,16 +141,26 @@ async fn dns_echo_loop_unconnected(sock: UdpSocket, shutdown: &AtomicBool, pool:
 
         match recv {
             Ok(BufResult(Ok((n, peer)), recv_buf)) => {
+                metrics.inc_datagrams_received();
+                metrics.add_bytes_received(n as u64);
                 if n >= 12 {
                     let response = build_response(&recv_buf[..n]);
+                    let resp_len = response.len();
                     pool.give(recv_buf);
-                    let BufResult(_, _) = sock.send_to(response, peer).await;
+                    let BufResult(result, _) = sock.send_to(response, peer).await;
+                    if result.is_ok() {
+                        metrics.inc_datagrams_sent();
+                        metrics.add_bytes_sent(resp_len as u64);
+                    } else {
+                        metrics.inc_datagrams_dropped();
+                    }
                 } else {
                     pool.give(recv_buf);
                 }
             }
             Ok(BufResult(Err(_), recv_buf)) => {
                 pool.give(recv_buf);
+                metrics.inc_errors();
             }
             Err(_timeout) => {
                 continue;
@@ -157,6 +176,7 @@ async fn dns_echo_loop_connected(
     pool: &BufPool,
     idle_timeout_secs: u32,
     local_port: u16,
+    metrics: &WorkerMetrics,
 ) {
     let idle_timeout = Duration::from_secs(idle_timeout_secs as u64);
     let active_clients: Rc<RefCell<HashSet<SocketAddr>>> = Rc::new(RefCell::new(HashSet::new()));
@@ -171,14 +191,23 @@ async fn dns_echo_loop_connected(
 
         match recv {
             Ok(BufResult(Ok((n, peer)), recv_buf)) => {
+                metrics.inc_datagrams_received();
+                metrics.add_bytes_received(n as u64);
                 let is_known = active_clients.borrow().contains(&peer);
 
                 if is_known {
                     // Race window fallback: respond on listener.
                     if n >= 12 {
                         let response = build_response(&recv_buf[..n]);
+                        let resp_len = response.len();
                         pool.give(recv_buf);
-                        let BufResult(_, _) = sock.send_to(response, peer).await;
+                        let BufResult(result, _) = sock.send_to(response, peer).await;
+                        if result.is_ok() {
+                            metrics.inc_datagrams_sent();
+                            metrics.add_bytes_sent(resp_len as u64);
+                        } else {
+                            metrics.inc_datagrams_dropped();
+                        }
                     } else {
                         pool.give(recv_buf);
                     }
@@ -186,8 +215,15 @@ async fn dns_echo_loop_connected(
                     // New peer: respond on listener, then spawn connected handler.
                     if n >= 12 {
                         let response = build_response(&recv_buf[..n]);
+                        let resp_len = response.len();
                         pool.give(recv_buf);
-                        let BufResult(_, _) = sock.send_to(response, peer).await;
+                        let BufResult(result, _) = sock.send_to(response, peer).await;
+                        if result.is_ok() {
+                            metrics.inc_datagrams_sent();
+                            metrics.add_bytes_sent(resp_len as u64);
+                        } else {
+                            metrics.inc_datagrams_dropped();
+                        }
                     } else {
                         pool.give(recv_buf);
                     }
@@ -201,12 +237,17 @@ async fn dns_echo_loop_connected(
                                 let sd_ref = unsafe { &*sd_flag };
                                 let handler_pool = pool as *const BufPool;
                                 let handler_pool_ref = unsafe { &*handler_pool };
+                                let metrics_ptr = metrics as *const WorkerMetrics;
                                 compio::runtime::spawn(async move {
+                                    // SAFETY: metrics outlives all spawned tasks (same
+                                    // argument as shutdown and pool raw pointers above).
+                                    let m = unsafe { &*metrics_ptr };
                                     handle_connected_dns_client(
                                         connected,
                                         sd_ref,
                                         handler_pool_ref,
                                         idle_timeout,
+                                        m,
                                     )
                                     .await;
                                     clients.borrow_mut().remove(&peer);
@@ -233,6 +274,7 @@ async fn dns_echo_loop_connected(
             }
             Ok(BufResult(Err(_), recv_buf)) => {
                 pool.give(recv_buf);
+                metrics.inc_errors();
             }
             Err(_timeout) => {
                 continue;
@@ -247,6 +289,7 @@ async fn handle_connected_dns_client(
     shutdown: &AtomicBool,
     pool: &BufPool,
     idle_timeout: Duration,
+    metrics: &WorkerMetrics,
 ) {
     let mut last_activity = Instant::now();
 
@@ -268,10 +311,19 @@ async fn handle_connected_dns_client(
                     break;
                 }
                 last_activity = Instant::now();
+                metrics.inc_datagrams_received();
+                metrics.add_bytes_received(n as u64);
                 if n >= 12 {
                     let response = build_response(&recv_buf[..n]);
+                    let resp_len = response.len();
                     pool.give(recv_buf);
-                    let BufResult(_, _) = socket.send(response).await;
+                    let BufResult(result, _) = socket.send(response).await;
+                    if result.is_ok() {
+                        metrics.inc_datagrams_sent();
+                        metrics.add_bytes_sent(resp_len as u64);
+                    } else {
+                        metrics.inc_datagrams_dropped();
+                    }
                 } else {
                     pool.give(recv_buf);
                 }

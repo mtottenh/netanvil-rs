@@ -8,9 +8,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::metrics::{ServerMetricsSummary, WorkerMetrics};
+use crate::reporter::ReportMode;
+
 pub mod bufpool;
 pub mod dns;
+pub mod metrics;
 pub mod protocol;
+pub mod reporter;
 pub mod tcp;
 pub mod udp;
 
@@ -42,6 +47,10 @@ pub struct ServerConfig {
     /// When > 0, the server creates per-client connected sockets for kernel-level
     /// demuxing and route caching.
     pub udp_idle_timeout_secs: u32,
+    /// Metrics reporting mode (None, Text, Json). Default: None.
+    pub report_mode: ReportMode,
+    /// Metrics reporting interval in seconds. Default: 1.0.
+    pub report_interval_secs: f64,
 }
 
 impl Default for ServerConfig {
@@ -55,6 +64,8 @@ impl Default for ServerConfig {
             pin_cores: true,
             fill_pattern: None,
             udp_idle_timeout_secs: 0,
+            report_mode: ReportMode::None,
+            report_interval_secs: 1.0,
         }
     }
 }
@@ -85,6 +96,7 @@ pub struct TestServer {
     dns_addr: Option<SocketAddr>,
     workers: Vec<std::thread::JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
+    worker_metrics: Vec<Arc<WorkerMetrics>>,
 }
 
 impl TestServer {
@@ -107,6 +119,16 @@ impl TestServer {
 
     pub fn dns_addr(&self) -> Option<SocketAddr> {
         self.dns_addr
+    }
+
+    /// Read the current aggregate metrics across all workers.
+    ///
+    /// Returns a point-in-time snapshot — counters are read with `Relaxed`
+    /// ordering so individual fields may be from slightly different instants,
+    /// but each counter is internally consistent.
+    pub fn metrics_snapshot(&self) -> ServerMetricsSummary {
+        let snapshots: Vec<_> = self.worker_metrics.iter().map(|m| m.snapshot()).collect();
+        ServerMetricsSummary::from_snapshots(&snapshots)
     }
 }
 
@@ -166,6 +188,18 @@ impl TestServerBuilder {
         self
     }
 
+    /// Set the metrics reporting mode.
+    pub fn report_mode(mut self, mode: ReportMode) -> Self {
+        self.config.report_mode = mode;
+        self
+    }
+
+    /// Set the metrics reporting interval in seconds.
+    pub fn report_interval(mut self, secs: f64) -> Self {
+        self.config.report_interval_secs = secs;
+        self
+    }
+
     /// Override the full server configuration.
     pub fn config(mut self, config: ServerConfig) -> Self {
         self.config = config;
@@ -199,10 +233,15 @@ impl TestServerBuilder {
         let (ready_tx, ready_rx) = flume::bounded::<()>(num_workers);
         let mut workers = Vec::with_capacity(num_workers);
 
-        for i in 0..num_workers {
+        let all_metrics: Vec<Arc<WorkerMetrics>> = (0..num_workers)
+            .map(|_| Arc::new(WorkerMetrics::new()))
+            .collect();
+
+        for (i, worker_metrics_arc) in all_metrics.iter().enumerate().take(num_workers) {
             let shutdown = shutdown.clone();
             let config = self.config.clone();
             let ready_tx = ready_tx.clone();
+            let worker_metrics = worker_metrics_arc.clone();
 
             let thread = std::thread::Builder::new()
                 .name(format!("test-server-{}", i))
@@ -278,8 +317,9 @@ impl TestServerBuilder {
                             let sd = shutdown.clone();
                             let cfg = config.clone();
                             let pool = std::rc::Rc::new(crate::tcp::make_pool(&config, 65536, 256));
+                            let wm = worker_metrics.clone();
                             compio::runtime::spawn(async move {
-                                crate::tcp::tcp_accept_loop(listener, &sd, &cfg, pool).await;
+                                crate::tcp::tcp_accept_loop(listener, &sd, &cfg, pool, wm).await;
                             })
                             .detach();
                         }
@@ -289,6 +329,7 @@ impl TestServerBuilder {
                             let pool = std::rc::Rc::new(crate::tcp::make_pool(&config, 65536, 64));
                             let idle_timeout_secs = config.udp_idle_timeout_secs;
                             let local_port = udp_port.unwrap();
+                            let wm = worker_metrics.clone();
                             compio::runtime::spawn(async move {
                                 crate::udp::udp_echo_loop(
                                     socket,
@@ -296,6 +337,7 @@ impl TestServerBuilder {
                                     &pool,
                                     idle_timeout_secs,
                                     local_port,
+                                    &wm,
                                 )
                                 .await;
                             })
@@ -307,6 +349,7 @@ impl TestServerBuilder {
                             let pool = std::rc::Rc::new(crate::tcp::make_pool(&config, 4096, 32));
                             let idle_timeout_secs = config.udp_idle_timeout_secs;
                             let local_port = dns_port.unwrap();
+                            let wm = worker_metrics.clone();
                             compio::runtime::spawn(async move {
                                 crate::dns::dns_echo_loop(
                                     socket,
@@ -314,6 +357,7 @@ impl TestServerBuilder {
                                     &pool,
                                     idle_timeout_secs,
                                     local_port,
+                                    &wm,
                                 )
                                 .await;
                             })
@@ -352,6 +396,7 @@ impl TestServerBuilder {
             dns_addr,
             workers,
             shutdown,
+            worker_metrics: all_metrics,
         }
     }
 }

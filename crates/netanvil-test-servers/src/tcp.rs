@@ -17,6 +17,7 @@ use compio::buf::BufResult;
 use compio::net::SocketOpts;
 
 use crate::bufpool::BufPool;
+use crate::metrics::WorkerMetrics;
 use crate::protocol;
 use crate::ServerConfig;
 
@@ -83,7 +84,8 @@ pub fn start_tcp_echo_with_config(config: ServerConfig) -> TcpEchoHandle {
                 tracing::info!("TCP echo server listening on {}", local_addr);
 
                 let pool = Rc::new(make_pool(&config, 65536, 256));
-                tcp_accept_loop(listener, &shutdown_clone, &config, pool).await;
+                let metrics = Arc::new(WorkerMetrics::new());
+                tcp_accept_loop(listener, &shutdown_clone, &config, pool, metrics).await;
             });
         })
         .expect("failed to spawn TCP echo server thread");
@@ -117,6 +119,7 @@ pub(crate) async fn tcp_accept_loop(
     shutdown: &AtomicBool,
     config: &ServerConfig,
     pool: Rc<BufPool>,
+    metrics: Arc<WorkerMetrics>,
 ) {
     let stream_opts = SocketOpts::new()
         .nodelay(true)
@@ -154,16 +157,20 @@ pub(crate) async fn tcp_accept_loop(
                 }
 
                 active_connections.set(active_connections.get() + 1);
+                metrics.inc_connections_accepted();
                 let counter = Rc::clone(&active_connections);
                 let pool = Rc::clone(&pool);
+                let task_metrics = metrics.clone();
                 compio::runtime::spawn(async move {
-                    handle_tcp_connection(stream, &pool).await;
+                    handle_tcp_connection(stream, &pool, &task_metrics).await;
                     counter.set(counter.get() - 1);
+                    task_metrics.inc_connections_closed();
                 })
                 .detach();
             }
             Ok(Err(e)) => {
                 tracing::warn!("TCP accept error: {}", e);
+                metrics.inc_errors();
             }
             Err(_timeout) => {
                 continue;
@@ -172,7 +179,11 @@ pub(crate) async fn tcp_accept_loop(
     }
 }
 
-async fn handle_tcp_connection(mut stream: compio::net::TcpStream, pool: &BufPool) {
+async fn handle_tcp_connection(
+    mut stream: compio::net::TcpStream,
+    pool: &BufPool,
+    metrics: &WorkerMetrics,
+) {
     use compio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
     // Read initial data into a pooled buffer.
@@ -203,7 +214,7 @@ async fn handle_tcp_connection(mut stream: compio::net::TcpStream, pool: &BufPoo
         if let Some(header) = protocol::parse_header(&buf[..protocol::HEADER_SIZE]) {
             let leftover = buf[protocol::HEADER_SIZE..n].to_vec();
             pool.give(buf);
-            dispatch_protocol(&mut stream, header, leftover, pool).await;
+            dispatch_protocol(&mut stream, header, leftover, pool, metrics).await;
             return;
         }
         pool.give(buf);
@@ -224,30 +235,31 @@ async fn handle_tcp_connection(mut stream: compio::net::TcpStream, pool: &BufPoo
                     if result.is_err() {
                         return;
                     }
-                    handle_echo_loop(&mut stream, pool).await;
+                    handle_echo_loop(&mut stream, pool, metrics).await;
                     return;
                 }
             }
         }
         if let Some(header) = protocol::parse_header(&header_bytes) {
-            dispatch_protocol(&mut stream, header, Vec::new(), pool).await;
+            dispatch_protocol(&mut stream, header, Vec::new(), pool, metrics).await;
             return;
         }
         let BufResult(result, _) = stream.write_all(header_bytes).await;
         if result.is_err() {
             return;
         }
-        handle_echo_loop(&mut stream, pool).await;
-        return;
+        handle_echo_loop(&mut stream, pool, metrics).await;
     } else {
         // Not a protocol header — echo back what we received.
         let data = buf[..n].to_vec();
         pool.give(buf);
+        metrics.add_bytes_received(n as u64);
+        metrics.add_bytes_sent(n as u64);
         let BufResult(result, _) = stream.write_all(data).await;
         if result.is_err() {
             return;
         }
-        handle_echo_loop(&mut stream, pool).await;
+        handle_echo_loop(&mut stream, pool, metrics).await;
     }
 }
 
@@ -257,6 +269,7 @@ async fn dispatch_protocol(
     header: protocol::ProtocolHeader,
     leftover: Vec<u8>,
     pool: &BufPool,
+    metrics: &WorkerMetrics,
 ) {
     match header.mode {
         protocol::MODE_RR => {
@@ -266,14 +279,15 @@ async fn dispatch_protocol(
                 header.response_size,
                 leftover,
                 pool,
+                metrics,
             )
             .await;
         }
         protocol::MODE_SINK => {
-            handle_sink(stream, pool).await;
+            handle_sink(stream, pool, metrics).await;
         }
         protocol::MODE_SOURCE => {
-            handle_source(stream, header.response_size, pool).await;
+            handle_source(stream, header.response_size, pool, metrics).await;
         }
         protocol::MODE_BIDIR => {
             handle_bidir(
@@ -282,6 +296,7 @@ async fn dispatch_protocol(
                 header.response_size,
                 leftover,
                 pool,
+                metrics,
             )
             .await;
         }
@@ -299,10 +314,12 @@ async fn handle_rr(
     response_size: u32,
     leftover: Vec<u8>,
     pool: &BufPool,
+    metrics: &WorkerMetrics,
 ) {
     use compio::io::{AsyncReadExt, AsyncWriteExt};
 
     let resp_size = response_size as usize;
+    let req_size = request_size as usize;
 
     // Take one buffer from the pool for the lifetime of this connection.
     // write_all returns the buffer unchanged, so we reuse it directly
@@ -324,7 +341,7 @@ async fn handle_rr(
         if request_size > 0 {
             if first && !leftover.is_empty() {
                 first = false;
-                let need = request_size as usize;
+                let need = req_size;
                 if leftover.len() < need {
                     let remaining = need - leftover.len();
                     let tmp = vec![0u8; remaining];
@@ -333,13 +350,15 @@ async fn handle_rr(
                         break;
                     }
                 }
+                metrics.add_bytes_received(req_size as u64);
             } else {
                 first = false;
-                let req_buf = vec![0u8; request_size as usize];
+                let req_buf = vec![0u8; req_size];
                 let result = stream.read_exact(req_buf).await;
                 if result.0.is_err() {
                     break;
                 }
+                metrics.add_bytes_received(req_size as u64);
             }
         } else {
             first = false;
@@ -353,13 +372,16 @@ async fn handle_rr(
             if result.is_err() {
                 break;
             }
+            metrics.add_bytes_sent(resp_size as u64);
         }
+
+        metrics.inc_requests_completed();
     }
     pool.give(resp_buf);
 }
 
 /// SINK mode: read and discard all incoming data.
-async fn handle_sink(stream: &mut compio::net::TcpStream, pool: &BufPool) {
+async fn handle_sink(stream: &mut compio::net::TcpStream, pool: &BufPool, metrics: &WorkerMetrics) {
     use compio::io::AsyncRead;
 
     let mut buf = pool.take();
@@ -367,8 +389,10 @@ async fn handle_sink(stream: &mut compio::net::TcpStream, pool: &BufPool) {
         let BufResult(result, b) = stream.read(buf).await;
         buf = b;
         match result {
-            Ok(0) => break,    // EOF
-            Ok(_) => continue, // discard
+            Ok(0) => break, // EOF
+            Ok(n) => {
+                metrics.add_bytes_received(n as u64);
+            }
             Err(_) => break,
         }
     }
@@ -376,7 +400,12 @@ async fn handle_sink(stream: &mut compio::net::TcpStream, pool: &BufPool) {
 }
 
 /// SOURCE mode: write response_size-byte chunks continuously.
-async fn handle_source(stream: &mut compio::net::TcpStream, chunk_size: u32, pool: &BufPool) {
+async fn handle_source(
+    stream: &mut compio::net::TcpStream,
+    chunk_size: u32,
+    pool: &BufPool,
+    metrics: &WorkerMetrics,
+) {
     use compio::io::AsyncWriteExt;
 
     let size = chunk_size as usize;
@@ -395,6 +424,7 @@ async fn handle_source(stream: &mut compio::net::TcpStream, chunk_size: u32, poo
         if result.is_err() {
             break;
         }
+        metrics.add_bytes_sent(size as u64);
     }
     pool.give(buf);
 }
@@ -409,13 +439,18 @@ async fn handle_bidir(
     response_size: u32,
     leftover: Vec<u8>,
     pool: &BufPool,
+    metrics: &WorkerMetrics,
 ) {
-    handle_rr(stream, request_size, response_size, leftover, pool).await;
+    handle_rr(stream, request_size, response_size, leftover, pool, metrics).await;
 }
 
 /// Echo loop: read data, write it back. Used after the initial bytes have
 /// already been echoed for non-protocol connections.
-async fn handle_echo_loop(stream: &mut compio::net::TcpStream, pool: &BufPool) {
+async fn handle_echo_loop(
+    stream: &mut compio::net::TcpStream,
+    pool: &BufPool,
+    metrics: &WorkerMetrics,
+) {
     use compio::io::{AsyncRead, AsyncWriteExt};
 
     let mut buf = pool.take();
@@ -425,6 +460,7 @@ async fn handle_echo_loop(stream: &mut compio::net::TcpStream, pool: &BufPool) {
         match result {
             Ok(0) => break,
             Ok(n) => {
+                metrics.add_bytes_received(n as u64);
                 // Take a write buffer from pool, copy read data into it.
                 let mut write_buf = pool.take();
                 write_buf.truncate(n);
@@ -438,6 +474,7 @@ async fn handle_echo_loop(stream: &mut compio::net::TcpStream, pool: &BufPool) {
                 if result.is_err() {
                     break;
                 }
+                metrics.add_bytes_sent(n as u64);
             }
             Err(_) => break,
         }

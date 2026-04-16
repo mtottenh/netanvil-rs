@@ -27,15 +27,14 @@ const SEQ_HEADER_LEN: usize = 8;
 /// SENDMSG/RECVMSG — no sockaddr per packet).
 ///
 /// Unlike TCP, UDP datagrams are independent and atomic — multiple concurrent
-/// send/recv operations on the same socket fd are safe. The socket is shared
-/// via `RefCell::borrow()` (immutable), allowing all in-flight tasks on a
-/// core to perform I/O concurrently through io_uring. With response mixing
-/// (task A may receive task B's echo), per-request sequence correlation is
-/// approximate, but aggregate loss tracking via the [`LossTracker`] bitmap
-/// remains accurate.
+/// send/recv operations on the same socket fd are safe. The socket is handed
+/// out as an `Rc<UdpSocket>` clone per request, so tasks perform their I/O
+/// awaits without holding the `RefCell` borrow. With response mixing (task A
+/// may receive task B's echo), per-request sequence correlation is approximate,
+/// but aggregate loss tracking via the [`LossTracker`] bitmap remains accurate.
 pub struct UdpExecutor {
     request_timeout: Duration,
-    socket: RefCell<Option<compio::net::UdpSocket>>,
+    socket: RefCell<Option<Rc<compio::net::UdpSocket>>>,
     connected_to: Cell<Option<SocketAddr>>,
     tracker: Rc<RefCell<LossTracker>>,
 }
@@ -65,41 +64,52 @@ impl UdpExecutor {
         }
     }
 
-    /// Ensure the socket is initialized and connected to `target`.
+    /// Ensure the socket is initialized and connected to `target`, returning
+    /// an `Rc` clone for the caller to use across its own await points.
     ///
-    /// Fast path: socket exists and is connected — no-op.
+    /// Fast path: socket exists and is connected — clone the `Rc` and return.
     /// Slow path: create, bind, connect. If two tasks race through the slow
     /// path, the first to finish stores its socket; the second detects the
-    /// existing socket after its own `.await` and drops its duplicate.
-    async fn ensure_socket(&self, target: SocketAddr) -> Result<(), ExecutionError> {
+    /// existing matching socket after its own `.await` and returns that one,
+    /// dropping its own duplicate.
+    ///
+    /// No `RefCell` borrow is ever held across an `.await`, so concurrent
+    /// tasks can safely mutate the stored socket without conflicting with
+    /// in-flight send/recv on earlier `Rc` clones.
+    async fn ensure_socket(
+        &self,
+        target: SocketAddr,
+    ) -> Result<Rc<compio::net::UdpSocket>, ExecutionError> {
         {
             let guard = self.socket.borrow();
-            if guard.is_some() && self.connected_to.get() == Some(target) {
-                return Ok(());
+            if let Some(sock) = guard.as_ref() {
+                if self.connected_to.get() == Some(target) {
+                    return Ok(sock.clone());
+                }
             }
         } // Ref drops here — no borrow held across await
 
-        // Slow path: need to create + connect.
-        // Drop the old socket first (brief borrow_mut, no await).
-        *self.socket.borrow_mut() = None;
-
+        // Slow path: create + connect a fresh socket.
         let sock = compio::net::UdpSocket::bind("0.0.0.0:0")
             .await
             .map_err(|e| ExecutionError::Connect(format!("UDP bind: {e}")))?;
         sock.connect(target)
             .await
             .map_err(|e| ExecutionError::Connect(format!("UDP connect: {e}")))?;
+        let sock = Rc::new(sock);
 
-        // Double-check: another task may have initialized during our await.
+        // Another task may have raced us. If their stored socket matches our
+        // target, use theirs and drop ours.
         let mut guard = self.socket.borrow_mut();
-        if guard.is_none() || self.connected_to.get() != Some(target) {
-            *guard = Some(sock);
-            drop(guard);
-            self.connected_to.set(Some(target));
+        if let Some(existing) = guard.as_ref() {
+            if self.connected_to.get() == Some(target) {
+                return Ok(existing.clone());
+            }
         }
-        // else: another task beat us — drop our socket silently
-
-        Ok(())
+        *guard = Some(sock.clone());
+        drop(guard);
+        self.connected_to.set(Some(target));
+        Ok(sock)
     }
 }
 
@@ -199,23 +209,14 @@ impl RequestExecutor for UdpExecutor {
 }
 
 impl UdpExecutor {
-    // Holding Ref across await is intentional: on compio's single-threaded runtime,
-    // multiple tasks share the socket via concurrent immutable borrows. The only
-    // borrow_mut() is in ensure_socket(), which is a no-op once initialized.
-    #[allow(clippy::await_holding_refcell_ref)]
     async fn do_execute(
         &self,
         spec: &UdpRequestSpec,
         start: Instant,
     ) -> Result<(u64, TimingBreakdown, Option<u64>), ExecutionError> {
-        self.ensure_socket(spec.target).await?;
-
-        // Shared access: immutable borrow held across await points.
-        // Multiple Ref guards can coexist — concurrent tasks share the socket.
-        let guard = self.socket.borrow();
-        let sock = guard
-            .as_ref()
-            .ok_or_else(|| ExecutionError::Connect("socket not initialized".into()))?;
+        // Rc clone of the connected socket. No RefCell borrow is held across
+        // the send/recv awaits — another task may safely rebind the cell.
+        let sock = self.ensure_socket(spec.target).await?;
 
         // Send datagram on connected socket (no address needed).
         let BufResult(result, _returned_buf) = sock.send(spec.payload.clone()).await;
@@ -247,8 +248,6 @@ impl UdpExecutor {
                 }
             }
         }
-
-        // guard drops here — Ref released
 
         let total = start.elapsed();
         Ok((

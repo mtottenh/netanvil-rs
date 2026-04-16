@@ -21,9 +21,13 @@ pub enum ReportMode {
     Text,
     /// One JSON object per line per interval to stderr.
     Json,
+    /// Prometheus exposition format served over HTTP on the given port.
+    /// Metrics are read on-demand when scraped, no periodic timer needed.
+    Prometheus { port: u16 },
 }
 
-/// Spawn a reporter thread that prints periodic metrics to stderr.
+/// Spawn a reporter thread that prints periodic metrics to stderr,
+/// or serves a Prometheus HTTP endpoint.
 ///
 /// Returns the thread handle.  The thread exits when `shutdown` is set.
 pub(crate) fn spawn_reporter(
@@ -34,8 +38,13 @@ pub(crate) fn spawn_reporter(
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("metrics-reporter".into())
-        .spawn(move || {
-            run_reporter(&worker_metrics, &shutdown, mode, interval_secs);
+        .spawn(move || match mode {
+            ReportMode::Prometheus { port } => {
+                run_prometheus(&worker_metrics, &shutdown, port);
+            }
+            _ => {
+                run_reporter(&worker_metrics, &shutdown, mode, interval_secs);
+            }
         })
         .expect("failed to spawn metrics reporter thread")
 }
@@ -71,7 +80,7 @@ fn run_reporter(
         match mode {
             ReportMode::Text => format_text(&current, &prev, elapsed, dt),
             ReportMode::Json => format_json(&current, &prev, elapsed, dt),
-            ReportMode::None => {}
+            ReportMode::None | ReportMode::Prometheus { .. } => {}
         }
 
         prev = current;
@@ -92,7 +101,7 @@ fn run_reporter(
             format_text_rows(&current, &zeros, total_secs, total_secs, &mut out);
         }
         ReportMode::Json => format_json(&current, &zeros, total_secs, total_secs),
-        ReportMode::None => {}
+        ReportMode::None | ReportMode::Prometheus { .. } => {}
     }
 }
 
@@ -336,4 +345,212 @@ fn format_json(current: &[WorkerSnapshot], prev: &[WorkerSnapshot], elapsed: f64
         sum_lost,
         workers_json,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Prometheus exposition format served over HTTP
+// ---------------------------------------------------------------------------
+
+/// Run a blocking HTTP server that serves `/metrics` in Prometheus
+/// exposition format.  Reads `WorkerMetrics` on demand per scrape.
+/// No periodic timer — Prometheus controls the scrape interval.
+fn run_prometheus(worker_metrics: &[Arc<WorkerMetrics>], shutdown: &AtomicBool, port: u16) {
+    use std::net::TcpListener;
+
+    let addr = format!("0.0.0.0:{}", port);
+    let listener = TcpListener::bind(&addr).unwrap_or_else(|e| {
+        panic!("prometheus: failed to bind to {}: {}", addr, e);
+    });
+    listener
+        .set_nonblocking(true)
+        .expect("prometheus: set_nonblocking failed");
+
+    tracing::info!(
+        "Prometheus metrics endpoint listening on http://{}/metrics",
+        addr
+    );
+
+    while !shutdown.load(Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                handle_prometheus_request(stream, worker_metrics);
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                tracing::warn!("prometheus: accept error: {}", e);
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
+
+fn handle_prometheus_request(mut stream: std::net::TcpStream, metrics: &[Arc<WorkerMetrics>]) {
+    // Read the request (we don't parse it — serve /metrics for everything).
+    let mut req_buf = [0u8; 1024];
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = std::io::Read::read(&mut stream, &mut req_buf);
+
+    let body = format_prometheus(metrics);
+    let response = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {}",
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(response.as_bytes());
+}
+
+fn format_prometheus(metrics: &[Arc<WorkerMetrics>]) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::with_capacity(4096);
+
+    // Helper: emit one counter metric with per-worker labels.
+    macro_rules! counter {
+        ($name:expr, $help:expr, $field:ident) => {
+            let _ = writeln!(out, "# HELP {} {}", $name, $help);
+            let _ = writeln!(out, "# TYPE {} counter", $name);
+            let mut total: u64 = 0;
+            for (i, m) in metrics.iter().enumerate() {
+                let v = m.$field.load(std::sync::atomic::Ordering::Relaxed);
+                total += v;
+                let _ = writeln!(out, "{}{{worker=\"{}\"}} {}", $name, i, v);
+            }
+            let _ = writeln!(out, "{} {}", $name, total);
+        };
+    }
+
+    counter!(
+        "netanvil_server_bytes_sent_total",
+        "Total bytes sent to clients.",
+        bytes_sent
+    );
+    counter!(
+        "netanvil_server_bytes_received_total",
+        "Total bytes received from clients.",
+        bytes_received
+    );
+    counter!(
+        "netanvil_server_connections_accepted_total",
+        "Total TCP connections accepted.",
+        connections_accepted
+    );
+    counter!(
+        "netanvil_server_connections_closed_total",
+        "Total TCP connections closed.",
+        connections_closed
+    );
+    counter!(
+        "netanvil_server_requests_completed_total",
+        "Total request-response cycles completed.",
+        requests_completed
+    );
+    counter!(
+        "netanvil_server_errors_total",
+        "Total I/O errors encountered.",
+        errors
+    );
+    counter!(
+        "netanvil_server_datagrams_received_total",
+        "Total UDP/DNS datagrams received.",
+        datagrams_received
+    );
+    counter!(
+        "netanvil_server_datagrams_sent_total",
+        "Total UDP/DNS datagrams sent.",
+        datagrams_sent
+    );
+    counter!(
+        "netanvil_server_datagrams_dropped_total",
+        "Total UDP/DNS datagrams dropped (send failures).",
+        datagrams_dropped
+    );
+    counter!(
+        "netanvil_server_tcp_retransmits_total",
+        "Total TCP retransmits from TCP_INFO sampling.",
+        tcp_retransmits
+    );
+    counter!(
+        "netanvil_server_tcp_lost_total",
+        "Total TCP lost segments from TCP_INFO sampling.",
+        tcp_lost
+    );
+
+    // Derived gauge: connections currently active (accepted - closed).
+    {
+        let _ = writeln!(
+            out,
+            "# HELP netanvil_server_connections_active Current active TCP connections."
+        );
+        let _ = writeln!(out, "# TYPE netanvil_server_connections_active gauge");
+        let mut total_accepted: u64 = 0;
+        let mut total_closed: u64 = 0;
+        for (i, m) in metrics.iter().enumerate() {
+            let acc = m
+                .connections_accepted
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let cls = m
+                .connections_closed
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let active = acc.saturating_sub(cls);
+            total_accepted += acc;
+            total_closed += cls;
+            let _ = writeln!(
+                out,
+                "netanvil_server_connections_active{{worker=\"{}\"}} {}",
+                i, active
+            );
+        }
+        let _ = writeln!(
+            out,
+            "netanvil_server_connections_active {}",
+            total_accepted.saturating_sub(total_closed)
+        );
+    }
+
+    // Derived gauge: average TCP RTT in microseconds.
+    {
+        let _ = writeln!(
+            out,
+            "# HELP netanvil_server_tcp_rtt_avg_us Average smoothed TCP RTT (microseconds)."
+        );
+        let _ = writeln!(out, "# TYPE netanvil_server_tcp_rtt_avg_us gauge");
+        let mut total_sum: u64 = 0;
+        let mut total_count: u64 = 0;
+        for m in metrics.iter() {
+            total_sum += m.tcp_rtt_sum_us.load(std::sync::atomic::Ordering::Relaxed);
+            total_count += m.tcp_rtt_count.load(std::sync::atomic::Ordering::Relaxed);
+        }
+        let avg = if total_count > 0 {
+            total_sum as f64 / total_count as f64
+        } else {
+            0.0
+        };
+        let _ = writeln!(out, "netanvil_server_tcp_rtt_avg_us {:.1}", avg);
+    }
+
+    // Gauge: max TCP RTT.
+    {
+        let _ = writeln!(
+            out,
+            "# HELP netanvil_server_tcp_rtt_max_us Maximum smoothed TCP RTT (microseconds)."
+        );
+        let _ = writeln!(out, "# TYPE netanvil_server_tcp_rtt_max_us gauge");
+        let mut max_rtt: u64 = 0;
+        for m in metrics.iter() {
+            let v = m.tcp_rtt_max_us.load(std::sync::atomic::Ordering::Relaxed);
+            if v > max_rtt {
+                max_rtt = v;
+            }
+        }
+        let _ = writeln!(out, "netanvil_server_tcp_rtt_max_us {}", max_rtt);
+    }
+
+    out
 }

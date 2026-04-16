@@ -58,4 +58,11 @@ rate control (PID, step, composite), and multi-protocol support \
 Rhai plugins."""
 assets = [
     ["target/release/netanvil-cli", "usr/bin/", "755"],
+    ["../../man/generated/netanvil-cli.1", "usr/share/man/man1/", "644"],
+    ["../../man/generated/netanvil-cli-agent.1", "usr/share/man/man1/", "644"],
+    ["../../man/generated/netanvil-cli-leader.1", "usr/share/man/man1/", "644"],
+    ["../../man/generated/netanvil-cli-leader-server.1", "usr/share/man/man1/", "644"],
+    ["../../man/generated/netanvil-cli-test.1", "usr/share/man/man1/", "644"],
+    ["../../man/generated/netanvil-protocols.7", "usr/share/man/man7/", "644"],
+    ["../../man/generated/netanvil-rate-control.7", "usr/share/man/man7/", "644"],
 ]

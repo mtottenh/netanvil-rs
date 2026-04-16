@@ -44,6 +44,7 @@ symlinks named netanvil-tcp-echo, netanvil-udp-echo, netanvil-dns-echo for \
 single-protocol mode with clean per-protocol --help."""
 assets = [
     ["target/release/netanvil-test-server", "usr/bin/", "755"],
+    ["../../man/generated/netanvil-test-server.1", "usr/share/man/man1/", "644"],
 ]
 # Post-install: create symlinks for single-protocol invocation
 # ln -sf netanvil-test-server /usr/bin/netanvil-tcp-echo

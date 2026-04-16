@@ -137,18 +137,19 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
-# Redirect all compio crates to local fork for linked SQE support.
+# Redirect all compio crates to forks for linked SQE support.
 # This patches both our direct deps and cyper's transitive deps.
+# Branch-tracking for now; switch to `rev = "..."` pins before release.
 [patch.crates-io]
-compio = { path = "../upstream/compio/compio" }
-compio-buf = { path = "../upstream/compio/compio-buf" }
-compio-driver = { path = "../upstream/compio/compio-driver" }
-compio-runtime = { path = "../upstream/compio/compio-runtime" }
-compio-net = { path = "../upstream/compio/compio-net" }
-compio-io = { path = "../upstream/compio/compio-io" }
-compio-log = { path = "../upstream/compio/compio-log" }
-compio-macros = { path = "../upstream/compio/compio-macros" }
-compio-tls = { path = "../upstream/compio/compio-tls" }
-compio-fs = { path = "../upstream/compio/compio-fs" }
-compio-dispatcher = { path = "../upstream/compio/compio-dispatcher" }
-io-uring = { path = "../upstream/io-uring" }
+compio = { git = "https://github.com/mtottenh/compio.git", branch = "netanvil/linked-sqe" }
+compio-buf = { git = "https://github.com/mtottenh/compio.git", branch = "netanvil/linked-sqe" }
+compio-driver = { git = "https://github.com/mtottenh/compio.git", branch = "netanvil/linked-sqe" }
+compio-runtime = { git = "https://github.com/mtottenh/compio.git", branch = "netanvil/linked-sqe" }
+compio-net = { git = "https://github.com/mtottenh/compio.git", branch = "netanvil/linked-sqe" }
+compio-io = { git = "https://github.com/mtottenh/compio.git", branch = "netanvil/linked-sqe" }
+compio-log = { git = "https://github.com/mtottenh/compio.git", branch = "netanvil/linked-sqe" }
+compio-macros = { git = "https://github.com/mtottenh/compio.git", branch = "netanvil/linked-sqe" }
+compio-tls = { git = "https://github.com/mtottenh/compio.git", branch = "netanvil/linked-sqe" }
+compio-fs = { git = "https://github.com/mtottenh/compio.git", branch = "netanvil/linked-sqe" }
+compio-dispatcher = { git = "https://github.com/mtottenh/compio.git", branch = "netanvil/linked-sqe" }
+io-uring = { git = "https://github.com/mtottenh/io-uring.git", branch = "netanvil/getsockopt" }

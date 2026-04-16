@@ -113,6 +113,7 @@ fn test_tcp_connection_storm() {
 }
 
 #[test]
+#[serial_test::serial(udp)]
 fn test_udp_sustained_load() {
     use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
 
@@ -164,6 +165,7 @@ fn test_udp_sustained_load() {
 }
 
 #[test]
+#[serial_test::serial(udp)]
 fn test_udp_transient_errors_survive() {
     use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
 
@@ -314,6 +316,7 @@ fn test_tcp_multicore_connections_distributed() {
 }
 
 #[test]
+#[serial_test::serial(udp)]
 fn test_udp_multicore_throughput() {
     use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
 
@@ -520,6 +523,7 @@ fn test_tcp_source_sustained() {
 }
 
 #[test]
+#[serial_test::serial(udp)]
 fn test_udp_small_packet_flood() {
     use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
 
@@ -642,6 +646,7 @@ async fn test_response_data_has_entropy() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial(udp)]
 fn test_udp_connected_throughput() {
     use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
 
@@ -704,6 +709,7 @@ fn test_udp_connected_throughput() {
 }
 
 #[test]
+#[serial_test::serial(udp)]
 fn test_udp_connected_idle_cleanup() {
     use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
 
@@ -797,6 +803,7 @@ fn test_udp_connected_idle_cleanup() {
 }
 
 #[test]
+#[serial_test::serial(udp)]
 fn test_udp_connected_multi_client() {
     use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
 
@@ -846,6 +853,7 @@ fn test_udp_connected_multi_client() {
 }
 
 #[test]
+#[serial_test::serial(udp)]
 fn test_backward_compat_udp_unconnected() {
     use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
 
@@ -1034,6 +1042,7 @@ fn test_server_metrics_connections_tracked() {
 }
 
 #[test]
+#[serial_test::serial(udp)]
 fn test_server_metrics_udp_datagrams() {
     use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
 
@@ -1439,6 +1448,7 @@ fn build_udp_protocol_header(
 }
 
 #[compio::test]
+#[serial_test::serial(udp)]
 async fn test_udp_rr_unconnected() {
     use compio::buf::BufResult;
     use netanvil_test_servers::protocol;
@@ -1464,6 +1474,7 @@ async fn test_udp_rr_unconnected() {
 }
 
 #[compio::test]
+#[serial_test::serial(udp)]
 async fn test_udp_rr_connected() {
     use compio::buf::BufResult;
     use netanvil_test_servers::protocol;
@@ -1516,6 +1527,7 @@ async fn test_udp_rr_connected() {
 }
 
 #[compio::test]
+#[serial_test::serial(udp)]
 async fn test_udp_sink_unconnected() {
     use compio::buf::BufResult;
     use netanvil_test_servers::protocol;
@@ -1539,6 +1551,7 @@ async fn test_udp_sink_unconnected() {
 }
 
 #[compio::test]
+#[serial_test::serial(udp)]
 async fn test_udp_sink_connected() {
     use compio::buf::BufResult;
     use netanvil_test_servers::protocol;
@@ -1582,6 +1595,7 @@ async fn test_udp_sink_connected() {
 }
 
 #[compio::test]
+#[serial_test::serial(udp)]
 async fn test_udp_source_connected() {
     use compio::buf::BufResult;
     use netanvil_test_servers::protocol;
@@ -1622,6 +1636,7 @@ async fn test_udp_source_connected() {
 }
 
 #[compio::test]
+#[serial_test::serial(udp)]
 async fn test_udp_source_unconnected_rejected() {
     use compio::buf::BufResult;
     use netanvil_test_servers::protocol;
@@ -1646,6 +1661,7 @@ async fn test_udp_source_unconnected_rejected() {
 }
 
 #[compio::test]
+#[serial_test::serial(udp)]
 async fn test_udp_bidir_connected() {
     use compio::buf::BufResult;
     use netanvil_test_servers::protocol;
@@ -1700,6 +1716,7 @@ async fn test_udp_bidir_connected() {
 }
 
 #[compio::test]
+#[serial_test::serial(udp)]
 async fn test_udp_bidir_unconnected_rejected() {
     use compio::buf::BufResult;
     use netanvil_test_servers::protocol;
@@ -1722,6 +1739,7 @@ async fn test_udp_bidir_unconnected_rejected() {
 }
 
 #[compio::test]
+#[serial_test::serial(udp)]
 async fn test_udp_echo_fallback() {
     use compio::buf::BufResult;
 
@@ -1747,6 +1765,7 @@ async fn test_udp_echo_fallback() {
 }
 
 #[compio::test]
+#[serial_test::serial(udp)]
 async fn test_udp_rr_error_injection() {
     use compio::buf::BufResult;
     use netanvil_test_servers::protocol;
@@ -1781,6 +1800,7 @@ async fn test_udp_rr_error_injection() {
 }
 
 #[compio::test]
+#[serial_test::serial(udp)]
 async fn test_udp_crr_treated_as_rr() {
     use compio::buf::BufResult;
     use netanvil_test_servers::protocol;
@@ -1813,6 +1833,7 @@ async fn test_udp_crr_treated_as_rr() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial(udp)]
 fn test_udp_drop_simulation() {
     use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
 
@@ -1885,6 +1906,7 @@ fn test_udp_drop_simulation() {
 }
 
 #[test]
+#[serial_test::serial(udp)]
 fn test_udp_latency_injection_udp() {
     use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
 
@@ -1944,6 +1966,7 @@ fn test_udp_latency_injection_udp() {
 }
 
 #[test]
+#[serial_test::serial(udp)]
 fn test_udp_pacing() {
     use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
 
@@ -1966,12 +1989,19 @@ fn test_udp_pacing() {
         rate: RateConfig::Static { rps: 10000.0 },
         num_cores: 1,
         error_status_threshold: 0,
+        // Cap concurrency so the kernel's io_uring doesn't overflow pending
+        // UDP recvs into io-wq workers (they'd park in blocking recvmsg and
+        // stall ring teardown at test end).
+        connections: netanvil_types::ConnectionConfig {
+            max_in_flight_per_core: 1024,
+            ..Default::default()
+        },
         ..Default::default()
     };
 
     let _result = GenericTestBuilder::new(
         config,
-        |_| UdpExecutor::with_timeout(Duration::from_secs(2)),
+        |_| UdpExecutor::with_timeout(Duration::from_millis(200)),
         Box::new(move |_| {
             Box::new(SimpleUdpGenerator::new(
                 targets.clone(),
@@ -2005,6 +2035,7 @@ fn test_udp_pacing() {
 }
 
 #[test]
+#[serial_test::serial(udp)]
 fn test_udp_behavior_backward_compat() {
     use netanvil_udp::{SimpleUdpGenerator, UdpExecutor, UdpNoopTransformer, UdpRequestSpec};
 

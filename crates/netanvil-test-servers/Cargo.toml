@@ -29,6 +29,7 @@ netanvil-types = { workspace = true }
 netanvil-tcp = { workspace = true }
 netanvil-udp = { workspace = true }
 serde_json = { workspace = true }
+serial_test = "3"
 
 [package.metadata.deb]
 maintainer = "NetAnvil-RS Contributors"

@@ -47,10 +47,10 @@ struct Args {
     #[arg(long, default_value = "1.0")]
     report_interval: f64,
 
-    /// Sample getsockopt(TCP_INFO) on TCP connection close.
-    /// Records RTT, retransmits, and lost segments.  Requires kernel >= 6.7.
-    #[arg(long)]
-    tcp_health_sample: bool,
+    /// Fraction of TCP reads to piggyback with getsockopt(TCP_INFO) (0.0–1.0).
+    /// 0.0 = disabled, 0.01 = 1%, 1.0 = every read.  Requires kernel >= 6.7.
+    #[arg(long, default_value = "0.0")]
+    tcp_health_sample_rate: f64,
 }
 
 fn main() {
@@ -75,7 +75,7 @@ fn main() {
         udp_idle_timeout_secs: args.udp_idle_timeout,
         report_mode,
         report_interval_secs: args.report_interval,
-        tcp_health_sample: args.tcp_health_sample,
+        tcp_health_sample_rate: args.tcp_health_sample_rate,
         ..Default::default()
     };
 

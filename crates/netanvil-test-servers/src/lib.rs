@@ -51,11 +51,12 @@ pub struct ServerConfig {
     pub report_mode: ReportMode,
     /// Metrics reporting interval in seconds. Default: 1.0.
     pub report_interval_secs: f64,
-    /// Sample getsockopt(TCP_INFO) on TCP connection close via io_uring
-    /// linked SQEs.  Records RTT, retransmits, and lost segments into
-    /// server metrics.  Default: false (adds one extra SQE pair per
-    /// connection close — negligible overhead, but requires kernel >= 6.7).
-    pub tcp_health_sample: bool,
+    /// Fraction of TCP reads to piggyback with getsockopt(TCP_INFO) via
+    /// io_uring linked SQEs.  Records RTT, retransmits, and lost segments
+    /// into server metrics.  0.0 = disabled (default), 1.0 = every read,
+    /// 0.01 = ~1% of reads.  Requires kernel >= 6.7 for IORING_OP_URING_CMD;
+    /// automatically disabled with a warning on older kernels.
+    pub tcp_health_sample_rate: f64,
 }
 
 impl Default for ServerConfig {
@@ -71,7 +72,7 @@ impl Default for ServerConfig {
             udp_idle_timeout_secs: 0,
             report_mode: ReportMode::None,
             report_interval_secs: 1.0,
-            tcp_health_sample: false,
+            tcp_health_sample_rate: 0.0,
         }
     }
 }
@@ -211,10 +212,12 @@ impl TestServerBuilder {
         self
     }
 
-    /// Enable TCP_INFO sampling via io_uring linked SQEs on connection close.
-    /// Records RTT, retransmits, and lost segments.  Requires kernel >= 6.7.
-    pub fn tcp_health_sample(mut self, enable: bool) -> Self {
-        self.config.tcp_health_sample = enable;
+    /// Set the TCP_INFO sample rate (0.0–1.0).  When > 0, a fraction of TCP
+    /// reads piggyback getsockopt(TCP_INFO) via io_uring linked SQEs, recording
+    /// RTT, retransmits, and lost segments.  Requires kernel >= 6.7;
+    /// automatically disabled with a warning on older kernels.
+    pub fn tcp_health_sample_rate(mut self, rate: f64) -> Self {
+        self.config.tcp_health_sample_rate = rate;
         self
     }
 

@@ -16,6 +16,8 @@ use std::time::Duration;
 use compio::buf::{BufResult, IoBuf, IoBufMut, IoVectoredBufMut};
 use compio::io::{AsyncRead, AsyncWrite};
 use compio::net::SocketOpts;
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
 
 use crate::bufpool::BufPool;
 use crate::metrics::WorkerMetrics;
@@ -29,18 +31,19 @@ use crate::ServerConfig;
 /// TCP stream wrapper that probabilistically piggybacks `getsockopt(TCP_INFO)`
 /// on reads via io_uring linked SQEs.
 ///
-/// Mirrors the client-side `ObservedTcpStream` pattern: when sampling is
-/// enabled, `read()` submits a linked `Recv → GetSockOpt(TCP_INFO)` pair
-/// instead of a plain `Recv`. The getsockopt rides on the recv that was
-/// happening anyway — zero extra operations. When sampling is disabled
-/// (rate 0.0), delegates directly with zero overhead.
+/// Mirrors the client-side `ObservedTcpStream` pattern: on sampled reads,
+/// submits a linked `Recv → GetSockOpt(TCP_INFO)` pair instead of a plain
+/// `Recv`. The getsockopt rides on the recv that was already happening —
+/// zero extra operations. On non-sampled reads (the common case), delegates
+/// directly with zero overhead.
 ///
-/// Implements `AsyncRead` + `AsyncWrite` so it can be used as a drop-in
-/// replacement for `&TcpStream` in all handler functions.
+/// Implements `AsyncRead` + `AsyncWrite` so handlers use it as a drop-in
+/// replacement for `&TcpStream` without knowing whether sampling is active.
 struct ObservedStream<'a> {
     inner: &'a compio::net::TcpStream,
     metrics: &'a WorkerMetrics,
     sample_rate: f64,
+    rng: SmallRng,
 }
 
 impl<'a> ObservedStream<'a> {
@@ -49,15 +52,18 @@ impl<'a> ObservedStream<'a> {
         metrics: &'a WorkerMetrics,
         sample_rate: f64,
     ) -> Self {
+        use std::os::unix::io::AsRawFd;
+        let seed = inner.as_raw_fd() as u64 ^ 0xDEAD_BEEF_CAFE_BABE;
         Self {
             inner,
             metrics,
             sample_rate,
+            rng: SmallRng::seed_from_u64(seed),
         }
     }
 
-    fn should_sample(&self) -> bool {
-        self.sample_rate > 0.0
+    fn should_sample(&mut self) -> bool {
+        self.sample_rate > 0.0 && self.rng.gen::<f64>() < self.sample_rate
     }
 }
 
@@ -82,12 +88,14 @@ impl AsyncRead for ObservedStream<'_> {
                 recv_result
             }
             Err(_e) => {
-                // Linked SQE submission failed — kernel doesn't support
-                // URING_CMD (requires >= 6.7).  Same handling as client side.
-                self.sample_rate = 0.0;
+                // recv_observe consumes the buffer on Err — we cannot return
+                // a valid BufResult.  This path should be unreachable because
+                // the accept loop checks kernel support before enabling
+                // sampling.  If we somehow get here, crash with diagnostics.
                 panic!(
-                    "linked recv_observe failed: {_e}. \
-                     --tcp-health-sample requires kernel >= 6.7 with io_uring URING_CMD support"
+                    "recv_observe failed unexpectedly: {_e}. \
+                     This should not happen — kernel support is verified at startup. \
+                     Kernel >= 6.7 with io_uring URING_CMD is required."
                 );
             }
         }
@@ -109,6 +117,25 @@ impl AsyncWrite for ObservedStream<'_> {
 
     async fn shutdown(&mut self) -> std::io::Result<()> {
         self.inner.shutdown().await
+    }
+}
+
+/// Check whether the running kernel supports io_uring `IORING_OP_URING_CMD`
+/// for `getsockopt` (added in Linux 6.7).  Returns `false` on older kernels
+/// or if the version cannot be parsed.
+fn kernel_supports_uring_getsockopt() -> bool {
+    unsafe {
+        let mut info: libc::utsname = std::mem::zeroed();
+        if libc::uname(&mut info) != 0 {
+            return false;
+        }
+        let release = std::ffi::CStr::from_ptr(info.release.as_ptr());
+        let release_str = release.to_str().unwrap_or("");
+        // Parse "6.8.0-107-generic" → (6, 8)
+        let mut parts = release_str.split('.');
+        let major: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let minor: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        (major, minor) >= (6, 7)
     }
 }
 
@@ -224,7 +251,22 @@ pub(crate) async fn tcp_accept_loop(
     let active_connections = Rc::new(Cell::new(0u32));
     let max_connections = config.max_connections;
     let limit_logged = Cell::new(false);
-    let sample_rate = if config.tcp_health_sample { 1.0 } else { 0.0 };
+
+    // Verify kernel support before enabling TCP_INFO sampling.
+    let sample_rate = if config.tcp_health_sample_rate > 0.0 {
+        if kernel_supports_uring_getsockopt() {
+            config.tcp_health_sample_rate
+        } else {
+            tracing::warn!(
+                "TCP health sampling requested (rate={:.2}) but kernel does not support \
+                 io_uring URING_CMD getsockopt (requires >= 6.7). Sampling disabled.",
+                config.tcp_health_sample_rate,
+            );
+            0.0
+        }
+    } else {
+        0.0
+    };
 
     loop {
         if shutdown.load(Ordering::Relaxed) {

@@ -35,6 +35,9 @@ coverage/
 /target/doc
 /target/criterion
 
+# Generated man pages
+man/generated/
+
 # Environment
 .env
 .env.local
